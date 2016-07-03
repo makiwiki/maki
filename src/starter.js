@@ -22,7 +22,7 @@ var files = [
 ];
 
 var starter = {
-  init: function(config, cb) {
+  init: function(config) {
     var dbx = config.dbx;
     dbx.filesGetMetadata({ 'path': "/HomePage.md" })
     .then(function(response) {

@@ -122,12 +122,16 @@ function removeToken() {
 
 app.controller = function () {
   if (m.route() === '/') {
-    // console.log(m.route(), document.referrer, location.hash);
-    if (document.referrer === 'https://www.dropbox.com/' && location.hash !== "") {
+    var a = document.createElement("a");
+    a.href = document.referrer;
+    var ref = a.protocol + "//" + a.host + "/";
+    // console.log(m.route(), document.referrer, location.hash, ref);
+    if ((ref === 'https://www.dropbox.com/' || ref === auth.config.REDIRECT_URI)
+        && location.hash !== "") {
       var token = queryString.parse(location.hash).access_token;
       setToken(token);
       app.config = new app.Config({ 'token': getToken() });
-      starter.init(app.config, m.redraw);
+      starter.init(app.config);
     }
     m.route('/HomePage');
   }
