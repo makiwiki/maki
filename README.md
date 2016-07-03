@@ -13,7 +13,7 @@ Maki is a Dropbox-based personal wiki engine.
 
 * Private in principle
 * Distraction-free: integrated with cloud storage
-* Everything runs in client-side
+* Everything runs on client-side
 * Supports Markdown
 * Math rendering with KaTeX
 * Sub pages
