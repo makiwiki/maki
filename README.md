@@ -1,5 +1,7 @@
 # Maki
 
+[![Dependencies][deps-image]][deps-url]
+
 Maki is a Dropbox-based personal wiki engine.
 
 ## Table of Contents
@@ -40,3 +42,6 @@ TBA
   * Support other cloud storage services
   * Support other markup languages
   * Support plugins
+
+[deps-image]: https://david-dm.org/makiwiki/maki.svg
+[deps-url]: https://david-dm.org/makiwiki/maki
