@@ -3,9 +3,14 @@
   "version": "0.0.1",
   "description": "A Dropbox-based Personal Wiki Engine",
   "main": "./dist/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/makiwiki/maki.git"
+  },
   "scripts": {
     "start": "http-server ./dist -o",
-    "watch": "watchify ./src/index.js -o ./dist/index.js"
+    "watch": "watchify ./src/index.js -o ./dist/index.js",
+    "build": "browserify ./src/index.js -o ./dist/index.js"
   },
   "author": "nolze",
   "license": "GPL-3.0",
@@ -19,6 +24,7 @@
     "superagent": "^2.0.0"
   },
   "devDependencies": {
+    "browserify": "^13.0.1",
     "http-server": "^0.9.0",
     "uglify-js": "^2.6.4",
     "watchify": "^3.7.0"
