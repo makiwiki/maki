@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "http-server ./dist -o",
+    "lint": "eslint './src/**/*.js'",
     "watch": "watchify ./src/index.js -o ./dist/index.js",
     "build": "browserify ./src/index.js -o ./dist/index.js"
   },
@@ -21,12 +22,13 @@
     "markdown-it-katex": "^2.0.1",
     "mithril": "^0.2.5",
     "query-string": "^4.2.2",
-    "superagent": "^2.0.0"
+    "superagent": "^2.1.0"
   },
   "devDependencies": {
     "browserify": "^13.0.1",
+    "eslint": "^3.1.0",
     "http-server": "^0.9.0",
-    "uglify-js": "^2.6.4",
+    "uglify-js": "^2.7.0",
     "watchify": "^3.7.0"
   }
 }

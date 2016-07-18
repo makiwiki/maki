@@ -24055,15 +24055,6 @@ module.exports = function (str) {
 
 },{}],105:[function(require,module,exports){
 /**
- * Module dependencies.
- */
-
-var Emitter = require('emitter');
-var reduce = require('reduce');
-var requestBase = require('./request-base');
-var isObject = require('./is-object');
-
-/**
  * Root reference for iframes.
  */
 
@@ -24073,8 +24064,13 @@ if (typeof window !== 'undefined') { // Browser window
 } else if (typeof self !== 'undefined') { // Web Worker
   root = self;
 } else { // Other environments
+  console.warn("Using browser-only version of superagent in non-browser environment");
   root = this;
 }
+
+var Emitter = require('emitter');
+var requestBase = require('./request-base');
+var isObject = require('./is-object');
 
 /**
  * Noop.
@@ -24103,7 +24099,7 @@ request.getXHR = function () {
     try { return new ActiveXObject('Msxml2.XMLHTTP.3.0'); } catch(e) {}
     try { return new ActiveXObject('Msxml2.XMLHTTP'); } catch(e) {}
   }
-  return false;
+  throw Error("Browser-only verison of superagent could not find XHR");
 };
 
 /**
@@ -24308,10 +24304,10 @@ function type(str){
  */
 
 function params(str){
-  return reduce(str.split(/ *; */), function(obj, str){
-    var parts = str.split(/ *= */)
-      , key = parts.shift()
-      , val = parts.shift();
+  return str.split(/ *; */).reduce(function(obj, str){
+    var parts = str.split(/ *= */),
+        key = parts.shift(),
+        val = parts.shift();
 
     if (key && val) obj[key] = val;
     return obj;
@@ -24553,23 +24549,23 @@ function Request(method, url) {
 
     self.emit('response', res);
 
-    if (err) {
-      return self.callback(err, res);
+    var new_err;
+    try {
+      if (res.status < 200 || res.status >= 300) {
+        new_err = new Error(res.statusText || 'Unsuccessful HTTP response');
+        new_err.original = err;
+        new_err.response = res;
+        new_err.status = res.status;
+      }
+    } catch(e) {
+      new_err = e; // #985 touching res may cause INVALID_STATE_ERR on old Android
     }
 
-    try {
-      if (res.status >= 200 && res.status < 300) {
-        return self.callback(err, res);
-      }
-
-      var new_err = new Error(res.statusText || 'Unsuccessful HTTP response');
-      new_err.original = err;
-      new_err.response = res;
-      new_err.status = res.status;
-
+    // #1000 don't catch errors from the callback to avoid double calling it
+    if (new_err) {
       self.callback(new_err, res);
-    } catch(e) {
-      self.callback(e); // #985 touching res may cause INVALID_STATE_ERR on old Android
+    } else {
+      self.callback(null, res);
     }
   });
 }
@@ -24911,8 +24907,8 @@ request.Request = Request;
  * GET `url` with optional callback `fn(res)`.
  *
  * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
+ * @param {Mixed|Function} [data] or fn
+ * @param {Function} [fn]
  * @return {Request}
  * @api public
  */
@@ -24929,8 +24925,8 @@ request.get = function(url, data, fn){
  * HEAD `url` with optional callback `fn(res)`.
  *
  * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
+ * @param {Mixed|Function} [data] or fn
+ * @param {Function} [fn]
  * @return {Request}
  * @api public
  */
@@ -24947,8 +24943,8 @@ request.head = function(url, data, fn){
  * OPTIONS query to `url` with optional callback `fn(res)`.
  *
  * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
+ * @param {Mixed|Function} [data] or fn
+ * @param {Function} [fn]
  * @return {Request}
  * @api public
  */
@@ -24965,7 +24961,7 @@ request.options = function(url, data, fn){
  * DELETE `url` with optional callback `fn(res)`.
  *
  * @param {String} url
- * @param {Function} fn
+ * @param {Function} [fn]
  * @return {Request}
  * @api public
  */
@@ -24983,8 +24979,8 @@ request['delete'] = del;
  * PATCH `url` with optional `data` and callback `fn(res)`.
  *
  * @param {String} url
- * @param {Mixed} data
- * @param {Function} fn
+ * @param {Mixed} [data]
+ * @param {Function} [fn]
  * @return {Request}
  * @api public
  */
@@ -25001,8 +24997,8 @@ request.patch = function(url, data, fn){
  * POST `url` with optional `data` and callback `fn(res)`.
  *
  * @param {String} url
- * @param {Mixed} data
- * @param {Function} fn
+ * @param {Mixed} [data]
+ * @param {Function} [fn]
  * @return {Request}
  * @api public
  */
@@ -25019,8 +25015,8 @@ request.post = function(url, data, fn){
  * PUT `url` with optional `data` and callback `fn(res)`.
  *
  * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
+ * @param {Mixed|Function} [data] or fn
+ * @param {Function} [fn]
  * @return {Request}
  * @api public
  */
@@ -25033,7 +25029,7 @@ request.put = function(url, data, fn){
   return req;
 };
 
-},{"./is-object":106,"./request":108,"./request-base":107,"emitter":1,"reduce":103}],106:[function(require,module,exports){
+},{"./is-object":106,"./request":108,"./request-base":107,"emitter":1}],106:[function(require,module,exports){
 /**
  * Check if `obj` is an object.
  *
@@ -25297,7 +25293,8 @@ exports.toJSON = function(){
   return {
     method: this.method,
     url: this.url,
-    data: this._data
+    data: this._data,
+    headers: this._header
   };
 };
 
@@ -25417,26 +25414,26 @@ module.exports.Z   = require('./categories/Z/regex');
 },{"./categories/Cc/regex":109,"./categories/Cf/regex":110,"./categories/P/regex":111,"./categories/Z/regex":112,"./properties/Any/regex":114}],114:[function(require,module,exports){
 module.exports=/[\0-\uD7FF\uE000-\uFFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/
 },{}],115:[function(require,module,exports){
-'use strict';
+'use strict'
 
-var m = require('mithril');
+var m = require('mithril')
 
-var Dropbox = require('dropbox');
+var Dropbox = require('dropbox')
 
-var auth = {};
-auth.config = {};
+var auth = {}
+auth.config = {}
 
 auth.controller = function () {
   return {
-      auth: function(e) {
-        e.preventDefault();
-        var dbx = new Dropbox({ clientId: auth.config.CLIENT_ID });
-        var authUrl = dbx.getAuthenticationUrl(auth.config.REDIRECT_URI);
-        location.href = authUrl;
-        return false;
-      }
+    auth: function(e) {
+      e.preventDefault()
+      var dbx = new Dropbox({ clientId: auth.config.CLIENT_ID })
+      var authUrl = dbx.getAuthenticationUrl(auth.config.REDIRECT_URI)
+      location.href = authUrl
+      return false
+    }
   }
-};
+}
 
 auth.view = function(ctrl) {
   return [
@@ -25473,10 +25470,10 @@ auth.view = function(ctrl) {
         ])
       ])
     ])
-  ];
-};
+  ]
+}
 
-module.exports = auth;
+module.exports = auth
 
 },{"dropbox":8,"mithril":98}],116:[function(require,module,exports){
 /*
@@ -25565,95 +25562,95 @@ var downloadRequest = function (path, args, accessToken, selectUser) {
 module.exports = downloadRequest;
 
 },{"es6-promise":14,"superagent":105}],117:[function(require,module,exports){
-'use strict';
+'use strict'
 
-var Dropbox = require('dropbox');
+var Dropbox = require('dropbox')
 var md = require('markdown-it')()
          .use(require('./markdown-it-pathmod'))
-         .use(require('markdown-it-katex'));
-var queryString = require('query-string');
+         .use(require('markdown-it-katex'))
+var queryString = require('query-string')
 
-var downloadRequest = require('./download-request');
-var starter = require('./starter');
+var downloadRequest = require('./download-request')
+var starter = require('./starter')
 
-var m = require('mithril');
-m.route.mode = 'search';
+var m = require('mithril')
+m.route.mode = 'search'
 
-var app = {};
-var auth = require('./auth');
+var app = {}
+var auth = require('./auth')
 
 window.Maki = function (CLIENT_ID, REDIRECT_URI) {
-  auth.config.CLIENT_ID = CLIENT_ID;
-  auth.config.REDIRECT_URI = REDIRECT_URI;
+  auth.config.CLIENT_ID = CLIENT_ID
+  auth.config.REDIRECT_URI = REDIRECT_URI
   document.addEventListener("DOMContentLoaded", function(event) {
     m.route(document.body, '/', {
       '/': app,
       '/:name...': app
-    });
-  });
+    })
+  })
 }
 
 app.Config = function(data) {
-  this.dbx = new Dropbox({ accessToken: data.token });
-};
+  this.dbx = new Dropbox({ accessToken: data.token })
+}
 
 app.Page = function(data) {
-  this.name = m.prop("");
-  this.content = m.prop("");
-};
+  this.name = m.prop("")
+  this.content = m.prop("")
+}
 
 app.vm = (function() {
-    var vm = {};
-    vm.init = function() {
-      vm.page = new app.Page();
-    }
-    return vm;
+  var vm = {}
+  vm.init = function() {
+    vm.page = new app.Page()
+  }
+  return vm
 }())
 
 app.renderPage = function(name) {
-  var dbx = app.config.dbx;
-  var path = "/" + name + ".md";
-  // m.startComputation();
+  var dbx = app.config.dbx
+  var path = "/" + name + ".md"
+  // m.startComputation()
   downloadRequest('files/download', { 'path': path }, dbx.getAccessToken(), dbx.selectUser)
   .then(function(response) {
-    var blobURL = response.objectDownloadUrl;
-    var xhr = new XMLHttpRequest();
+    var blobURL = response.objectDownloadUrl
+    var xhr = new XMLHttpRequest()
     xhr.onload = function() {
-        var blob = xhr.response;
-        var reader = new FileReader();
-        reader.onload = function() {
-            var buffer = reader.result;
-            var html = md.render(buffer);
-            app.vm.page.content(m('div', { 'id': "content" }, m.trust(html)));
-            m.redraw();
-            // m.endComputation();
-        };
-        reader.readAsText(blob, "utf-8");
-    };
-    xhr.responseType = "blob";
-    xhr.open("GET", blobURL);
-    xhr.send();
+      var blob = xhr.response
+      var reader = new FileReader()
+      reader.onload = function() {
+        var buffer = reader.result
+        var html = md.render(buffer)
+        app.vm.page.content(m('div', { 'id': "content" }, m.trust(html)))
+        m.redraw()
+        // m.endComputation()
+      }
+      reader.readAsText(blob, "utf-8")
+    }
+    xhr.responseType = "blob"
+    xhr.open("GET", blobURL)
+    xhr.send()
   })
   .catch(function(err) {
-    console.log(err);
-    m.route("/HomePage?do=auth");
-  });
-};
+    console.log(err)
+    m.route("/HomePage?do=auth")
+  })
+}
 
 app.listPages = function(base) {
-  var dbx = app.config.dbx;
-  var path = base.replace(/\/+$/, '');
-  // m.startComputation();
+  var dbx = app.config.dbx
+  var path = base.replace(/\/+$/, '')
+  // m.startComputation()
   dbx.filesListFolder({ 'path': path, 'recursive': true })
   .then(function(response) {
-    // console.log(response);
-    var list = [];
+    // console.log(response)
+    var list = []
     response.entries.forEach(function(el, i, ar) {
       if (el['.tag'] === 'file') {
-        // console.log(el.path_display);
-        var name = el.path_display.substr(1).replace(/\.md$/, '');
-        var row =  m('tr', [m('td', [m('a', { 'href': '/?/' + name }, name)])]);
-        list.push(row);
+        // console.log(el.path_display)
+        var name = el.path_display.substr(1).replace(/\.md$/, '')
+        var row = m('tr', [m('td', [m('a', { 'href': '/?/' + name }, name)])])
+        list.push(row)
       }
     })
     var listView = [
@@ -25665,80 +25662,80 @@ app.listPages = function(base) {
         ]),
         m('tbody', list)
       ])
-    ];
-    app.vm.page.content(listView);
-    m.redraw();
+    ]
+    app.vm.page.content(listView)
+    m.redraw()
   })
   .catch(function(err) {
-    console.log(err);
-    m.route("/HomePage?do=auth");
-  });
-};
+    console.log(err)
+    m.route("/HomePage?do=auth")
+  })
+}
 
 function setToken(token) {
-  localStorage.setItem('token', token);
+  localStorage.setItem('token', token)
 }
 
 function getToken() {
-  return localStorage.getItem('token');
+  return localStorage.getItem('token')
 }
 
 function removeToken() {
-  localStorage.removeItem('token');
+  localStorage.removeItem('token')
 }
 
 app.controller = function () {
   if (m.route() === '/') {
-    var a = document.createElement("a");
-    a.href = document.referrer;
-    var ref = a.protocol + "//" + a.host + "/";
-    // console.log(m.route(), document.referrer, location.hash, ref);
-    if ((ref === 'https://www.dropbox.com/' || ref === auth.config.REDIRECT_URI)
-        && location.hash !== "") {
-      var token = queryString.parse(location.hash).access_token;
-      setToken(token);
-      app.config = new app.Config({ 'token': getToken() });
-      starter.init(app.config);
+    var a = document.createElement("a")
+    a.href = document.referrer
+    var ref = a.protocol + "//" + a.host + "/"
+    // console.log(m.route(), document.referrer, location.hash, ref)
+    if ((ref === 'https://www.dropbox.com/' || ref === auth.config.REDIRECT_URI) &&
+        location.hash !== "") {
+      var token = queryString.parse(location.hash).access_token
+      setToken(token)
+      app.config = new app.Config({ 'token': getToken() })
+      starter.init(app.config)
     }
-    m.route('/HomePage');
+    m.route('/HomePage')
   }
-  var doArg = m.route.param("do");
+  var doArg = m.route.param("do")
   if (doArg === "auth") {
-    m.mount(document.body, auth);
-    return false;
+    m.mount(document.body, auth)
+    return false
   }
   else if (doArg === "logout") {
     if (app.config) {
-      app.condig.dbx.authTokenRevoke();
+      app.condig.dbx.authTokenRevoke()
     }
-    removeToken();
-    app.config = null;
-    m.route('/HomePage');
+    removeToken()
+    app.config = null
+    m.route('/HomePage')
   }
-  else if (doArg == "index") {
-    app.config = app.config || new app.Config({ 'token': getToken() });
-    app.vm.init();
-    app.vm.page.name("Index");
-    document.title = "Index";
-    app.listPages("/");
+  else if (doArg === "index") {
+    app.config = app.config || new app.Config({ 'token': getToken() })
+    app.vm.init()
+    app.vm.page.name("Index")
+    document.title = "Index"
+    app.listPages("/")
   }
   else {
-    app.config = app.config || new app.Config({ 'token': getToken() });
-    app.vm.init();
-    var name = m.route().substr(1).replace(/\?.*$/, '');
-    app.vm.page.name(name);
-    document.title = name;
-    app.renderPage(name);
+    app.config = app.config || new app.Config({ 'token': getToken() })
+    app.vm.init()
+    var name = m.route().substr(1).replace(/\?.*$/, '')
+    app.vm.page.name(name)
+    document.title = name
+    app.renderPage(name)
   }
-};
+}
 
 app.view = function() {
-  var cur = m.route();
+  var cur = m.route()
   if (cur.indexOf("?") !== -1) {
-    cur = "/?" + cur.substr(0, cur.indexOf("?"));
+    cur = "/?" + cur.substr(0, cur.indexOf("?"))
   }
   else {
-    cur = "/?" + cur;
+    cur = "/?" + cur
   }
   return [
     m('div', { 'id': "main", 'class': "container grid-960" }, [
@@ -25757,7 +25754,7 @@ app.view = function() {
       app.vm.page.content()
     ])
   ]
-};
+}
 
 },{"./auth":115,"./download-request":116,"./markdown-it-pathmod":118,"./starter":119,"dropbox":8,"markdown-it":40,"markdown-it-katex":39,"mithril":98,"query-string":102}],118:[function(require,module,exports){
 /*! markdown-it-linkscheme v1.0.2 | MIT License | github.com/adam-p/markdown-it-linkscheme */
@@ -25821,16 +25818,16 @@ module.exports = function pathMod(md) {
 };
 
 },{"./download-request":116,"dropbox":8}],119:[function(require,module,exports){
-'use strict';
+'use strict'
 
-var Dropbox = require('dropbox');
+var Dropbox = require('dropbox')
 
-var auth = require('./auth');
+var auth = require('./auth')
 
-var starter = {};
+var starter = {}
 
 function getToken() {
-  return localStorage.getItem('token');
+  return localStorage.getItem('token')
 }
 
 var files = [
@@ -25842,30 +25839,29 @@ var files = [
     'path': "/idol_akusyu.png",
     'url': "https://raw.githubusercontent.com/makiwiki/maki/master/resources/idol_akusyu.png"
   }
-];
+]
 
 var starter = {
   init: function(config) {
-    var dbx = config.dbx;
+    var dbx = config.dbx
     dbx.filesGetMetadata({ 'path': "/HomePage.md" })
     .then(function(response) {
-      // console.log(response);
+      // console.log(response)
     })
     .catch(function(err) {
-      // console.log(err);
+      // console.log(err)
       if (err.status === 409) {
         // TODO: should be parallel
         dbx.filesSaveUrl(files[0]).then(function() {
           dbx.filesSaveUrl(files[1]).then(function() {
-            location.reload();
-          });
-        });
+            location.reload()
+          })
+        })
       }
-    });
+    })
   }
-};
+}
 
-
-module.exports = starter;
+module.exports = starter
 
 },{"./auth":115,"dropbox":8}]},{},[117]);

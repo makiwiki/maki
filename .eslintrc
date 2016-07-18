@@ -1,0 +1,18 @@
+{
+  "extends": "standard",
+  "env": {
+    "browser": true,
+    "node": true,
+    "es6": true
+  },
+  "rules": {
+    "quotes": 0,
+    "space-before-function-paren": 0,
+    "no-path-concat": 1,
+    "keyword-spacing": 0,
+    "no-unused-vars": 1,
+    "comma-dangle": 0,
+    "brace-style": 0,
+    "semi": 1
+  }
+}

@@ -40,8 +40,9 @@ TBA
 
 * Modular architecture
   * Support other cloud storage services
-  * Support other markup languages
   * Support plugins
+  * Support other markup languages?
+* Add update notices
 
 [deps-image]: https://david-dm.org/makiwiki/maki.svg
 [deps-url]: https://david-dm.org/makiwiki/maki

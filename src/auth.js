@@ -1,23 +1,23 @@
-'use strict';
+'use strict'
 
-var m = require('mithril');
+var m = require('mithril')
 
-var Dropbox = require('dropbox');
+var Dropbox = require('dropbox')
 
-var auth = {};
-auth.config = {};
+var auth = {}
+auth.config = {}
 
 auth.controller = function () {
   return {
-      auth: function(e) {
-        e.preventDefault();
-        var dbx = new Dropbox({ clientId: auth.config.CLIENT_ID });
-        var authUrl = dbx.getAuthenticationUrl(auth.config.REDIRECT_URI);
-        location.href = authUrl;
-        return false;
-      }
+    auth: function(e) {
+      e.preventDefault()
+      var dbx = new Dropbox({ clientId: auth.config.CLIENT_ID })
+      var authUrl = dbx.getAuthenticationUrl(auth.config.REDIRECT_URI)
+      location.href = authUrl
+      return false
+    }
   }
-};
+}
 
 auth.view = function(ctrl) {
   return [
@@ -54,7 +54,7 @@ auth.view = function(ctrl) {
         ])
       ])
     ])
-  ];
-};
+  ]
+}
 
-module.exports = auth;
+module.exports = auth
