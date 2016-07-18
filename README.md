@@ -1,6 +1,6 @@
 # Maki
 
-[![Dependencies][deps-image]][deps-url]
+[![Dependencies][deps-image]][deps-url] [![Build Status][ci-image]][ci-url]
 
 Maki is a Dropbox-based personal wiki engine.
 
@@ -46,3 +46,5 @@ TBA
 
 [deps-image]: https://david-dm.org/makiwiki/maki.svg
 [deps-url]: https://david-dm.org/makiwiki/maki
+[ci-image]: https://travis-ci.org/makiwiki/maki.svg?branch=master
+[ci-url]: https://travis-ci.org/makiwiki/maki

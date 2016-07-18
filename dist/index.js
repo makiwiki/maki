@@ -25747,7 +25747,7 @@ app.view = function() {
           m('input', { 'type': "text", 'class': "form-input input-inline", 'placeholder': "Search" }, ''),
           m('a.btn', { 'href': "/?/HomePage" }, 'Home'),
           m('a.btn', { 'href': cur + "?do=index" }, 'Index'),
-          m('a.btn', { 'href': "#" /* cur + "?do=share" */ }, 'Share'),
+          m('a.btn', { 'href': "#" }, 'Share'), // cur + "?do=share"
           m('a.btn.btn-primary', { 'href': cur + "?do=logout" }, 'Logout')
         ])
       ]),
@@ -25820,16 +25820,6 @@ module.exports = function pathMod(md) {
 },{"./download-request":116,"dropbox":8}],119:[function(require,module,exports){
 'use strict'
 
-var Dropbox = require('dropbox')
-
-var auth = require('./auth')
-
-var starter = {}
-
-function getToken() {
-  return localStorage.getItem('token')
-}
-
 var files = [
   {
     'path': "/HomePage.md",
@@ -25864,4 +25854,4 @@ var starter = {
 
 module.exports = starter
 
-},{"./auth":115,"dropbox":8}]},{},[117]);
+},{}]},{},[117]);
