@@ -10,6 +10,7 @@
   "scripts": {
     "start": "http-server ./dist -o",
     "lint": "eslint './src/**/*.js'",
+    "test": "npm run lint && npm run build",
     "watch": "watchify ./src/index.js -o ./dist/index.js",
     "build": "browserify ./src/index.js -o ./dist/index.js"
   },
