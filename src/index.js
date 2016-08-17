@@ -6,7 +6,6 @@ var md = require('markdown-it')()
          .use(require('markdown-it-katex'))
 var queryString = require('query-string')
 
-var downloadRequest = require('./download-request')
 var starter = require('./starter')
 
 var m = require('mithril')
@@ -47,25 +46,18 @@ app.renderPage = function(name) {
   var dbx = app.config.dbx
   var path = "/" + name + ".md"
   // m.startComputation()
-  downloadRequest('files/download', { 'path': path }, dbx.getAccessToken(), dbx.selectUser)
+  dbx.filesDownload({ 'path': path })
   .then(function(response) {
-    var blobURL = response.objectDownloadUrl
-    var xhr = new XMLHttpRequest()
-    xhr.onload = function() {
-      var blob = xhr.response
-      var reader = new FileReader()
-      reader.onload = function() {
-        var buffer = reader.result
-        var html = md.render(buffer)
-        app.vm.page.content(m('div', { 'id': "content" }, m.trust(html)))
-        m.redraw()
-        // m.endComputation()
-      }
-      reader.readAsText(blob, "utf-8")
+    var blob = response.fileBlob
+    var reader = new FileReader()
+    reader.onload = function() {
+      var buffer = reader.result
+      var html = md.render(buffer)
+      app.vm.page.content(m('div', { 'id': "content" }, m.trust(html)))
+      m.redraw()
+      // m.endComputation()
     }
-    xhr.responseType = "blob"
-    xhr.open("GET", blobURL)
-    xhr.send()
+    reader.readAsText(blob, "utf-8")
   })
   .catch(function(err) {
     console.log(err)

@@ -1,6 +1,6 @@
 {
   "name": "maki",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "A Dropbox-based Personal Wiki Engine",
   "main": "./dist/index.js",
   "repository": {
@@ -17,13 +17,12 @@
   "author": "nolze",
   "license": "GPL-3.0",
   "dependencies": {
-    "dropbox": "^2.0.0",
+    "dropbox": "^2.1.0",
     "es6-promise": "^3.2.1",
     "markdown-it": "^7.0.0",
     "markdown-it-katex": "^2.0.1",
     "mithril": "^0.2.5",
-    "query-string": "^4.2.2",
-    "superagent": "^2.1.0"
+    "query-string": "^4.2.2"
   },
   "devDependencies": {
     "browserify": "^13.0.1",

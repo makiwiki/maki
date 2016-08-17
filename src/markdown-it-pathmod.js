@@ -1,7 +1,6 @@
 /*! markdown-it-linkscheme v1.0.2 | MIT License | github.com/adam-p/markdown-it-linkscheme */
 
 var Dropbox = require('dropbox');
-var downloadRequest = require('./download-request');
 
 function getToken() {
   return localStorage.getItem('token');
@@ -36,9 +35,9 @@ module.exports = function pathMod(md) {
     if (srcIndex >= 0 && !/^(?:[a-z]+:)?\/\//.test(tokens[idx].attrs[srcIndex][1])) {
       var dbx = new Dropbox({ accessToken: getToken() });
       var path = `/${tokens[idx].attrs[srcIndex][1]}`;
-      downloadRequest('files/download', { 'path': path }, dbx.getAccessToken(), dbx.selectUser).then(function(response) {
-        var blobURL = response.objectDownloadUrl;
-        console.log('url', blobURL);
+      dbx.filesDownload({ 'path': path }).then(function(response) {
+        var blobURL = URL.createObjectURL(response.fileBlob);
+        // console.log('url', blobURL);
         Array.prototype.forEach.call(document.getElementsByClassName(imgClass), function(el, index) {
           el.src = blobURL;
           // console.log('el', el);
