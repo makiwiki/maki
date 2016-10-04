@@ -164,1302 +164,1163 @@ Emitter.prototype.hasListeners = function(event){
 };
 
 },{}],2:[function(require,module,exports){
-/**
- * Module dependencies.
+(function (process,global){
+/*!
+ * @overview es6-promise - a tiny implementation of Promises/A+.
+ * @copyright Copyright (c) 2014 Yehuda Katz, Tom Dale, Stefan Penner and contributors (Conversion to ES6 API by Jake Archibald)
+ * @license   Licensed under MIT license
+ *            See https://raw.githubusercontent.com/stefanpenner/es6-promise/master/LICENSE
+ * @version   3.3.1
  */
 
-var Emitter = require('emitter');
-var reduce = require('reduce');
-var requestBase = require('./request-base');
-var isObject = require('./is-object');
+(function (global, factory) {
+    typeof exports === 'object' && typeof module !== 'undefined' ? module.exports = factory() :
+    typeof define === 'function' && define.amd ? define(factory) :
+    (global.ES6Promise = factory());
+}(this, (function () { 'use strict';
 
-/**
- * Root reference for iframes.
- */
-
-var root;
-if (typeof window !== 'undefined') { // Browser window
-  root = window;
-} else if (typeof self !== 'undefined') { // Web Worker
-  root = self;
-} else { // Other environments
-  root = this;
+function objectOrFunction(x) {
+  return typeof x === 'function' || typeof x === 'object' && x !== null;
 }
 
-/**
- * Noop.
- */
-
-function noop(){};
-
-/**
- * Check if `obj` is a host object,
- * we don't want to serialize these :)
- *
- * TODO: future proof, move to compoent land
- *
- * @param {Object} obj
- * @return {Boolean}
- * @api private
- */
-
-function isHost(obj) {
-  var str = {}.toString.call(obj);
-
-  switch (str) {
-    case '[object File]':
-    case '[object Blob]':
-    case '[object FormData]':
-      return true;
-    default:
-      return false;
-  }
+function isFunction(x) {
+  return typeof x === 'function';
 }
 
-/**
- * Expose `request`.
- */
+var _isArray = undefined;
+if (!Array.isArray) {
+  _isArray = function (x) {
+    return Object.prototype.toString.call(x) === '[object Array]';
+  };
+} else {
+  _isArray = Array.isArray;
+}
 
-var request = module.exports = require('./request').bind(null, Request);
+var isArray = _isArray;
 
-/**
- * Determine XHR.
- */
+var len = 0;
+var vertxNext = undefined;
+var customSchedulerFn = undefined;
 
-request.getXHR = function () {
-  if (root.XMLHttpRequest
-      && (!root.location || 'file:' != root.location.protocol
-          || !root.ActiveXObject)) {
-    return new XMLHttpRequest;
-  } else {
-    try { return new ActiveXObject('Microsoft.XMLHTTP'); } catch(e) {}
-    try { return new ActiveXObject('Msxml2.XMLHTTP.6.0'); } catch(e) {}
-    try { return new ActiveXObject('Msxml2.XMLHTTP.3.0'); } catch(e) {}
-    try { return new ActiveXObject('Msxml2.XMLHTTP'); } catch(e) {}
+var asap = function asap(callback, arg) {
+  queue[len] = callback;
+  queue[len + 1] = arg;
+  len += 2;
+  if (len === 2) {
+    // If len is 2, that means that we need to schedule an async flush.
+    // If additional callbacks are queued before the queue is flushed, they
+    // will be processed by this flush that we are scheduling.
+    if (customSchedulerFn) {
+      customSchedulerFn(flush);
+    } else {
+      scheduleFlush();
+    }
   }
-  return false;
 };
 
-/**
- * Removes leading and trailing whitespace, added to support IE.
- *
- * @param {String} s
- * @return {String}
- * @api private
- */
+function setScheduler(scheduleFn) {
+  customSchedulerFn = scheduleFn;
+}
 
-var trim = ''.trim
-  ? function(s) { return s.trim(); }
-  : function(s) { return s.replace(/(^\s*|\s*$)/g, ''); };
+function setAsap(asapFn) {
+  asap = asapFn;
+}
 
-/**
- * Serialize the given `obj`.
- *
- * @param {Object} obj
- * @return {String}
- * @api private
- */
+var browserWindow = typeof window !== 'undefined' ? window : undefined;
+var browserGlobal = browserWindow || {};
+var BrowserMutationObserver = browserGlobal.MutationObserver || browserGlobal.WebKitMutationObserver;
+var isNode = typeof self === 'undefined' && typeof process !== 'undefined' && ({}).toString.call(process) === '[object process]';
 
-function serialize(obj) {
-  if (!isObject(obj)) return obj;
-  var pairs = [];
-  for (var key in obj) {
-    if (null != obj[key]) {
-      pushEncodedKeyValuePair(pairs, key, obj[key]);
-        }
-      }
-  return pairs.join('&');
+// test for web worker but not in IE10
+var isWorker = typeof Uint8ClampedArray !== 'undefined' && typeof importScripts !== 'undefined' && typeof MessageChannel !== 'undefined';
+
+// node
+function useNextTick() {
+  // node version 0.10.x displays a deprecation warning when nextTick is used recursively
+  // see https://github.com/cujojs/when/issues/410 for details
+  return function () {
+    return process.nextTick(flush);
+  };
+}
+
+// vertx
+function useVertxTimer() {
+  return function () {
+    vertxNext(flush);
+  };
+}
+
+function useMutationObserver() {
+  var iterations = 0;
+  var observer = new BrowserMutationObserver(flush);
+  var node = document.createTextNode('');
+  observer.observe(node, { characterData: true });
+
+  return function () {
+    node.data = iterations = ++iterations % 2;
+  };
+}
+
+// web worker
+function useMessageChannel() {
+  var channel = new MessageChannel();
+  channel.port1.onmessage = flush;
+  return function () {
+    return channel.port2.postMessage(0);
+  };
+}
+
+function useSetTimeout() {
+  // Store setTimeout reference so es6-promise will be unaffected by
+  // other code modifying setTimeout (like sinon.useFakeTimers())
+  var globalSetTimeout = setTimeout;
+  return function () {
+    return globalSetTimeout(flush, 1);
+  };
+}
+
+var queue = new Array(1000);
+function flush() {
+  for (var i = 0; i < len; i += 2) {
+    var callback = queue[i];
+    var arg = queue[i + 1];
+
+    callback(arg);
+
+    queue[i] = undefined;
+    queue[i + 1] = undefined;
+  }
+
+  len = 0;
+}
+
+function attemptVertx() {
+  try {
+    var r = require;
+    var vertx = r('vertx');
+    vertxNext = vertx.runOnLoop || vertx.runOnContext;
+    return useVertxTimer();
+  } catch (e) {
+    return useSetTimeout();
+  }
+}
+
+var scheduleFlush = undefined;
+// Decide what async method to use to triggering processing of queued callbacks:
+if (isNode) {
+  scheduleFlush = useNextTick();
+} else if (BrowserMutationObserver) {
+  scheduleFlush = useMutationObserver();
+} else if (isWorker) {
+  scheduleFlush = useMessageChannel();
+} else if (browserWindow === undefined && typeof require === 'function') {
+  scheduleFlush = attemptVertx();
+} else {
+  scheduleFlush = useSetTimeout();
+}
+
+function then(onFulfillment, onRejection) {
+  var _arguments = arguments;
+
+  var parent = this;
+
+  var child = new this.constructor(noop);
+
+  if (child[PROMISE_ID] === undefined) {
+    makePromise(child);
+  }
+
+  var _state = parent._state;
+
+  if (_state) {
+    (function () {
+      var callback = _arguments[_state - 1];
+      asap(function () {
+        return invokeCallback(_state, child, callback, parent._result);
+      });
+    })();
+  } else {
+    subscribe(parent, child, onFulfillment, onRejection);
+  }
+
+  return child;
 }
 
 /**
- * Helps 'serialize' with serializing arrays.
- * Mutates the pairs array.
- *
- * @param {Array} pairs
- * @param {String} key
- * @param {Mixed} val
- */
+  `Promise.resolve` returns a promise that will become resolved with the
+  passed `value`. It is shorthand for the following:
 
-function pushEncodedKeyValuePair(pairs, key, val) {
-  if (Array.isArray(val)) {
-    return val.forEach(function(v) {
-      pushEncodedKeyValuePair(pairs, key, v);
+  ```javascript
+  let promise = new Promise(function(resolve, reject){
+    resolve(1);
+  });
+
+  promise.then(function(value){
+    // value === 1
+  });
+  ```
+
+  Instead of writing the above, your code now simply becomes the following:
+
+  ```javascript
+  let promise = Promise.resolve(1);
+
+  promise.then(function(value){
+    // value === 1
+  });
+  ```
+
+  @method resolve
+  @static
+  @param {Any} value value that the returned promise will be resolved with
+  Useful for tooling.
+  @return {Promise} a promise that will become fulfilled with the given
+  `value`
+*/
+function resolve(object) {
+  /*jshint validthis:true */
+  var Constructor = this;
+
+  if (object && typeof object === 'object' && object.constructor === Constructor) {
+    return object;
+  }
+
+  var promise = new Constructor(noop);
+  _resolve(promise, object);
+  return promise;
+}
+
+var PROMISE_ID = Math.random().toString(36).substring(16);
+
+function noop() {}
+
+var PENDING = void 0;
+var FULFILLED = 1;
+var REJECTED = 2;
+
+var GET_THEN_ERROR = new ErrorObject();
+
+function selfFulfillment() {
+  return new TypeError("You cannot resolve a promise with itself");
+}
+
+function cannotReturnOwn() {
+  return new TypeError('A promises callback cannot return that same promise.');
+}
+
+function getThen(promise) {
+  try {
+    return promise.then;
+  } catch (error) {
+    GET_THEN_ERROR.error = error;
+    return GET_THEN_ERROR;
+  }
+}
+
+function tryThen(then, value, fulfillmentHandler, rejectionHandler) {
+  try {
+    then.call(value, fulfillmentHandler, rejectionHandler);
+  } catch (e) {
+    return e;
+  }
+}
+
+function handleForeignThenable(promise, thenable, then) {
+  asap(function (promise) {
+    var sealed = false;
+    var error = tryThen(then, thenable, function (value) {
+      if (sealed) {
+        return;
+      }
+      sealed = true;
+      if (thenable !== value) {
+        _resolve(promise, value);
+      } else {
+        fulfill(promise, value);
+      }
+    }, function (reason) {
+      if (sealed) {
+        return;
+      }
+      sealed = true;
+
+      _reject(promise, reason);
+    }, 'Settle: ' + (promise._label || ' unknown promise'));
+
+    if (!sealed && error) {
+      sealed = true;
+      _reject(promise, error);
+    }
+  }, promise);
+}
+
+function handleOwnThenable(promise, thenable) {
+  if (thenable._state === FULFILLED) {
+    fulfill(promise, thenable._result);
+  } else if (thenable._state === REJECTED) {
+    _reject(promise, thenable._result);
+  } else {
+    subscribe(thenable, undefined, function (value) {
+      return _resolve(promise, value);
+    }, function (reason) {
+      return _reject(promise, reason);
     });
   }
-  pairs.push(encodeURIComponent(key)
-    + '=' + encodeURIComponent(val));
 }
 
-/**
- * Expose serialization method.
- */
-
- request.serializeObject = serialize;
-
- /**
-  * Parse the given x-www-form-urlencoded `str`.
-  *
-  * @param {String} str
-  * @return {Object}
-  * @api private
-  */
-
-function parseString(str) {
-  var obj = {};
-  var pairs = str.split('&');
-  var parts;
-  var pair;
-
-  for (var i = 0, len = pairs.length; i < len; ++i) {
-    pair = pairs[i];
-    parts = pair.split('=');
-    obj[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1]);
-  }
-
-  return obj;
-}
-
-/**
- * Expose parser.
- */
-
-request.parseString = parseString;
-
-/**
- * Default MIME type map.
- *
- *     superagent.types.xml = 'application/xml';
- *
- */
-
-request.types = {
-  html: 'text/html',
-  json: 'application/json',
-  xml: 'application/xml',
-  urlencoded: 'application/x-www-form-urlencoded',
-  'form': 'application/x-www-form-urlencoded',
-  'form-data': 'application/x-www-form-urlencoded'
-};
-
-/**
- * Default serialization map.
- *
- *     superagent.serialize['application/xml'] = function(obj){
- *       return 'generated xml here';
- *     };
- *
- */
-
- request.serialize = {
-   'application/x-www-form-urlencoded': serialize,
-   'application/json': JSON.stringify
- };
-
- /**
-  * Default parsers.
-  *
-  *     superagent.parse['application/xml'] = function(str){
-  *       return { object parsed from str };
-  *     };
-  *
-  */
-
-request.parse = {
-  'application/x-www-form-urlencoded': parseString,
-  'application/json': JSON.parse
-};
-
-/**
- * Parse the given header `str` into
- * an object containing the mapped fields.
- *
- * @param {String} str
- * @return {Object}
- * @api private
- */
-
-function parseHeader(str) {
-  var lines = str.split(/\r?\n/);
-  var fields = {};
-  var index;
-  var line;
-  var field;
-  var val;
-
-  lines.pop(); // trailing CRLF
-
-  for (var i = 0, len = lines.length; i < len; ++i) {
-    line = lines[i];
-    index = line.indexOf(':');
-    field = line.slice(0, index).toLowerCase();
-    val = trim(line.slice(index + 1));
-    fields[field] = val;
-  }
-
-  return fields;
-}
-
-/**
- * Check if `mime` is json or has +json structured syntax suffix.
- *
- * @param {String} mime
- * @return {Boolean}
- * @api private
- */
-
-function isJSON(mime) {
-  return /[\/+]json\b/.test(mime);
-}
-
-/**
- * Return the mime type for the given `str`.
- *
- * @param {String} str
- * @return {String}
- * @api private
- */
-
-function type(str){
-  return str.split(/ *; */).shift();
-};
-
-/**
- * Return header field parameters.
- *
- * @param {String} str
- * @return {Object}
- * @api private
- */
-
-function params(str){
-  return reduce(str.split(/ *; */), function(obj, str){
-    var parts = str.split(/ *= */)
-      , key = parts.shift()
-      , val = parts.shift();
-
-    if (key && val) obj[key] = val;
-    return obj;
-  }, {});
-};
-
-/**
- * Initialize a new `Response` with the given `xhr`.
- *
- *  - set flags (.ok, .error, etc)
- *  - parse header
- *
- * Examples:
- *
- *  Aliasing `superagent` as `request` is nice:
- *
- *      request = superagent;
- *
- *  We can use the promise-like API, or pass callbacks:
- *
- *      request.get('/').end(function(res){});
- *      request.get('/', function(res){});
- *
- *  Sending data can be chained:
- *
- *      request
- *        .post('/user')
- *        .send({ name: 'tj' })
- *        .end(function(res){});
- *
- *  Or passed to `.send()`:
- *
- *      request
- *        .post('/user')
- *        .send({ name: 'tj' }, function(res){});
- *
- *  Or passed to `.post()`:
- *
- *      request
- *        .post('/user', { name: 'tj' })
- *        .end(function(res){});
- *
- * Or further reduced to a single call for simple cases:
- *
- *      request
- *        .post('/user', { name: 'tj' }, function(res){});
- *
- * @param {XMLHTTPRequest} xhr
- * @param {Object} options
- * @api private
- */
-
-function Response(req, options) {
-  options = options || {};
-  this.req = req;
-  this.xhr = this.req.xhr;
-  // responseText is accessible only if responseType is '' or 'text' and on older browsers
-  this.text = ((this.req.method !='HEAD' && (this.xhr.responseType === '' || this.xhr.responseType === 'text')) || typeof this.xhr.responseType === 'undefined')
-     ? this.xhr.responseText
-     : null;
-  this.statusText = this.req.xhr.statusText;
-  this.setStatusProperties(this.xhr.status);
-  this.header = this.headers = parseHeader(this.xhr.getAllResponseHeaders());
-  // getAllResponseHeaders sometimes falsely returns "" for CORS requests, but
-  // getResponseHeader still works. so we get content-type even if getting
-  // other headers fails.
-  this.header['content-type'] = this.xhr.getResponseHeader('content-type');
-  this.setHeaderProperties(this.header);
-  this.body = this.req.method != 'HEAD'
-    ? this.parseBody(this.text ? this.text : this.xhr.response)
-    : null;
-}
-
-/**
- * Get case-insensitive `field` value.
- *
- * @param {String} field
- * @return {String}
- * @api public
- */
-
-Response.prototype.get = function(field){
-  return this.header[field.toLowerCase()];
-};
-
-/**
- * Set header related properties:
- *
- *   - `.type` the content type without params
- *
- * A response of "Content-Type: text/plain; charset=utf-8"
- * will provide you with a `.type` of "text/plain".
- *
- * @param {Object} header
- * @api private
- */
-
-Response.prototype.setHeaderProperties = function(header){
-  // content-type
-  var ct = this.header['content-type'] || '';
-  this.type = type(ct);
-
-  // params
-  var obj = params(ct);
-  for (var key in obj) this[key] = obj[key];
-};
-
-/**
- * Parse the given body `str`.
- *
- * Used for auto-parsing of bodies. Parsers
- * are defined on the `superagent.parse` object.
- *
- * @param {String} str
- * @return {Mixed}
- * @api private
- */
-
-Response.prototype.parseBody = function(str){
-  var parse = request.parse[this.type];
-  if (!parse && isJSON(this.type)) {
-    parse = request.parse['application/json'];
-  }
-  return parse && str && (str.length || str instanceof Object)
-    ? parse(str)
-    : null;
-};
-
-/**
- * Set flags such as `.ok` based on `status`.
- *
- * For example a 2xx response will give you a `.ok` of __true__
- * whereas 5xx will be __false__ and `.error` will be __true__. The
- * `.clientError` and `.serverError` are also available to be more
- * specific, and `.statusType` is the class of error ranging from 1..5
- * sometimes useful for mapping respond colors etc.
- *
- * "sugar" properties are also defined for common cases. Currently providing:
- *
- *   - .noContent
- *   - .badRequest
- *   - .unauthorized
- *   - .notAcceptable
- *   - .notFound
- *
- * @param {Number} status
- * @api private
- */
-
-Response.prototype.setStatusProperties = function(status){
-  // handle IE9 bug: http://stackoverflow.com/questions/10046972/msie-returns-status-code-of-1223-for-ajax-request
-  if (status === 1223) {
-    status = 204;
-  }
-
-  var type = status / 100 | 0;
-
-  // status / class
-  this.status = this.statusCode = status;
-  this.statusType = type;
-
-  // basics
-  this.info = 1 == type;
-  this.ok = 2 == type;
-  this.clientError = 4 == type;
-  this.serverError = 5 == type;
-  this.error = (4 == type || 5 == type)
-    ? this.toError()
-    : false;
-
-  // sugar
-  this.accepted = 202 == status;
-  this.noContent = 204 == status;
-  this.badRequest = 400 == status;
-  this.unauthorized = 401 == status;
-  this.notAcceptable = 406 == status;
-  this.notFound = 404 == status;
-  this.forbidden = 403 == status;
-};
-
-/**
- * Return an `Error` representative of this response.
- *
- * @return {Error}
- * @api public
- */
-
-Response.prototype.toError = function(){
-  var req = this.req;
-  var method = req.method;
-  var url = req.url;
-
-  var msg = 'cannot ' + method + ' ' + url + ' (' + this.status + ')';
-  var err = new Error(msg);
-  err.status = this.status;
-  err.method = method;
-  err.url = url;
-
-  return err;
-};
-
-/**
- * Expose `Response`.
- */
-
-request.Response = Response;
-
-/**
- * Initialize a new `Request` with the given `method` and `url`.
- *
- * @param {String} method
- * @param {String} url
- * @api public
- */
-
-function Request(method, url) {
-  var self = this;
-  this._query = this._query || [];
-  this.method = method;
-  this.url = url;
-  this.header = {}; // preserves header name case
-  this._header = {}; // coerces header names to lowercase
-  this.on('end', function(){
-    var err = null;
-    var res = null;
-
-    try {
-      res = new Response(self);
-    } catch(e) {
-      err = new Error('Parser is unable to parse the response');
-      err.parse = true;
-      err.original = e;
-      // issue #675: return the raw response if the response parsing fails
-      err.rawResponse = self.xhr && self.xhr.responseText ? self.xhr.responseText : null;
-      // issue #876: return the http status code if the response parsing fails
-      err.statusCode = self.xhr && self.xhr.status ? self.xhr.status : null;
-      return self.callback(err);
-    }
-
-    self.emit('response', res);
-
-    if (err) {
-      return self.callback(err, res);
-    }
-
-    if (res.status >= 200 && res.status < 300) {
-      return self.callback(err, res);
-    }
-
-    var new_err = new Error(res.statusText || 'Unsuccessful HTTP response');
-    new_err.original = err;
-    new_err.response = res;
-    new_err.status = res.status;
-
-    self.callback(new_err, res);
-  });
-}
-
-/**
- * Mixin `Emitter` and `requestBase`.
- */
-
-Emitter(Request.prototype);
-for (var key in requestBase) {
-  Request.prototype[key] = requestBase[key];
-}
-
-/**
- * Abort the request, and clear potential timeout.
- *
- * @return {Request}
- * @api public
- */
-
-Request.prototype.abort = function(){
-  if (this.aborted) return;
-  this.aborted = true;
-  this.xhr && this.xhr.abort();
-  this.clearTimeout();
-  this.emit('abort');
-  return this;
-};
-
-/**
- * Set Content-Type to `type`, mapping values from `request.types`.
- *
- * Examples:
- *
- *      superagent.types.xml = 'application/xml';
- *
- *      request.post('/')
- *        .type('xml')
- *        .send(xmlstring)
- *        .end(callback);
- *
- *      request.post('/')
- *        .type('application/xml')
- *        .send(xmlstring)
- *        .end(callback);
- *
- * @param {String} type
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.type = function(type){
-  this.set('Content-Type', request.types[type] || type);
-  return this;
-};
-
-/**
- * Set responseType to `val`. Presently valid responseTypes are 'blob' and 
- * 'arraybuffer'.
- *
- * Examples:
- *
- *      req.get('/')
- *        .responseType('blob')
- *        .end(callback);
- *
- * @param {String} val
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.responseType = function(val){
-  this._responseType = val;
-  return this;
-};
-
-/**
- * Set Accept to `type`, mapping values from `request.types`.
- *
- * Examples:
- *
- *      superagent.types.json = 'application/json';
- *
- *      request.get('/agent')
- *        .accept('json')
- *        .end(callback);
- *
- *      request.get('/agent')
- *        .accept('application/json')
- *        .end(callback);
- *
- * @param {String} accept
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.accept = function(type){
-  this.set('Accept', request.types[type] || type);
-  return this;
-};
-
-/**
- * Set Authorization field value with `user` and `pass`.
- *
- * @param {String} user
- * @param {String} pass
- * @param {Object} options with 'type' property 'auto' or 'basic' (default 'basic')
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.auth = function(user, pass, options){
-  if (!options) {
-    options = {
-      type: 'basic'
-    }
-  }
-
-  switch (options.type) {
-    case 'basic':
-      var str = btoa(user + ':' + pass);
-      this.set('Authorization', 'Basic ' + str);
-    break;
-
-    case 'auto':
-      this.username = user;
-      this.password = pass;
-    break;
-  }
-  return this;
-};
-
-/**
-* Add query-string `val`.
-*
-* Examples:
-*
-*   request.get('/shoes')
-*     .query('size=10')
-*     .query({ color: 'blue' })
-*
-* @param {Object|String} val
-* @return {Request} for chaining
-* @api public
-*/
-
-Request.prototype.query = function(val){
-  if ('string' != typeof val) val = serialize(val);
-  if (val) this._query.push(val);
-  return this;
-};
-
-/**
- * Queue the given `file` as an attachment to the specified `field`,
- * with optional `filename`.
- *
- * ``` js
- * request.post('/upload')
- *   .attach(new Blob(['<a id="a"><b id="b">hey!</b></a>'], { type: "text/html"}))
- *   .end(callback);
- * ```
- *
- * @param {String} field
- * @param {Blob|File} file
- * @param {String} filename
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.attach = function(field, file, filename){
-  this._getFormData().append(field, file, filename || file.name);
-  return this;
-};
-
-Request.prototype._getFormData = function(){
-  if (!this._formData) {
-    this._formData = new root.FormData();
-  }
-  return this._formData;
-};
-
-/**
- * Send `data` as the request body, defaulting the `.type()` to "json" when
- * an object is given.
- *
- * Examples:
- *
- *       // manual json
- *       request.post('/user')
- *         .type('json')
- *         .send('{"name":"tj"}')
- *         .end(callback)
- *
- *       // auto json
- *       request.post('/user')
- *         .send({ name: 'tj' })
- *         .end(callback)
- *
- *       // manual x-www-form-urlencoded
- *       request.post('/user')
- *         .type('form')
- *         .send('name=tj')
- *         .end(callback)
- *
- *       // auto x-www-form-urlencoded
- *       request.post('/user')
- *         .type('form')
- *         .send({ name: 'tj' })
- *         .end(callback)
- *
- *       // defaults to x-www-form-urlencoded
-  *      request.post('/user')
-  *        .send('name=tobi')
-  *        .send('species=ferret')
-  *        .end(callback)
- *
- * @param {String|Object} data
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.send = function(data){
-  var obj = isObject(data);
-  var type = this._header['content-type'];
-
-  // merge
-  if (obj && isObject(this._data)) {
-    for (var key in data) {
-      this._data[key] = data[key];
-    }
-  } else if ('string' == typeof data) {
-    if (!type) this.type('form');
-    type = this._header['content-type'];
-    if ('application/x-www-form-urlencoded' == type) {
-      this._data = this._data
-        ? this._data + '&' + data
-        : data;
+function handleMaybeThenable(promise, maybeThenable, then$$) {
+  if (maybeThenable.constructor === promise.constructor && then$$ === then && maybeThenable.constructor.resolve === resolve) {
+    handleOwnThenable(promise, maybeThenable);
+  } else {
+    if (then$$ === GET_THEN_ERROR) {
+      _reject(promise, GET_THEN_ERROR.error);
+    } else if (then$$ === undefined) {
+      fulfill(promise, maybeThenable);
+    } else if (isFunction(then$$)) {
+      handleForeignThenable(promise, maybeThenable, then$$);
     } else {
-      this._data = (this._data || '') + data;
+      fulfill(promise, maybeThenable);
     }
+  }
+}
+
+function _resolve(promise, value) {
+  if (promise === value) {
+    _reject(promise, selfFulfillment());
+  } else if (objectOrFunction(value)) {
+    handleMaybeThenable(promise, value, getThen(value));
   } else {
-    this._data = data;
+    fulfill(promise, value);
+  }
+}
+
+function publishRejection(promise) {
+  if (promise._onerror) {
+    promise._onerror(promise._result);
   }
 
-  if (!obj || isHost(data)) return this;
-  if (!type) this.type('json');
-  return this;
-};
+  publish(promise);
+}
 
-/**
- * @deprecated
- */
-Response.prototype.parse = function serialize(fn){
-  if (root.console) {
-    console.warn("Client-side parse() method has been renamed to serialize(). This method is not compatible with superagent v2.0");
+function fulfill(promise, value) {
+  if (promise._state !== PENDING) {
+    return;
   }
-  this.serialize(fn);
-  return this;
-};
 
-Response.prototype.serialize = function serialize(fn){
-  this._parser = fn;
-  return this;
-};
+  promise._result = value;
+  promise._state = FULFILLED;
 
-/**
- * Invoke the callback with `err` and `res`
- * and handle arity check.
- *
- * @param {Error} err
- * @param {Response} res
- * @api private
- */
+  if (promise._subscribers.length !== 0) {
+    asap(publish, promise);
+  }
+}
 
-Request.prototype.callback = function(err, res){
-  var fn = this._callback;
-  this.clearTimeout();
-  fn(err, res);
-};
+function _reject(promise, reason) {
+  if (promise._state !== PENDING) {
+    return;
+  }
+  promise._state = REJECTED;
+  promise._result = reason;
 
-/**
- * Invoke callback with x-domain error.
- *
- * @api private
- */
+  asap(publishRejection, promise);
+}
 
-Request.prototype.crossDomainError = function(){
-  var err = new Error('Request has been terminated\nPossible causes: the network is offline, Origin is not allowed by Access-Control-Allow-Origin, the page is being unloaded, etc.');
-  err.crossDomain = true;
+function subscribe(parent, child, onFulfillment, onRejection) {
+  var _subscribers = parent._subscribers;
+  var length = _subscribers.length;
 
-  err.status = this.status;
-  err.method = this.method;
-  err.url = this.url;
+  parent._onerror = null;
 
-  this.callback(err);
-};
+  _subscribers[length] = child;
+  _subscribers[length + FULFILLED] = onFulfillment;
+  _subscribers[length + REJECTED] = onRejection;
 
-/**
- * Invoke callback with timeout error.
- *
- * @api private
- */
+  if (length === 0 && parent._state) {
+    asap(publish, parent);
+  }
+}
 
-Request.prototype.timeoutError = function(){
-  var timeout = this._timeout;
-  var err = new Error('timeout of ' + timeout + 'ms exceeded');
-  err.timeout = timeout;
-  this.callback(err);
-};
+function publish(promise) {
+  var subscribers = promise._subscribers;
+  var settled = promise._state;
 
-/**
- * Enable transmission of cookies with x-domain requests.
- *
- * Note that for this to work the origin must not be
- * using "Access-Control-Allow-Origin" with a wildcard,
- * and also must set "Access-Control-Allow-Credentials"
- * to "true".
- *
- * @api public
- */
+  if (subscribers.length === 0) {
+    return;
+  }
 
-Request.prototype.withCredentials = function(){
-  this._withCredentials = true;
-  return this;
-};
+  var child = undefined,
+      callback = undefined,
+      detail = promise._result;
 
-/**
- * Initiate request, invoking callback `fn(res)`
- * with an instanceof `Response`.
- *
- * @param {Function} fn
- * @return {Request} for chaining
- * @api public
- */
+  for (var i = 0; i < subscribers.length; i += 3) {
+    child = subscribers[i];
+    callback = subscribers[i + settled];
 
-Request.prototype.end = function(fn){
-  var self = this;
-  var xhr = this.xhr = request.getXHR();
-  var query = this._query.join('&');
-  var timeout = this._timeout;
-  var data = this._formData || this._data;
-
-  // store callback
-  this._callback = fn || noop;
-
-  // state change
-  xhr.onreadystatechange = function(){
-    if (4 != xhr.readyState) return;
-
-    // In IE9, reads to any property (e.g. status) off of an aborted XHR will
-    // result in the error "Could not complete the operation due to error c00c023f"
-    var status;
-    try { status = xhr.status } catch(e) { status = 0; }
-
-    if (0 == status) {
-      if (self.timedout) return self.timeoutError();
-      if (self.aborted) return;
-      return self.crossDomainError();
+    if (child) {
+      invokeCallback(settled, child, callback, detail);
+    } else {
+      callback(detail);
     }
-    self.emit('end');
-  };
-
-  // progress
-  var handleProgress = function(e){
-    if (e.total > 0) {
-      e.percent = e.loaded / e.total * 100;
-    }
-    e.direction = 'download';
-    self.emit('progress', e);
-  };
-  if (this.hasListeners('progress')) {
-    xhr.onprogress = handleProgress;
   }
+
+  promise._subscribers.length = 0;
+}
+
+function ErrorObject() {
+  this.error = null;
+}
+
+var TRY_CATCH_ERROR = new ErrorObject();
+
+function tryCatch(callback, detail) {
   try {
-    if (xhr.upload && this.hasListeners('progress')) {
-      xhr.upload.onprogress = handleProgress;
+    return callback(detail);
+  } catch (e) {
+    TRY_CATCH_ERROR.error = e;
+    return TRY_CATCH_ERROR;
+  }
+}
+
+function invokeCallback(settled, promise, callback, detail) {
+  var hasCallback = isFunction(callback),
+      value = undefined,
+      error = undefined,
+      succeeded = undefined,
+      failed = undefined;
+
+  if (hasCallback) {
+    value = tryCatch(callback, detail);
+
+    if (value === TRY_CATCH_ERROR) {
+      failed = true;
+      error = value.error;
+      value = null;
+    } else {
+      succeeded = true;
     }
-  } catch(e) {
-    // Accessing xhr.upload fails in IE from a web worker, so just pretend it doesn't exist.
-    // Reported here:
-    // https://connect.microsoft.com/IE/feedback/details/837245/xmlhttprequest-upload-throws-invalid-argument-when-used-from-web-worker-context
-  }
 
-  // timeout
-  if (timeout && !this._timer) {
-    this._timer = setTimeout(function(){
-      self.timedout = true;
-      self.abort();
-    }, timeout);
-  }
-
-  // querystring
-  if (query) {
-    query = request.serializeObject(query);
-    this.url += ~this.url.indexOf('?')
-      ? '&' + query
-      : '?' + query;
-  }
-
-  // initiate request
-  if (this.username && this.password) {
-    xhr.open(this.method, this.url, true, this.username, this.password);
+    if (promise === value) {
+      _reject(promise, cannotReturnOwn());
+      return;
+    }
   } else {
-    xhr.open(this.method, this.url, true);
+    value = detail;
+    succeeded = true;
   }
 
-  // CORS
-  if (this._withCredentials) xhr.withCredentials = true;
-
-  // body
-  if ('GET' != this.method && 'HEAD' != this.method && 'string' != typeof data && !isHost(data)) {
-    // serialize stuff
-    var contentType = this._header['content-type'];
-    var serialize = this._parser || request.serialize[contentType ? contentType.split(';')[0] : ''];
-    if (!serialize && isJSON(contentType)) serialize = request.serialize['application/json'];
-    if (serialize) data = serialize(data);
-  }
-
-  // set header fields
-  for (var field in this.header) {
-    if (null == this.header[field]) continue;
-    xhr.setRequestHeader(field, this.header[field]);
-  }
-
-  if (this._responseType) {
-    xhr.responseType = this._responseType;
-  }
-
-  // send stuff
-  this.emit('request', this);
-
-  // IE11 xhr.send(undefined) sends 'undefined' string as POST payload (instead of nothing)
-  // We need null here if data is undefined
-  xhr.send(typeof data !== 'undefined' ? data : null);
-  return this;
-};
-
-
-/**
- * Expose `Request`.
- */
-
-request.Request = Request;
-
-/**
- * GET `url` with optional callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.get = function(url, data, fn){
-  var req = request('GET', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.query(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-/**
- * HEAD `url` with optional callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.head = function(url, data, fn){
-  var req = request('HEAD', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.send(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-/**
- * DELETE `url` with optional callback `fn(res)`.
- *
- * @param {String} url
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-function del(url, fn){
-  var req = request('DELETE', url);
-  if (fn) req.end(fn);
-  return req;
-};
-
-request['del'] = del;
-request['delete'] = del;
-
-/**
- * PATCH `url` with optional `data` and callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed} data
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.patch = function(url, data, fn){
-  var req = request('PATCH', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.send(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-/**
- * POST `url` with optional `data` and callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed} data
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.post = function(url, data, fn){
-  var req = request('POST', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.send(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-/**
- * PUT `url` with optional `data` and callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.put = function(url, data, fn){
-  var req = request('PUT', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.send(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-},{"./is-object":3,"./request":5,"./request-base":4,"emitter":1,"reduce":105}],3:[function(require,module,exports){
-/**
- * Check if `obj` is an object.
- *
- * @param {Object} obj
- * @return {Boolean}
- * @api private
- */
-
-function isObject(obj) {
-  return null != obj && 'object' == typeof obj;
-}
-
-module.exports = isObject;
-
-},{}],4:[function(require,module,exports){
-/**
- * Module of mixed-in functions shared between node and client code
- */
-var isObject = require('./is-object');
-
-/**
- * Clear previous timeout.
- *
- * @return {Request} for chaining
- * @api public
- */
-
-exports.clearTimeout = function _clearTimeout(){
-  this._timeout = 0;
-  clearTimeout(this._timer);
-  return this;
-};
-
-/**
- * Force given parser
- *
- * Sets the body parser no matter type.
- *
- * @param {Function}
- * @api public
- */
-
-exports.parse = function parse(fn){
-  this._parser = fn;
-  return this;
-};
-
-/**
- * Set timeout to `ms`.
- *
- * @param {Number} ms
- * @return {Request} for chaining
- * @api public
- */
-
-exports.timeout = function timeout(ms){
-  this._timeout = ms;
-  return this;
-};
-
-/**
- * Faux promise support
- *
- * @param {Function} fulfill
- * @param {Function} reject
- * @return {Request}
- */
-
-exports.then = function then(fulfill, reject) {
-  return this.end(function(err, res) {
-    err ? reject(err) : fulfill(res);
-  });
-}
-
-/**
- * Allow for extension
- */
-
-exports.use = function use(fn) {
-  fn(this);
-  return this;
-}
-
-
-/**
- * Get request header `field`.
- * Case-insensitive.
- *
- * @param {String} field
- * @return {String}
- * @api public
- */
-
-exports.get = function(field){
-  return this._header[field.toLowerCase()];
-};
-
-/**
- * Get case-insensitive header `field` value.
- * This is a deprecated internal API. Use `.get(field)` instead.
- *
- * (getHeader is no longer used internally by the superagent code base)
- *
- * @param {String} field
- * @return {String}
- * @api private
- * @deprecated
- */
-
-exports.getHeader = exports.get;
-
-/**
- * Set header `field` to `val`, or multiple fields with one object.
- * Case-insensitive.
- *
- * Examples:
- *
- *      req.get('/')
- *        .set('Accept', 'application/json')
- *        .set('X-API-Key', 'foobar')
- *        .end(callback);
- *
- *      req.get('/')
- *        .set({ Accept: 'application/json', 'X-API-Key': 'foobar' })
- *        .end(callback);
- *
- * @param {String|Object} field
- * @param {String} val
- * @return {Request} for chaining
- * @api public
- */
-
-exports.set = function(field, val){
-  if (isObject(field)) {
-    for (var key in field) {
-      this.set(key, field[key]);
+  if (promise._state !== PENDING) {
+    // noop
+  } else if (hasCallback && succeeded) {
+      _resolve(promise, value);
+    } else if (failed) {
+      _reject(promise, error);
+    } else if (settled === FULFILLED) {
+      fulfill(promise, value);
+    } else if (settled === REJECTED) {
+      _reject(promise, value);
     }
-    return this;
-  }
-  this._header[field.toLowerCase()] = val;
-  this.header[field] = val;
-  return this;
-};
-
-/**
- * Remove header `field`.
- * Case-insensitive.
- *
- * Example:
- *
- *      req.get('/')
- *        .unset('User-Agent')
- *        .end(callback);
- *
- * @param {String} field
- */
-exports.unset = function(field){
-  delete this._header[field.toLowerCase()];
-  delete this.header[field];
-  return this;
-};
-
-/**
- * Write the field `name` and `val` for "multipart/form-data"
- * request bodies.
- *
- * ``` js
- * request.post('/upload')
- *   .field('foo', 'bar')
- *   .end(callback);
- * ```
- *
- * @param {String} name
- * @param {String|Blob|File|Buffer|fs.ReadStream} val
- * @return {Request} for chaining
- * @api public
- */
-exports.field = function(name, val) {
-  this._getFormData().append(name, val);
-  return this;
-};
-
-},{"./is-object":3}],5:[function(require,module,exports){
-// The node and browser modules expose versions of this with the
-// appropriate constructor function bound as first argument
-/**
- * Issue a request:
- *
- * Examples:
- *
- *    request('GET', '/users').end(callback)
- *    request('/users').end(callback)
- *    request('/users', callback)
- *
- * @param {String} method
- * @param {String|Function} url or callback
- * @return {Request}
- * @api public
- */
-
-function request(RequestConstructor, method, url) {
-  // callback
-  if ('function' == typeof url) {
-    return new RequestConstructor('GET', method).end(url);
-  }
-
-  // url first
-  if (2 == arguments.length) {
-    return new RequestConstructor('GET', method);
-  }
-
-  return new RequestConstructor(method, url);
 }
 
-module.exports = request;
+function initializePromise(promise, resolver) {
+  try {
+    resolver(function resolvePromise(value) {
+      _resolve(promise, value);
+    }, function rejectPromise(reason) {
+      _reject(promise, reason);
+    });
+  } catch (e) {
+    _reject(promise, e);
+  }
+}
 
-},{}],6:[function(require,module,exports){
+var id = 0;
+function nextId() {
+  return id++;
+}
+
+function makePromise(promise) {
+  promise[PROMISE_ID] = id++;
+  promise._state = undefined;
+  promise._result = undefined;
+  promise._subscribers = [];
+}
+
+function Enumerator(Constructor, input) {
+  this._instanceConstructor = Constructor;
+  this.promise = new Constructor(noop);
+
+  if (!this.promise[PROMISE_ID]) {
+    makePromise(this.promise);
+  }
+
+  if (isArray(input)) {
+    this._input = input;
+    this.length = input.length;
+    this._remaining = input.length;
+
+    this._result = new Array(this.length);
+
+    if (this.length === 0) {
+      fulfill(this.promise, this._result);
+    } else {
+      this.length = this.length || 0;
+      this._enumerate();
+      if (this._remaining === 0) {
+        fulfill(this.promise, this._result);
+      }
+    }
+  } else {
+    _reject(this.promise, validationError());
+  }
+}
+
+function validationError() {
+  return new Error('Array Methods must be provided an Array');
+};
+
+Enumerator.prototype._enumerate = function () {
+  var length = this.length;
+  var _input = this._input;
+
+  for (var i = 0; this._state === PENDING && i < length; i++) {
+    this._eachEntry(_input[i], i);
+  }
+};
+
+Enumerator.prototype._eachEntry = function (entry, i) {
+  var c = this._instanceConstructor;
+  var resolve$$ = c.resolve;
+
+  if (resolve$$ === resolve) {
+    var _then = getThen(entry);
+
+    if (_then === then && entry._state !== PENDING) {
+      this._settledAt(entry._state, i, entry._result);
+    } else if (typeof _then !== 'function') {
+      this._remaining--;
+      this._result[i] = entry;
+    } else if (c === Promise) {
+      var promise = new c(noop);
+      handleMaybeThenable(promise, entry, _then);
+      this._willSettleAt(promise, i);
+    } else {
+      this._willSettleAt(new c(function (resolve$$) {
+        return resolve$$(entry);
+      }), i);
+    }
+  } else {
+    this._willSettleAt(resolve$$(entry), i);
+  }
+};
+
+Enumerator.prototype._settledAt = function (state, i, value) {
+  var promise = this.promise;
+
+  if (promise._state === PENDING) {
+    this._remaining--;
+
+    if (state === REJECTED) {
+      _reject(promise, value);
+    } else {
+      this._result[i] = value;
+    }
+  }
+
+  if (this._remaining === 0) {
+    fulfill(promise, this._result);
+  }
+};
+
+Enumerator.prototype._willSettleAt = function (promise, i) {
+  var enumerator = this;
+
+  subscribe(promise, undefined, function (value) {
+    return enumerator._settledAt(FULFILLED, i, value);
+  }, function (reason) {
+    return enumerator._settledAt(REJECTED, i, reason);
+  });
+};
+
+/**
+  `Promise.all` accepts an array of promises, and returns a new promise which
+  is fulfilled with an array of fulfillment values for the passed promises, or
+  rejected with the reason of the first passed promise to be rejected. It casts all
+  elements of the passed iterable to promises as it runs this algorithm.
+
+  Example:
+
+  ```javascript
+  let promise1 = resolve(1);
+  let promise2 = resolve(2);
+  let promise3 = resolve(3);
+  let promises = [ promise1, promise2, promise3 ];
+
+  Promise.all(promises).then(function(array){
+    // The array here would be [ 1, 2, 3 ];
+  });
+  ```
+
+  If any of the `promises` given to `all` are rejected, the first promise
+  that is rejected will be given as an argument to the returned promises's
+  rejection handler. For example:
+
+  Example:
+
+  ```javascript
+  let promise1 = resolve(1);
+  let promise2 = reject(new Error("2"));
+  let promise3 = reject(new Error("3"));
+  let promises = [ promise1, promise2, promise3 ];
+
+  Promise.all(promises).then(function(array){
+    // Code here never runs because there are rejected promises!
+  }, function(error) {
+    // error.message === "2"
+  });
+  ```
+
+  @method all
+  @static
+  @param {Array} entries array of promises
+  @param {String} label optional string for labeling the promise.
+  Useful for tooling.
+  @return {Promise} promise that is fulfilled when all `promises` have been
+  fulfilled, or rejected if any of them become rejected.
+  @static
+*/
+function all(entries) {
+  return new Enumerator(this, entries).promise;
+}
+
+/**
+  `Promise.race` returns a new promise which is settled in the same way as the
+  first passed promise to settle.
+
+  Example:
+
+  ```javascript
+  let promise1 = new Promise(function(resolve, reject){
+    setTimeout(function(){
+      resolve('promise 1');
+    }, 200);
+  });
+
+  let promise2 = new Promise(function(resolve, reject){
+    setTimeout(function(){
+      resolve('promise 2');
+    }, 100);
+  });
+
+  Promise.race([promise1, promise2]).then(function(result){
+    // result === 'promise 2' because it was resolved before promise1
+    // was resolved.
+  });
+  ```
+
+  `Promise.race` is deterministic in that only the state of the first
+  settled promise matters. For example, even if other promises given to the
+  `promises` array argument are resolved, but the first settled promise has
+  become rejected before the other promises became fulfilled, the returned
+  promise will become rejected:
+
+  ```javascript
+  let promise1 = new Promise(function(resolve, reject){
+    setTimeout(function(){
+      resolve('promise 1');
+    }, 200);
+  });
+
+  let promise2 = new Promise(function(resolve, reject){
+    setTimeout(function(){
+      reject(new Error('promise 2'));
+    }, 100);
+  });
+
+  Promise.race([promise1, promise2]).then(function(result){
+    // Code here never runs
+  }, function(reason){
+    // reason.message === 'promise 2' because promise 2 became rejected before
+    // promise 1 became fulfilled
+  });
+  ```
+
+  An example real-world use case is implementing timeouts:
+
+  ```javascript
+  Promise.race([ajax('foo.json'), timeout(5000)])
+  ```
+
+  @method race
+  @static
+  @param {Array} promises array of promises to observe
+  Useful for tooling.
+  @return {Promise} a promise which settles in the same way as the first passed
+  promise to settle.
+*/
+function race(entries) {
+  /*jshint validthis:true */
+  var Constructor = this;
+
+  if (!isArray(entries)) {
+    return new Constructor(function (_, reject) {
+      return reject(new TypeError('You must pass an array to race.'));
+    });
+  } else {
+    return new Constructor(function (resolve, reject) {
+      var length = entries.length;
+      for (var i = 0; i < length; i++) {
+        Constructor.resolve(entries[i]).then(resolve, reject);
+      }
+    });
+  }
+}
+
+/**
+  `Promise.reject` returns a promise rejected with the passed `reason`.
+  It is shorthand for the following:
+
+  ```javascript
+  let promise = new Promise(function(resolve, reject){
+    reject(new Error('WHOOPS'));
+  });
+
+  promise.then(function(value){
+    // Code here doesn't run because the promise is rejected!
+  }, function(reason){
+    // reason.message === 'WHOOPS'
+  });
+  ```
+
+  Instead of writing the above, your code now simply becomes the following:
+
+  ```javascript
+  let promise = Promise.reject(new Error('WHOOPS'));
+
+  promise.then(function(value){
+    // Code here doesn't run because the promise is rejected!
+  }, function(reason){
+    // reason.message === 'WHOOPS'
+  });
+  ```
+
+  @method reject
+  @static
+  @param {Any} reason value that the returned promise will be rejected with.
+  Useful for tooling.
+  @return {Promise} a promise rejected with the given `reason`.
+*/
+function reject(reason) {
+  /*jshint validthis:true */
+  var Constructor = this;
+  var promise = new Constructor(noop);
+  _reject(promise, reason);
+  return promise;
+}
+
+function needsResolver() {
+  throw new TypeError('You must pass a resolver function as the first argument to the promise constructor');
+}
+
+function needsNew() {
+  throw new TypeError("Failed to construct 'Promise': Please use the 'new' operator, this object constructor cannot be called as a function.");
+}
+
+/**
+  Promise objects represent the eventual result of an asynchronous operation. The
+  primary way of interacting with a promise is through its `then` method, which
+  registers callbacks to receive either a promise's eventual value or the reason
+  why the promise cannot be fulfilled.
+
+  Terminology
+  -----------
+
+  - `promise` is an object or function with a `then` method whose behavior conforms to this specification.
+  - `thenable` is an object or function that defines a `then` method.
+  - `value` is any legal JavaScript value (including undefined, a thenable, or a promise).
+  - `exception` is a value that is thrown using the throw statement.
+  - `reason` is a value that indicates why a promise was rejected.
+  - `settled` the final resting state of a promise, fulfilled or rejected.
+
+  A promise can be in one of three states: pending, fulfilled, or rejected.
+
+  Promises that are fulfilled have a fulfillment value and are in the fulfilled
+  state.  Promises that are rejected have a rejection reason and are in the
+  rejected state.  A fulfillment value is never a thenable.
+
+  Promises can also be said to *resolve* a value.  If this value is also a
+  promise, then the original promise's settled state will match the value's
+  settled state.  So a promise that *resolves* a promise that rejects will
+  itself reject, and a promise that *resolves* a promise that fulfills will
+  itself fulfill.
+
+
+  Basic Usage:
+  ------------
+
+  ```js
+  let promise = new Promise(function(resolve, reject) {
+    // on success
+    resolve(value);
+
+    // on failure
+    reject(reason);
+  });
+
+  promise.then(function(value) {
+    // on fulfillment
+  }, function(reason) {
+    // on rejection
+  });
+  ```
+
+  Advanced Usage:
+  ---------------
+
+  Promises shine when abstracting away asynchronous interactions such as
+  `XMLHttpRequest`s.
+
+  ```js
+  function getJSON(url) {
+    return new Promise(function(resolve, reject){
+      let xhr = new XMLHttpRequest();
+
+      xhr.open('GET', url);
+      xhr.onreadystatechange = handler;
+      xhr.responseType = 'json';
+      xhr.setRequestHeader('Accept', 'application/json');
+      xhr.send();
+
+      function handler() {
+        if (this.readyState === this.DONE) {
+          if (this.status === 200) {
+            resolve(this.response);
+          } else {
+            reject(new Error('getJSON: `' + url + '` failed with status: [' + this.status + ']'));
+          }
+        }
+      };
+    });
+  }
+
+  getJSON('/posts.json').then(function(json) {
+    // on fulfillment
+  }, function(reason) {
+    // on rejection
+  });
+  ```
+
+  Unlike callbacks, promises are great composable primitives.
+
+  ```js
+  Promise.all([
+    getJSON('/posts'),
+    getJSON('/comments')
+  ]).then(function(values){
+    values[0] // => postsJSON
+    values[1] // => commentsJSON
+
+    return values;
+  });
+  ```
+
+  @class Promise
+  @param {function} resolver
+  Useful for tooling.
+  @constructor
+*/
+function Promise(resolver) {
+  this[PROMISE_ID] = nextId();
+  this._result = this._state = undefined;
+  this._subscribers = [];
+
+  if (noop !== resolver) {
+    typeof resolver !== 'function' && needsResolver();
+    this instanceof Promise ? initializePromise(this, resolver) : needsNew();
+  }
+}
+
+Promise.all = all;
+Promise.race = race;
+Promise.resolve = resolve;
+Promise.reject = reject;
+Promise._setScheduler = setScheduler;
+Promise._setAsap = setAsap;
+Promise._asap = asap;
+
+Promise.prototype = {
+  constructor: Promise,
+
+  /**
+    The primary way of interacting with a promise is through its `then` method,
+    which registers callbacks to receive either a promise's eventual value or the
+    reason why the promise cannot be fulfilled.
+  
+    ```js
+    findUser().then(function(user){
+      // user is available
+    }, function(reason){
+      // user is unavailable, and you are given the reason why
+    });
+    ```
+  
+    Chaining
+    --------
+  
+    The return value of `then` is itself a promise.  This second, 'downstream'
+    promise is resolved with the return value of the first promise's fulfillment
+    or rejection handler, or rejected if the handler throws an exception.
+  
+    ```js
+    findUser().then(function (user) {
+      return user.name;
+    }, function (reason) {
+      return 'default name';
+    }).then(function (userName) {
+      // If `findUser` fulfilled, `userName` will be the user's name, otherwise it
+      // will be `'default name'`
+    });
+  
+    findUser().then(function (user) {
+      throw new Error('Found user, but still unhappy');
+    }, function (reason) {
+      throw new Error('`findUser` rejected and we're unhappy');
+    }).then(function (value) {
+      // never reached
+    }, function (reason) {
+      // if `findUser` fulfilled, `reason` will be 'Found user, but still unhappy'.
+      // If `findUser` rejected, `reason` will be '`findUser` rejected and we're unhappy'.
+    });
+    ```
+    If the downstream promise does not specify a rejection handler, rejection reasons will be propagated further downstream.
+  
+    ```js
+    findUser().then(function (user) {
+      throw new PedagogicalException('Upstream error');
+    }).then(function (value) {
+      // never reached
+    }).then(function (value) {
+      // never reached
+    }, function (reason) {
+      // The `PedgagocialException` is propagated all the way down to here
+    });
+    ```
+  
+    Assimilation
+    ------------
+  
+    Sometimes the value you want to propagate to a downstream promise can only be
+    retrieved asynchronously. This can be achieved by returning a promise in the
+    fulfillment or rejection handler. The downstream promise will then be pending
+    until the returned promise is settled. This is called *assimilation*.
+  
+    ```js
+    findUser().then(function (user) {
+      return findCommentsByAuthor(user);
+    }).then(function (comments) {
+      // The user's comments are now available
+    });
+    ```
+  
+    If the assimliated promise rejects, then the downstream promise will also reject.
+  
+    ```js
+    findUser().then(function (user) {
+      return findCommentsByAuthor(user);
+    }).then(function (comments) {
+      // If `findCommentsByAuthor` fulfills, we'll have the value here
+    }, function (reason) {
+      // If `findCommentsByAuthor` rejects, we'll have the reason here
+    });
+    ```
+  
+    Simple Example
+    --------------
+  
+    Synchronous Example
+  
+    ```javascript
+    let result;
+  
+    try {
+      result = findResult();
+      // success
+    } catch(reason) {
+      // failure
+    }
+    ```
+  
+    Errback Example
+  
+    ```js
+    findResult(function(result, err){
+      if (err) {
+        // failure
+      } else {
+        // success
+      }
+    });
+    ```
+  
+    Promise Example;
+  
+    ```javascript
+    findResult().then(function(result){
+      // success
+    }, function(reason){
+      // failure
+    });
+    ```
+  
+    Advanced Example
+    --------------
+  
+    Synchronous Example
+  
+    ```javascript
+    let author, books;
+  
+    try {
+      author = findAuthor();
+      books  = findBooksByAuthor(author);
+      // success
+    } catch(reason) {
+      // failure
+    }
+    ```
+  
+    Errback Example
+  
+    ```js
+  
+    function foundBooks(books) {
+  
+    }
+  
+    function failure(reason) {
+  
+    }
+  
+    findAuthor(function(author, err){
+      if (err) {
+        failure(err);
+        // failure
+      } else {
+        try {
+          findBoooksByAuthor(author, function(books, err) {
+            if (err) {
+              failure(err);
+            } else {
+              try {
+                foundBooks(books);
+              } catch(reason) {
+                failure(reason);
+              }
+            }
+          });
+        } catch(error) {
+          failure(err);
+        }
+        // success
+      }
+    });
+    ```
+  
+    Promise Example;
+  
+    ```javascript
+    findAuthor().
+      then(findBooksByAuthor).
+      then(function(books){
+        // found books
+    }).catch(function(reason){
+      // something went wrong
+    });
+    ```
+  
+    @method then
+    @param {Function} onFulfilled
+    @param {Function} onRejected
+    Useful for tooling.
+    @return {Promise}
+  */
+  then: then,
+
+  /**
+    `catch` is simply sugar for `then(undefined, onRejection)` which makes it the same
+    as the catch block of a try/catch statement.
+  
+    ```js
+    function findAuthor(){
+      throw new Error('couldn't find that author');
+    }
+  
+    // synchronous
+    try {
+      findAuthor();
+    } catch(reason) {
+      // something went wrong
+    }
+  
+    // async with promises
+    findAuthor().catch(function(reason){
+      // something went wrong
+    });
+    ```
+  
+    @method catch
+    @param {Function} onRejection
+    Useful for tooling.
+    @return {Promise}
+  */
+  'catch': function _catch(onRejection) {
+    return this.then(null, onRejection);
+  }
+};
+
+function polyfill() {
+    var local = undefined;
+
+    if (typeof global !== 'undefined') {
+        local = global;
+    } else if (typeof self !== 'undefined') {
+        local = self;
+    } else {
+        try {
+            local = Function('return this')();
+        } catch (e) {
+            throw new Error('polyfill failed because global object is unavailable in this environment');
+        }
+    }
+
+    var P = local.Promise;
+
+    if (P) {
+        var promiseToString = null;
+        try {
+            promiseToString = Object.prototype.toString.call(P.resolve());
+        } catch (e) {
+            // silently ignored
+        }
+
+        if (promiseToString === '[object Promise]' && !P.cast) {
+            return;
+        }
+    }
+
+    local.Promise = Promise;
+}
+
+polyfill();
+// Strange compat..
+Promise.polyfill = polyfill;
+Promise.Promise = Promise;
+
+return Promise;
+
+})));
+
+}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{"_process":98}],3:[function(require,module,exports){
 var request = require('superagent');
 var Promise = require('es6-promise').Promise;
 
@@ -1477,7 +1338,7 @@ request.parse['application/octect-stream'] = function (obj) {
 buildCustomError = function (error, response) {
   return {
     status: error.status,
-    error: response.text,
+    error: (response ? response.text : null) || error.toString(),
     response: response
   };
 };
@@ -1553,10 +1414,7 @@ downloadRequest = function (path, args, accessToken, selectUser) {
 
 module.exports = downloadRequest;
 
-},{"es6-promise":16,"superagent":2}],7:[function(require,module,exports){
-var downloadRequest = require('./download-request');
-var rpcRequest = require('./rpc-request');
-var uploadRequest = require('./upload-request');
+},{"es6-promise":2,"superagent":103}],4:[function(require,module,exports){
 var REQUEST_CONSTANTS = require('./request-constants');
 var DropboxBase;
 
@@ -1649,48 +1507,54 @@ DropboxBase.prototype.getAuthenticationUrl = function (redirectUri, state) {
 
 DropboxBase.prototype.request = function (path, args, host, style) {
   if (style === REQUEST_CONSTANTS.RPC) {
-    return this.rpcRequest(path, args, this.getAccessToken(), this.selectUser);
+    return this.getRpcRequest()(path, args, this.getAccessToken(), this.selectUser);
   } else if (style === REQUEST_CONSTANTS.DOWNLOAD) {
-    return this.downloadRequest(path, args, this.getAccessToken(), this.selectUser);
+    return this.getDownloadRequest()(path, args, this.getAccessToken(), this.selectUser);
   } else if (style === REQUEST_CONSTANTS.UPLOAD) {
-    return this.uploadRequest(path, args, this.getAccessToken(), this.selectUser);
+    return this.getUploadRequest()(path, args, this.getAccessToken(), this.selectUser);
   }
   throw new Error('Invalid request type');
 };
-
-DropboxBase.prototype.rpcRequest = rpcRequest;
 
 DropboxBase.prototype.setRpcRequest = function (newRpcRequest) {
   DropboxBase.prototype.rpcRequest = newRpcRequest;
 };
 
 DropboxBase.prototype.getRpcRequest = function () {
+  if (DropboxBase.prototype.rpcRequest === undefined) {
+    DropboxBase.prototype.rpcRequest = require('./rpc-request');
+  }
+
   return DropboxBase.prototype.rpcRequest;
 };
-
-DropboxBase.prototype.downloadRequest = downloadRequest;
 
 DropboxBase.prototype.setDownloadRequest = function (newDownloadRequest) {
   DropboxBase.prototype.downloadRequest = newDownloadRequest;
 };
 
 DropboxBase.prototype.getDownloadRequest = function () {
+  if (DropboxBase.prototype.downloadRequest === undefined) {
+    DropboxBase.prototype.downloadRequest = require('./download-request');
+  }
+
   return DropboxBase.prototype.downloadRequest;
 };
-
-DropboxBase.prototype.uploadRequest = uploadRequest;
 
 DropboxBase.prototype.setUploadRequest = function (newUploadRequest) {
   DropboxBase.prototype.uploadRequest = newUploadRequest;
 };
 
 DropboxBase.prototype.getUploadRequest = function () {
+  if (DropboxBase.prototype.uploadRequest === undefined) {
+    DropboxBase.prototype.uploadRequest = require('./upload-request');
+  }
+
   return DropboxBase.prototype.uploadRequest;
 };
 
 module.exports = DropboxBase;
 
-},{"./download-request":6,"./object-assign-polyfill":10,"./request-constants":11,"./rpc-request":13,"./upload-request":14}],8:[function(require,module,exports){
+},{"./download-request":3,"./object-assign-polyfill":7,"./request-constants":8,"./rpc-request":10,"./upload-request":11}],5:[function(require,module,exports){
 var DropboxBase = require('./dropbox-base');
 var routes = require('./routes');
 var Dropbox;
@@ -1725,12 +1589,12 @@ Dropbox.prototype.filesGetSharedLinkFile = function (arg) {
 
 module.exports = Dropbox;
 
-},{"./dropbox-base":7,"./routes":12}],9:[function(require,module,exports){
+},{"./dropbox-base":4,"./routes":9}],6:[function(require,module,exports){
 var Dropbox = require('./dropbox');
 
 module.exports = Dropbox;
 
-},{"./dropbox":8}],10:[function(require,module,exports){
+},{"./dropbox":5}],7:[function(require,module,exports){
 // Polyfill object.assign for legacy browsers
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/assign
 if (typeof Object.assign !== 'function') {
@@ -1761,7 +1625,7 @@ if (typeof Object.assign !== 'function') {
   }());
 }
 
-},{}],11:[function(require,module,exports){
+},{}],8:[function(require,module,exports){
 var REQUEST_CONSTANTS = {
   RPC: 'rpc',
   DOWNLOAD: 'download',
@@ -1770,15 +1634,15 @@ var REQUEST_CONSTANTS = {
 
 module.exports = REQUEST_CONSTANTS;
 
-},{}],12:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 // Auto-generated by Stone, do not modify.
 var routes = {};
 
 /**
  * Disables the access token used to authenticate the call.
  * @function Dropbox#authTokenRevoke
- * @arg {null} arg - The request parameters.
- * @returns {null}
+ * @arg {void} arg - The request parameters.
+ * @returns {Promise.<void, Error.<void>>}
  */
 routes.authTokenRevoke = function (arg) {
   return this.request('auth/token/revoke', arg, 'api', 'rpc');
@@ -1789,19 +1653,8 @@ routes.authTokenRevoke = function (arg) {
  * compatible with the properties API. Note: Metadata for the root folder is
  * unsupported.
  * @function Dropbox#filesAlphaGetMetadata
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path of a file or folder on Dropbox.
- * @arg {Boolean} arg.include_media_info - If true, FileMetadata.media_info is
- * set for photo and video.
- * @arg {Boolean} arg.include_deleted - If true, DeletedMetadata will be
- * returned for deleted file or folder, otherwise LookupError.not_found will be
- * returned.
- * @arg {Boolean} arg.include_has_explicit_shared_members - If true, the results
- * will include a flag for each file indicating whether or not  that file has
- * any explicit members.
- * @arg {Array|null} arg.include_property_templates - If true,
- * FileMetadata.property_groups is set for files with custom properties.
- * @returns {Object}
+ * @arg {FilesAlphaGetMetadataArg} arg - The request parameters.
+ * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesAlphaGetMetadataError>>}
  */
 routes.filesAlphaGetMetadata = function (arg) {
   return this.request('files/alpha/get_metadata', arg, 'api', 'rpc');
@@ -1813,24 +1666,8 @@ routes.filesAlphaGetMetadata = function (arg) {
  * upload. Do not use this to upload a file larger than 150 MB. Instead, create
  * an upload session with upload_session/start.
  * @function Dropbox#filesAlphaUpload
- * @arg {Object} arg - The request parameters.
- * @arg {Object} arg.contents - The file contents to be uploaded.
- * @arg {String} arg.path - Path in the user's Dropbox to save the file.
- * @arg {Object} arg.mode - Selects what to do if the file already exists.
- * @arg {Boolean} arg.autorename - If there's a conflict, as determined by mode,
- * have the Dropbox server try to autorename the file to avoid conflict.
- * @arg {Object|null} arg.client_modified - The value to store as the
- * client_modified timestamp. Dropbox automatically records the time at which
- * the file was written to the Dropbox servers. It can also record an additional
- * timestamp, provided by Dropbox desktop clients, mobile clients, and API apps
- * of when the file was actually created or modified.
- * @arg {Boolean} arg.mute - Normally, users are made aware of any file
- * modifications in their Dropbox account via notifications in the client
- * software. If true, this tells the clients that this modification shouldn't
- * result in a user notification.
- * @arg {Array|null} arg.property_groups - List of custom properties to add to
- * file.
- * @returns {Object}
+ * @arg {FilesCommitInfoWithProperties} arg - The request parameters.
+ * @returns {Promise.<FilesFileMetadata, Error.<FilesUploadErrorWithProperties>>}
  */
 routes.filesAlphaUpload = function (arg) {
   return this.request('files/alpha/upload', arg, 'content', 'upload');
@@ -1840,15 +1677,38 @@ routes.filesAlphaUpload = function (arg) {
  * Copy a file or folder to a different location in the user's Dropbox. If the
  * source path is a folder all its contents will be copied.
  * @function Dropbox#filesCopy
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.from_path - Path in the user's Dropbox to be copied or
- * moved.
- * @arg {String} arg.to_path - Path in the user's Dropbox that is the
- * destination.
- * @returns {Object}
+ * @arg {FilesRelocationArg} arg - The request parameters.
+ * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesRelocationError>>}
  */
 routes.filesCopy = function (arg) {
   return this.request('files/copy', arg, 'api', 'rpc');
+};
+
+/**
+ * Copy multiple files or folders to different locations at once in the user's
+ * Dropbox. If RelocationBatchArg.allow_shared_folder is false, this route is
+ * atomic. If on entry failes, the whole transaction will abort. If
+ * RelocationBatchArg.allow_shared_folder is true, not atomicity is guaranteed,
+ * but you will be able to copy the contents of shared folders to new locations.
+ * This route will return job ID immediately and do the async copy job in
+ * background. Please use copy_batch/check to check the job status.
+ * @function Dropbox#filesCopyBatch
+ * @arg {FilesRelocationBatchArg} arg - The request parameters.
+ * @returns {Promise.<AsyncLaunchEmptyResult, Error.<void>>}
+ */
+routes.filesCopyBatch = function (arg) {
+  return this.request('files/copy_batch', arg, 'api', 'rpc');
+};
+
+/**
+ * Returns the status of an asynchronous job for copy_batch. If success, it
+ * returns list of results for each entry.
+ * @function Dropbox#filesCopyBatchCheck
+ * @arg {AsyncPollArg} arg - The request parameters.
+ * @returns {Promise.<FilesRelocationBatchJobStatus, Error.<AsyncPollError>>}
+ */
+routes.filesCopyBatchCheck = function (arg) {
+  return this.request('files/copy_batch/check', arg, 'api', 'rpc');
 };
 
 /**
@@ -1856,10 +1716,8 @@ routes.filesCopy = function (arg) {
  * to save that file or folder to another user's Dropbox by passing it to
  * copy_reference/save.
  * @function Dropbox#filesCopyReferenceGet
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to the file or folder you want to get a
- * copy reference to.
- * @returns {Object}
+ * @arg {FilesGetCopyReferenceArg} arg - The request parameters.
+ * @returns {Promise.<FilesGetCopyReferenceResult, Error.<FilesGetCopyReferenceError>>}
  */
 routes.filesCopyReferenceGet = function (arg) {
   return this.request('files/copy_reference/get', arg, 'api', 'rpc');
@@ -1868,11 +1726,8 @@ routes.filesCopyReferenceGet = function (arg) {
 /**
  * Save a copy reference returned by copy_reference/get to the user's Dropbox.
  * @function Dropbox#filesCopyReferenceSave
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.copy_reference - A copy reference returned by
- * copy_reference/get.
- * @arg {String} arg.path - Path in the user's Dropbox that is the destination.
- * @returns {Object}
+ * @arg {FilesSaveCopyReferenceArg} arg - The request parameters.
+ * @returns {Promise.<FilesSaveCopyReferenceResult, Error.<FilesSaveCopyReferenceError>>}
  */
 routes.filesCopyReferenceSave = function (arg) {
   return this.request('files/copy_reference/save', arg, 'api', 'rpc');
@@ -1881,9 +1736,8 @@ routes.filesCopyReferenceSave = function (arg) {
 /**
  * Create a folder at a given path.
  * @function Dropbox#filesCreateFolder
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - Path in the user's Dropbox to create.
- * @returns {Object}
+ * @arg {FilesCreateFolderArg} arg - The request parameters.
+ * @returns {Promise.<FilesFolderMetadata, Error.<FilesCreateFolderError>>}
  */
 routes.filesCreateFolder = function (arg) {
   return this.request('files/create_folder', arg, 'api', 'rpc');
@@ -1896,22 +1750,41 @@ routes.filesCreateFolder = function (arg) {
  * FileMetadata or FolderMetadata for the item at time of deletion, and not a
  * DeletedMetadata object.
  * @function Dropbox#filesDelete
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - Path in the user's Dropbox to delete.
- * @returns {Object}
+ * @arg {FilesDeleteArg} arg - The request parameters.
+ * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesDeleteError>>}
  */
 routes.filesDelete = function (arg) {
   return this.request('files/delete', arg, 'api', 'rpc');
 };
 
 /**
+ * Delete multiple files/folders at once. This route is asynchronous, which
+ * returns a job ID immediately and runs the delete batch asynchronously. Use
+ * delete_batch/check to check the job status.
+ * @function Dropbox#filesDeleteBatch
+ * @arg {FilesDeleteBatchArg} arg - The request parameters.
+ * @returns {Promise.<AsyncLaunchEmptyResult, Error.<void>>}
+ */
+routes.filesDeleteBatch = function (arg) {
+  return this.request('files/delete_batch', arg, 'api', 'rpc');
+};
+
+/**
+ * Returns the status of an asynchronous job for delete_batch. If success, it
+ * returns list of result for each entry.
+ * @function Dropbox#filesDeleteBatchCheck
+ * @arg {AsyncPollArg} arg - The request parameters.
+ * @returns {Promise.<FilesDeleteBatchJobStatus, Error.<AsyncPollError>>}
+ */
+routes.filesDeleteBatchCheck = function (arg) {
+  return this.request('files/delete_batch/check', arg, 'api', 'rpc');
+};
+
+/**
  * Download a file from a user's Dropbox.
  * @function Dropbox#filesDownload
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path of the file to download.
- * @arg {String|null} arg.rev - Deprecated. Please specify revision in path
- * instead
- * @returns {Object}
+ * @arg {FilesDownloadArg} arg - The request parameters.
+ * @returns {Promise.<FilesFileMetadata, Error.<FilesDownloadError>>}
  */
 routes.filesDownload = function (arg) {
   return this.request('files/download', arg, 'content', 'download');
@@ -1921,17 +1794,8 @@ routes.filesDownload = function (arg) {
  * Returns the metadata for a file or folder. Note: Metadata for the root folder
  * is unsupported.
  * @function Dropbox#filesGetMetadata
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path of a file or folder on Dropbox.
- * @arg {Boolean} arg.include_media_info - If true, FileMetadata.media_info is
- * set for photo and video.
- * @arg {Boolean} arg.include_deleted - If true, DeletedMetadata will be
- * returned for deleted file or folder, otherwise LookupError.not_found will be
- * returned.
- * @arg {Boolean} arg.include_has_explicit_shared_members - If true, the results
- * will include a flag for each file indicating whether or not  that file has
- * any explicit members.
- * @returns {Object}
+ * @arg {FilesGetMetadataArg} arg - The request parameters.
+ * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesGetMetadataError>>}
  */
 routes.filesGetMetadata = function (arg) {
   return this.request('files/get_metadata', arg, 'api', 'rpc');
@@ -1940,13 +1804,10 @@ routes.filesGetMetadata = function (arg) {
 /**
  * Get a preview for a file. Currently previews are only generated for the files
  * with  the following extensions: .doc, .docx, .docm, .ppt, .pps, .ppsx, .ppsm,
- * .pptx, .pptm,  .xls, .xlsx, .xlsm, .rtf
+ * .pptx, .pptm,  .xls, .xlsx, .xlsm, .rtf.
  * @function Dropbox#filesGetPreview
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path of the file to preview.
- * @arg {String|null} arg.rev - Deprecated. Please specify revision in path
- * instead
- * @returns {Object}
+ * @arg {FilesPreviewArg} arg - The request parameters.
+ * @returns {Promise.<FilesFileMetadata, Error.<FilesPreviewError>>}
  */
 routes.filesGetPreview = function (arg) {
   return this.request('files/get_preview', arg, 'content', 'download');
@@ -1957,9 +1818,8 @@ routes.filesGetPreview = function (arg) {
  * four hours and afterwards you will get 410 Gone. Content-Type of the link is
  * determined automatically by the file's mime type.
  * @function Dropbox#filesGetTemporaryLink
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to the file you want a temporary link to.
- * @returns {Object}
+ * @arg {FilesGetTemporaryLinkArg} arg - The request parameters.
+ * @returns {Promise.<FilesGetTemporaryLinkResult, Error.<FilesGetTemporaryLinkError>>}
  */
 routes.filesGetTemporaryLink = function (arg) {
   return this.request('files/get_temporary_link', arg, 'api', 'rpc');
@@ -1970,35 +1830,33 @@ routes.filesGetTemporaryLink = function (arg) {
  * following file extensions: jpg, jpeg, png, tiff, tif, gif and bmp. Photos
  * that are larger than 20MB in size won't be converted to a thumbnail.
  * @function Dropbox#filesGetThumbnail
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to the image file you want to thumbnail.
- * @arg {Object} arg.format - The format for the thumbnail image, jpeg (default)
- * or png. For  images that are photos, jpeg should be preferred, while png is
- * better for screenshots and digital arts.
- * @arg {Object} arg.size - The size for the thumbnail image.
- * @returns {Object}
+ * @arg {FilesThumbnailArg} arg - The request parameters.
+ * @returns {Promise.<FilesFileMetadata, Error.<FilesThumbnailError>>}
  */
 routes.filesGetThumbnail = function (arg) {
   return this.request('files/get_thumbnail', arg, 'content', 'download');
 };
 
 /**
- * Returns the contents of a folder.
+ * Starts returning the contents of a folder. If the result's
+ * ListFolderResult.has_more field is true, call list_folder/continue with the
+ * returned ListFolderResult.cursor to retrieve more entries. If you're using
+ * ListFolderArg.recursive set to true to keep a local cache of the contents of
+ * a Dropbox account, iterate through each entry in order and process them as
+ * follows to keep your local state in sync: For each FileMetadata, store the
+ * new entry at the given path in your local state. If the required parent
+ * folders don't exist yet, create them. If there's already something else at
+ * the given path, replace it and remove all its children. For each
+ * FolderMetadata, store the new entry at the given path in your local state. If
+ * the required parent folders don't exist yet, create them. If there's already
+ * something else at the given path, replace it but leave the children as they
+ * are. Check the new entry's FolderSharingInfo.read_only and set all its
+ * children's read-only statuses to match. For each DeletedMetadata, if your
+ * local state has something at the given path, remove it and all its children.
+ * If there's nothing at the given path, ignore this entry.
  * @function Dropbox#filesListFolder
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to the folder you want to see the contents
- * of.
- * @arg {Boolean} arg.recursive - If true, the list folder operation will be
- * applied recursively to all subfolders and the response will contain contents
- * of all subfolders.
- * @arg {Boolean} arg.include_media_info - If true, FileMetadata.media_info is
- * set for photo and video.
- * @arg {Boolean} arg.include_deleted - If true, the results will include
- * entries for files and folders that used to exist but were deleted.
- * @arg {Boolean} arg.include_has_explicit_shared_members - If true, the results
- * will include a flag for each file indicating whether or not  that file has
- * any explicit members.
- * @returns {Object}
+ * @arg {FilesListFolderArg} arg - The request parameters.
+ * @returns {Promise.<FilesListFolderResult, Error.<FilesListFolderError>>}
  */
 routes.filesListFolder = function (arg) {
   return this.request('files/list_folder', arg, 'api', 'rpc');
@@ -2006,12 +1864,11 @@ routes.filesListFolder = function (arg) {
 
 /**
  * Once a cursor has been retrieved from list_folder, use this to paginate
- * through all files and retrieve updates to the folder.
+ * through all files and retrieve updates to the folder, following the same
+ * rules as documented for list_folder.
  * @function Dropbox#filesListFolderContinue
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.cursor - The cursor returned by your last call to
- * list_folder or list_folder/continue.
- * @returns {Object}
+ * @arg {FilesListFolderContinueArg} arg - The request parameters.
+ * @returns {Promise.<FilesListFolderResult, Error.<FilesListFolderContinueError>>}
  */
 routes.filesListFolderContinue = function (arg) {
   return this.request('files/list_folder/continue', arg, 'api', 'rpc');
@@ -2023,20 +1880,8 @@ routes.filesListFolderContinue = function (arg) {
  * for app which only needs to know about new files and modifications and
  * doesn't need to know about files that already exist in Dropbox.
  * @function Dropbox#filesListFolderGetLatestCursor
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to the folder you want to see the contents
- * of.
- * @arg {Boolean} arg.recursive - If true, the list folder operation will be
- * applied recursively to all subfolders and the response will contain contents
- * of all subfolders.
- * @arg {Boolean} arg.include_media_info - If true, FileMetadata.media_info is
- * set for photo and video.
- * @arg {Boolean} arg.include_deleted - If true, the results will include
- * entries for files and folders that used to exist but were deleted.
- * @arg {Boolean} arg.include_has_explicit_shared_members - If true, the results
- * will include a flag for each file indicating whether or not  that file has
- * any explicit members.
- * @returns {Object}
+ * @arg {FilesListFolderArg} arg - The request parameters.
+ * @returns {Promise.<FilesListFolderGetLatestCursorResult, Error.<FilesListFolderError>>}
  */
 routes.filesListFolderGetLatestCursor = function (arg) {
   return this.request('files/list_folder/get_latest_cursor', arg, 'api', 'rpc');
@@ -2050,28 +1895,18 @@ routes.filesListFolderGetLatestCursor = function (arg) {
  * apps. If you're looking for server-side notifications, check out our webhooks
  * documentation https://www.dropbox.com/developers/reference/webhooks.
  * @function Dropbox#filesListFolderLongpoll
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.cursor - A cursor as returned by list_folder or
- * list_folder/continue. Cursors retrieved by setting
- * ListFolderArg.include_media_info to true are not supported.
- * @arg {Number} arg.timeout - A timeout in seconds. The request will block for
- * at most this length of time, plus up to 90 seconds of random jitter added to
- * avoid the thundering herd problem. Care should be taken when using this
- * parameter, as some network infrastructure does not support long timeouts.
- * @returns {Object}
+ * @arg {FilesListFolderLongpollArg} arg - The request parameters.
+ * @returns {Promise.<FilesListFolderLongpollResult, Error.<FilesListFolderLongpollError>>}
  */
 routes.filesListFolderLongpoll = function (arg) {
   return this.request('files/list_folder/longpoll', arg, 'notify', 'rpc');
 };
 
 /**
- * Return revisions of a file
+ * Return revisions of a file.
  * @function Dropbox#filesListRevisions
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to the file you want to see the revisions
- * of.
- * @arg {Number} arg.limit - The maximum number of revision entries returned.
- * @returns {Object}
+ * @arg {FilesListRevisionsArg} arg - The request parameters.
+ * @returns {Promise.<FilesListRevisionsResult, Error.<FilesListRevisionsError>>}
  */
 routes.filesListRevisions = function (arg) {
   return this.request('files/list_revisions', arg, 'api', 'rpc');
@@ -2081,15 +1916,36 @@ routes.filesListRevisions = function (arg) {
  * Move a file or folder to a different location in the user's Dropbox. If the
  * source path is a folder all its contents will be moved.
  * @function Dropbox#filesMove
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.from_path - Path in the user's Dropbox to be copied or
- * moved.
- * @arg {String} arg.to_path - Path in the user's Dropbox that is the
- * destination.
- * @returns {Object}
+ * @arg {FilesRelocationArg} arg - The request parameters.
+ * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesRelocationError>>}
  */
 routes.filesMove = function (arg) {
   return this.request('files/move', arg, 'api', 'rpc');
+};
+
+/**
+ * Move multiple files or folders to different locations at once in the user's
+ * Dropbox. This route is 'all or nothing', which means if one entry fails, the
+ * whole transaction will abort. This route will return job ID immediately and
+ * do the async moving job in background. Please use move_batch/check to check
+ * the job status.
+ * @function Dropbox#filesMoveBatch
+ * @arg {FilesRelocationBatchArg} arg - The request parameters.
+ * @returns {Promise.<AsyncLaunchEmptyResult, Error.<void>>}
+ */
+routes.filesMoveBatch = function (arg) {
+  return this.request('files/move_batch', arg, 'api', 'rpc');
+};
+
+/**
+ * Returns the status of an asynchronous job for move_batch. If success, it
+ * returns list of results for each entry.
+ * @function Dropbox#filesMoveBatchCheck
+ * @arg {AsyncPollArg} arg - The request parameters.
+ * @returns {Promise.<FilesRelocationBatchJobStatus, Error.<AsyncPollError>>}
+ */
+routes.filesMoveBatchCheck = function (arg) {
+  return this.request('files/move_batch/check', arg, 'api', 'rpc');
 };
 
 /**
@@ -2097,9 +1953,8 @@ routes.filesMove = function (arg) {
  * https://www.dropbox.com/en/help/40). Note: This endpoint is only available
  * for Dropbox Business apps.
  * @function Dropbox#filesPermanentlyDelete
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - Path in the user's Dropbox to delete.
- * @returns {null}
+ * @arg {FilesDeleteArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<FilesDeleteError>>}
  */
 routes.filesPermanentlyDelete = function (arg) {
   return this.request('files/permanently_delete', arg, 'api', 'rpc');
@@ -2109,11 +1964,8 @@ routes.filesPermanentlyDelete = function (arg) {
  * Add custom properties to a file using a filled property template. See
  * properties/template/add to create new property templates.
  * @function Dropbox#filesPropertiesAdd
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - A unique identifier for the file.
- * @arg {Array} arg.property_groups - Filled custom property templates
- * associated with a file.
- * @returns {null}
+ * @arg {FilesPropertyGroupWithPath} arg - The request parameters.
+ * @returns {Promise.<void, Error.<FilesAddPropertiesError>>}
  */
 routes.filesPropertiesAdd = function (arg) {
   return this.request('files/properties/add', arg, 'api', 'rpc');
@@ -2122,11 +1974,8 @@ routes.filesPropertiesAdd = function (arg) {
 /**
  * Overwrite custom properties from a specified template associated with a file.
  * @function Dropbox#filesPropertiesOverwrite
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - A unique identifier for the file.
- * @arg {Array} arg.property_groups - Filled custom property templates
- * associated with a file.
- * @returns {null}
+ * @arg {FilesPropertyGroupWithPath} arg - The request parameters.
+ * @returns {Promise.<void, Error.<FilesInvalidPropertyGroupError>>}
  */
 routes.filesPropertiesOverwrite = function (arg) {
   return this.request('files/properties/overwrite', arg, 'api', 'rpc');
@@ -2138,11 +1987,8 @@ routes.filesPropertiesOverwrite = function (arg) {
  * update a property template, see properties/template/update. Property
  * templates can't be removed once created.
  * @function Dropbox#filesPropertiesRemove
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - A unique identifier for the file.
- * @arg {Array} arg.property_template_ids - A list of identifiers for a property
- * template created by route properties/template/add.
- * @returns {null}
+ * @arg {FilesRemovePropertiesArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<FilesRemovePropertiesError>>}
  */
 routes.filesPropertiesRemove = function (arg) {
   return this.request('files/properties/remove', arg, 'api', 'rpc');
@@ -2151,10 +1997,8 @@ routes.filesPropertiesRemove = function (arg) {
 /**
  * Get the schema for a specified template.
  * @function Dropbox#filesPropertiesTemplateGet
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.template_id - An identifier for property template added by
- * route properties/template/add.
- * @returns {Object}
+ * @arg {PropertiesGetPropertyTemplateArg} arg - The request parameters.
+ * @returns {Promise.<PropertiesGetPropertyTemplateResult, Error.<PropertiesPropertyTemplateError>>}
  */
 routes.filesPropertiesTemplateGet = function (arg) {
   return this.request('files/properties/template/get', arg, 'api', 'rpc');
@@ -2164,8 +2008,8 @@ routes.filesPropertiesTemplateGet = function (arg) {
  * Get the property template identifiers for a user. To get the schema of each
  * template use properties/template/get.
  * @function Dropbox#filesPropertiesTemplateList
- * @arg {null} arg - The request parameters.
- * @returns {Object}
+ * @arg {void} arg - The request parameters.
+ * @returns {Promise.<PropertiesListPropertyTemplateIds, Error.<PropertiesPropertyTemplateError>>}
  */
 routes.filesPropertiesTemplateList = function (arg) {
   return this.request('files/properties/template/list', arg, 'api', 'rpc');
@@ -2176,23 +2020,18 @@ routes.filesPropertiesTemplateList = function (arg) {
  * with a file. Fields that already exist and not described in the request will
  * not be modified.
  * @function Dropbox#filesPropertiesUpdate
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - A unique identifier for the file.
- * @arg {Array} arg.update_property_groups - Filled custom property templates
- * associated with a file.
- * @returns {null}
+ * @arg {FilesUpdatePropertyGroupArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<FilesUpdatePropertiesError>>}
  */
 routes.filesPropertiesUpdate = function (arg) {
   return this.request('files/properties/update', arg, 'api', 'rpc');
 };
 
 /**
- * Restore a file to a specific revision
+ * Restore a file to a specific revision.
  * @function Dropbox#filesRestore
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to the file you want to restore.
- * @arg {String} arg.rev - The revision to restore for the file.
- * @returns {Object}
+ * @arg {FilesRestoreArg} arg - The request parameters.
+ * @returns {Promise.<FilesFileMetadata, Error.<FilesRestoreError>>}
  */
 routes.filesRestore = function (arg) {
   return this.request('files/restore', arg, 'api', 'rpc');
@@ -2202,10 +2041,8 @@ routes.filesRestore = function (arg) {
  * Save a specified URL into a file in user's Dropbox. If the given path already
  * exists, the file will be renamed to avoid the conflict (e.g. myfile (1).txt).
  * @function Dropbox#filesSaveUrl
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path in Dropbox where the URL will be saved to.
- * @arg {String} arg.url - The URL to be saved.
- * @returns {Object}
+ * @arg {FilesSaveUrlArg} arg - The request parameters.
+ * @returns {Promise.<FilesSaveUrlResult, Error.<FilesSaveUrlError>>}
  */
 routes.filesSaveUrl = function (arg) {
   return this.request('files/save_url', arg, 'api', 'rpc');
@@ -2214,10 +2051,8 @@ routes.filesSaveUrl = function (arg) {
 /**
  * Check the status of a save_url job.
  * @function Dropbox#filesSaveUrlCheckJobStatus
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.async_job_id - Id of the asynchronous job. This is the
- * value of a response returned from the method that launched the job.
- * @returns {Object}
+ * @arg {AsyncPollArg} arg - The request parameters.
+ * @returns {Promise.<FilesSaveUrlJobStatus, Error.<AsyncPollError>>}
  */
 routes.filesSaveUrlCheckJobStatus = function (arg) {
   return this.request('files/save_url/check_job_status', arg, 'api', 'rpc');
@@ -2227,21 +2062,8 @@ routes.filesSaveUrlCheckJobStatus = function (arg) {
  * Searches for files and folders. Note: Recent changes may not immediately be
  * reflected in search results due to a short delay in indexing.
  * @function Dropbox#filesSearch
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path in the user's Dropbox to search. Should
- * probably be a folder.
- * @arg {String} arg.query - The string to search for. The search string is
- * split on spaces into multiple tokens. For file name searching, the last token
- * is used for prefix matching (i.e. "bat c" matches "bat cave" but not "batman
- * car").
- * @arg {Number} arg.start - The starting index within the search results (used
- * for paging).
- * @arg {Number} arg.max_results - The maximum number of search results to
- * return.
- * @arg {Object} arg.mode - The search mode (filename, filename_and_content, or
- * deleted_filename). Note that searching file content is only available for
- * Dropbox Business accounts.
- * @returns {Object}
+ * @arg {FilesSearchArg} arg - The request parameters.
+ * @returns {Promise.<FilesSearchResult, Error.<FilesSearchError>>}
  */
 routes.filesSearch = function (arg) {
   return this.request('files/search', arg, 'api', 'rpc');
@@ -2252,22 +2074,8 @@ routes.filesSearch = function (arg) {
  * to upload a file larger than 150 MB. Instead, create an upload session with
  * upload_session/start.
  * @function Dropbox#filesUpload
- * @arg {Object} arg - The request parameters.
- * @arg {Object} arg.contents - The file contents to be uploaded.
- * @arg {String} arg.path - Path in the user's Dropbox to save the file.
- * @arg {Object} arg.mode - Selects what to do if the file already exists.
- * @arg {Boolean} arg.autorename - If there's a conflict, as determined by mode,
- * have the Dropbox server try to autorename the file to avoid conflict.
- * @arg {Object|null} arg.client_modified - The value to store as the
- * client_modified timestamp. Dropbox automatically records the time at which
- * the file was written to the Dropbox servers. It can also record an additional
- * timestamp, provided by Dropbox desktop clients, mobile clients, and API apps
- * of when the file was actually created or modified.
- * @arg {Boolean} arg.mute - Normally, users are made aware of any file
- * modifications in their Dropbox account via notifications in the client
- * software. If true, this tells the clients that this modification shouldn't
- * result in a user notification.
- * @returns {Object}
+ * @arg {FilesCommitInfo} arg - The request parameters.
+ * @returns {Promise.<FilesFileMetadata, Error.<FilesUploadError>>}
  */
 routes.filesUpload = function (arg) {
   return this.request('files/upload', arg, 'content', 'upload');
@@ -2278,14 +2086,8 @@ routes.filesUpload = function (arg) {
  * more than 150 MB of file contents.
  * @function Dropbox#filesUploadSessionAppend
  * @deprecated
- * @arg {Object} arg - The request parameters.
- * @arg {Object} arg.contents - The file contents to be uploaded.
- * @arg {String} arg.session_id - The upload session ID (returned by
- * upload_session/start).
- * @arg {Number} arg.offset - The amount of data that has been uploaded so far.
- * We use this to make sure upload data isn't lost or duplicated in the event of
- * a network error.
- * @returns {null}
+ * @arg {FilesUploadSessionCursor} arg - The request parameters.
+ * @returns {Promise.<void, Error.<FilesUploadSessionLookupError>>}
  */
 routes.filesUploadSessionAppend = function (arg) {
   return this.request('files/upload_session/append', arg, 'content', 'upload');
@@ -2296,13 +2098,8 @@ routes.filesUploadSessionAppend = function (arg) {
  * call will close the session. A single request should not upload more than 150
  * MB of file contents.
  * @function Dropbox#filesUploadSessionAppendV2
- * @arg {Object} arg - The request parameters.
- * @arg {Object} arg.contents - The file contents to be uploaded.
- * @arg {Object} arg.cursor - Contains the upload session ID and the offset.
- * @arg {Boolean} arg.close - If true, the current session will be closed, at
- * which point you won't be able to call upload_session/append_v2 anymore with
- * the current session.
- * @returns {null}
+ * @arg {FilesUploadSessionAppendArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<FilesUploadSessionLookupError>>}
  */
 routes.filesUploadSessionAppendV2 = function (arg) {
   return this.request('files/upload_session/append_v2', arg, 'content', 'upload');
@@ -2312,30 +2109,55 @@ routes.filesUploadSessionAppendV2 = function (arg) {
  * Finish an upload session and save the uploaded data to the given file path. A
  * single request should not upload more than 150 MB of file contents.
  * @function Dropbox#filesUploadSessionFinish
- * @arg {Object} arg - The request parameters.
- * @arg {Object} arg.contents - The file contents to be uploaded.
- * @arg {Object} arg.cursor - Contains the upload session ID and the offset.
- * @arg {Object} arg.commit - Contains the path and other optional modifiers for
- * the commit.
- * @returns {Object}
+ * @arg {FilesUploadSessionFinishArg} arg - The request parameters.
+ * @returns {Promise.<FilesFileMetadata, Error.<FilesUploadSessionFinishError>>}
  */
 routes.filesUploadSessionFinish = function (arg) {
   return this.request('files/upload_session/finish', arg, 'content', 'upload');
 };
 
 /**
- * Upload sessions allow you to upload a single file using multiple requests.
- * This call starts a new upload session with the given data.  You can then use
+ * This route helps you commit many files at once into a user's Dropbox. Use
+ * upload_session/start and upload_session/append_v2 to upload file contents. We
+ * recommend uploading many files in parallel to increase throughput. Once the
+ * file contents have been uploaded, rather than calling upload_session/finish,
+ * use this route to finish all your upload sessions in a single request.
+ * UploadSessionStartArg.close or UploadSessionAppendArg.close needs to be true
+ * for the last upload_session/start or upload_session/append_v2 call. This
+ * route will return a job_id immediately and do the async commit job in
+ * background. Use upload_session/finish_batch/check to check the job status.
+ * For the same account, this route should be executed serially. That means you
+ * should not start the next job before current job finishes. We allow up to
+ * 1000 entries in a single request.
+ * @function Dropbox#filesUploadSessionFinishBatch
+ * @arg {FilesUploadSessionFinishBatchArg} arg - The request parameters.
+ * @returns {Promise.<AsyncLaunchEmptyResult, Error.<void>>}
+ */
+routes.filesUploadSessionFinishBatch = function (arg) {
+  return this.request('files/upload_session/finish_batch', arg, 'api', 'rpc');
+};
+
+/**
+ * Returns the status of an asynchronous job for upload_session/finish_batch. If
+ * success, it returns list of result for each entry.
+ * @function Dropbox#filesUploadSessionFinishBatchCheck
+ * @arg {AsyncPollArg} arg - The request parameters.
+ * @returns {Promise.<FilesUploadSessionFinishBatchJobStatus, Error.<AsyncPollError>>}
+ */
+routes.filesUploadSessionFinishBatchCheck = function (arg) {
+  return this.request('files/upload_session/finish_batch/check', arg, 'api', 'rpc');
+};
+
+/**
+ * Upload sessions allow you to upload a single file in one or more requests,
+ * for example where the size of the file is greater than 150 MB.  This call
+ * starts a new upload session with the given data. You can then use
  * upload_session/append_v2 to add more data and upload_session/finish to save
  * all the data to a file in Dropbox. A single request should not upload more
  * than 150 MB of file contents.
  * @function Dropbox#filesUploadSessionStart
- * @arg {Object} arg - The request parameters.
- * @arg {Object} arg.contents - The file contents to be uploaded.
- * @arg {Boolean} arg.close - If true, the current session will be closed, at
- * which point you won't be able to call upload_session/append_v2 anymore with
- * the current session.
- * @returns {Object}
+ * @arg {FilesUploadSessionStartArg} arg - The request parameters.
+ * @returns {Promise.<FilesUploadSessionStartResult, Error.<void>>}
  */
 routes.filesUploadSessionStart = function (arg) {
   return this.request('files/upload_session/start', arg, 'content', 'upload');
@@ -2344,20 +2166,8 @@ routes.filesUploadSessionStart = function (arg) {
 /**
  * Adds specified members to a file.
  * @function Dropbox#sharingAddFileMember
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.file - File to which to add members.
- * @arg {Array} arg.members - Members to add. Note that even an email address is
- * given, this may result in a user being directy added to the membership if
- * that email is the user's main account email.
- * @arg {String|null} arg.custom_message - Message to send to added members in
- * their invitation.
- * @arg {Boolean} arg.quiet - Whether added members should be notified via
- * device notifications of their invitation.
- * @arg {Object} arg.access_level - AccessLevel union object, describing what
- * access level we want to give new members.
- * @arg {Boolean} arg.add_message_as_comment - If the custom message should be
- * added as a comment on the file.
- * @returns {Array}
+ * @arg {SharingAddFileMemberArgs} arg - The request parameters.
+ * @returns {Promise.<Array.<SharingFileMemberActionResult>, Error.<SharingAddFileMemberError>>}
  */
 routes.sharingAddFileMember = function (arg) {
   return this.request('sharing/add_file_member', arg, 'api', 'rpc');
@@ -2369,28 +2179,29 @@ routes.sharingAddFileMember = function (arg) {
  * functionality for this folder, you will need to call mount_folder on their
  * behalf. Apps must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingAddFolderMember
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @arg {Array} arg.members - The intended list of members to add.  Added
- * members will receive invites to join the shared folder.
- * @arg {Boolean} arg.quiet - Whether added members should be notified via email
- * and device notifications of their invite.
- * @arg {String|null} arg.custom_message - Optional message to display to added
- * members in their invitation.
- * @returns {null}
+ * @arg {SharingAddFolderMemberArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<SharingAddFolderMemberError>>}
  */
 routes.sharingAddFolderMember = function (arg) {
   return this.request('sharing/add_folder_member', arg, 'api', 'rpc');
 };
 
 /**
+ * Changes a member's access on a shared file.
+ * @function Dropbox#sharingChangeFileMemberAccess
+ * @arg {SharingChangeFileMemberAccessArgs} arg - The request parameters.
+ * @returns {Promise.<SharingFileMemberActionResult, Error.<SharingFileMemberActionError>>}
+ */
+routes.sharingChangeFileMemberAccess = function (arg) {
+  return this.request('sharing/change_file_member_access', arg, 'api', 'rpc');
+};
+
+/**
  * Returns the status of an asynchronous job. Apps must have full Dropbox access
  * to use this endpoint.
  * @function Dropbox#sharingCheckJobStatus
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.async_job_id - Id of the asynchronous job. This is the
- * value of a response returned from the method that launched the job.
- * @returns {Object}
+ * @arg {AsyncPollArg} arg - The request parameters.
+ * @returns {Promise.<SharingJobStatus, Error.<AsyncPollError>>}
  */
 routes.sharingCheckJobStatus = function (arg) {
   return this.request('sharing/check_job_status', arg, 'api', 'rpc');
@@ -2400,10 +2211,8 @@ routes.sharingCheckJobStatus = function (arg) {
  * Returns the status of an asynchronous job for sharing a folder. Apps must
  * have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingCheckRemoveMemberJobStatus
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.async_job_id - Id of the asynchronous job. This is the
- * value of a response returned from the method that launched the job.
- * @returns {Object}
+ * @arg {AsyncPollArg} arg - The request parameters.
+ * @returns {Promise.<SharingRemoveMemberJobStatus, Error.<AsyncPollError>>}
  */
 routes.sharingCheckRemoveMemberJobStatus = function (arg) {
   return this.request('sharing/check_remove_member_job_status', arg, 'api', 'rpc');
@@ -2413,10 +2222,8 @@ routes.sharingCheckRemoveMemberJobStatus = function (arg) {
  * Returns the status of an asynchronous job for sharing a folder. Apps must
  * have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingCheckShareJobStatus
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.async_job_id - Id of the asynchronous job. This is the
- * value of a response returned from the method that launched the job.
- * @returns {Object}
+ * @arg {AsyncPollArg} arg - The request parameters.
+ * @returns {Promise.<SharingShareFolderJobStatus, Error.<AsyncPollError>>}
  */
 routes.sharingCheckShareJobStatus = function (arg) {
   return this.request('sharing/check_share_job_status', arg, 'api', 'rpc');
@@ -2433,13 +2240,8 @@ routes.sharingCheckShareJobStatus = function (arg) {
  * revoke a shared link, use revoke_shared_link.
  * @function Dropbox#sharingCreateSharedLink
  * @deprecated
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to share.
- * @arg {Boolean} arg.short_url - Whether to return a shortened URL.
- * @arg {Object|null} arg.pending_upload - If it's okay to share a path that
- * does not yet exist, set this to either PendingUploadMode.file or
- * PendingUploadMode.folder to indicate whether to assume it's a file or folder.
- * @returns {Object}
+ * @arg {SharingCreateSharedLinkArg} arg - The request parameters.
+ * @returns {Promise.<SharingPathLinkMetadata, Error.<SharingCreateSharedLinkError>>}
  */
 routes.sharingCreateSharedLink = function (arg) {
   return this.request('sharing/create_shared_link', arg, 'api', 'rpc');
@@ -2450,11 +2252,8 @@ routes.sharingCreateSharedLink = function (arg) {
  * default visibility is RequestedVisibility.public (The resolved visibility,
  * though, may depend on other aspects such as team and shared folder settings).
  * @function Dropbox#sharingCreateSharedLinkWithSettings
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to be shared by the shared link
- * @arg {Object|null} arg.settings - The requested settings for the newly
- * created shared link
- * @returns {Object}
+ * @arg {SharingCreateSharedLinkWithSettingsArg} arg - The request parameters.
+ * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingCreateSharedLinkWithSettingsError>>}
  */
 routes.sharingCreateSharedLinkWithSettings = function (arg) {
   return this.request('sharing/create_shared_link_with_settings', arg, 'api', 'rpc');
@@ -2463,10 +2262,8 @@ routes.sharingCreateSharedLinkWithSettings = function (arg) {
 /**
  * Returns shared file metadata.
  * @function Dropbox#sharingGetFileMetadata
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.file - The file to query.
- * @arg {Array|null} arg.actions - File actions to query.
- * @returns {Object}
+ * @arg {SharingGetFileMetadataArg} arg - The request parameters.
+ * @returns {Promise.<SharingSharedFileMetadata, Error.<SharingGetFileMetadataError>>}
  */
 routes.sharingGetFileMetadata = function (arg) {
   return this.request('sharing/get_file_metadata', arg, 'api', 'rpc');
@@ -2475,10 +2272,8 @@ routes.sharingGetFileMetadata = function (arg) {
 /**
  * Returns shared file metadata.
  * @function Dropbox#sharingGetFileMetadataBatch
- * @arg {Object} arg - The request parameters.
- * @arg {Array} arg.files - The files to query.
- * @arg {Array|null} arg.actions - File actions to query.
- * @returns {Array}
+ * @arg {SharingGetFileMetadataBatchArg} arg - The request parameters.
+ * @returns {Promise.<Array.<SharingGetFileMetadataBatchResult>, Error.<SharingSharingUserError>>}
  */
 routes.sharingGetFileMetadataBatch = function (arg) {
   return this.request('sharing/get_file_metadata/batch', arg, 'api', 'rpc');
@@ -2488,13 +2283,8 @@ routes.sharingGetFileMetadataBatch = function (arg) {
  * Returns shared folder metadata by its folder ID. Apps must have full Dropbox
  * access to use this endpoint.
  * @function Dropbox#sharingGetFolderMetadata
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @arg {Array|null} arg.actions - This is a list indicating whether the
- * returned folder data will include a boolean value  FolderPermission.allow
- * that describes whether the current user can perform the  FolderAction on the
- * folder.
- * @returns {Object}
+ * @arg {SharingGetMetadataArgs} arg - The request parameters.
+ * @returns {Promise.<SharingSharedFolderMetadata, Error.<SharingSharedFolderAccessError>>}
  */
 routes.sharingGetFolderMetadata = function (arg) {
   return this.request('sharing/get_folder_metadata', arg, 'api', 'rpc');
@@ -2504,7 +2294,7 @@ routes.sharingGetFolderMetadata = function (arg) {
  * Download the shared link's file from a user's Dropbox.
  * @function Dropbox#sharingGetSharedLinkFile
  * @arg {Object} arg - The request parameters.
- * @returns {Object}
+ * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingGetSharedLinkFileError>>}
  */
 routes.sharingGetSharedLinkFile = function (arg) {
   return this.request('sharing/get_shared_link_file', arg, 'content', 'download');
@@ -2513,14 +2303,8 @@ routes.sharingGetSharedLinkFile = function (arg) {
 /**
  * Get the shared link's metadata.
  * @function Dropbox#sharingGetSharedLinkMetadata
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.url - URL of the shared link.
- * @arg {String|null} arg.path - If the shared link is to a folder, this
- * parameter can be used to retrieve the metadata for a specific file or
- * sub-folder in this folder. A relative path should be used.
- * @arg {String|null} arg.link_password - If the shared link has a password,
- * this parameter can be used.
- * @returns {Object}
+ * @arg {SharingGetSharedLinkMetadataArg} arg - The request parameters.
+ * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingSharedLinkError>>}
  */
 routes.sharingGetSharedLinkMetadata = function (arg) {
   return this.request('sharing/get_shared_link_metadata', arg, 'api', 'rpc');
@@ -2528,16 +2312,15 @@ routes.sharingGetSharedLinkMetadata = function (arg) {
 
 /**
  * Returns a list of LinkMetadata objects for this user, including collection
- * links. If no path is given or the path is empty, returns a list of all shared
- * links for the current user, including collection links. If a non-empty path
- * is given, returns a list of all shared links that allow access to the given
- * path.  Collection links are never returned in this case. Note that the url
- * field in the response is never the shortened URL.
+ * links. If no path is given, returns a list of all shared links for the
+ * current user, including collection links. If a non-empty path is given,
+ * returns a list of all shared links that allow access to the given path.
+ * Collection links are never returned in this case. Note that the url field in
+ * the response is never the shortened URL.
  * @function Dropbox#sharingGetSharedLinks
  * @deprecated
- * @arg {Object} arg - The request parameters.
- * @arg {String|null} arg.path - See get_shared_links description.
- * @returns {Object}
+ * @arg {SharingGetSharedLinksArg} arg - The request parameters.
+ * @returns {Promise.<SharingGetSharedLinksResult, Error.<SharingGetSharedLinksError>>}
  */
 routes.sharingGetSharedLinks = function (arg) {
   return this.request('sharing/get_shared_links', arg, 'api', 'rpc');
@@ -2547,15 +2330,8 @@ routes.sharingGetSharedLinks = function (arg) {
  * Use to obtain the members who have been invited to a file, both inherited and
  * uninherited members.
  * @function Dropbox#sharingListFileMembers
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.file - The file for which you want to see members.
- * @arg {Array|null} arg.actions - The actions for which to return permissions
- * on a member
- * @arg {Boolean} arg.include_inherited - Whether to include members who only
- * have access from a parent shared folder.
- * @arg {Number} arg.limit - Number of members to return max per query. Defaults
- * to 100 if no limit is specified.
- * @returns {Object}
+ * @arg {SharingListFileMembersArg} arg - The request parameters.
+ * @returns {Promise.<SharingSharedFileMembers, Error.<SharingListFileMembersError>>}
  */
 routes.sharingListFileMembers = function (arg) {
   return this.request('sharing/list_file_members', arg, 'api', 'rpc');
@@ -2568,11 +2344,8 @@ routes.sharingListFileMembers = function (arg) {
  * are not included in the result, and permissions are not returned for this
  * endpoint.
  * @function Dropbox#sharingListFileMembersBatch
- * @arg {Object} arg - The request parameters.
- * @arg {Array} arg.files - Files for which to return members.
- * @arg {Number} arg.limit - Number of members to return max per query. Defaults
- * to 10 if no limit is specified.
- * @returns {Array}
+ * @arg {SharingListFileMembersBatchArg} arg - The request parameters.
+ * @returns {Promise.<Array.<SharingListFileMembersBatchResult>, Error.<SharingSharingUserError>>}
  */
 routes.sharingListFileMembersBatch = function (arg) {
   return this.request('sharing/list_file_members/batch', arg, 'api', 'rpc');
@@ -2583,10 +2356,8 @@ routes.sharingListFileMembersBatch = function (arg) {
  * list_file_members/batch, use this to paginate through all shared file
  * members.
  * @function Dropbox#sharingListFileMembersContinue
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.cursor - The cursor returned by your last call to
- * list_file_members, list_file_members/continue, or list_file_members/batch.
- * @returns {Object}
+ * @arg {SharingListFileMembersContinueArg} arg - The request parameters.
+ * @returns {Promise.<SharingSharedFileMembers, Error.<SharingListFileMembersContinueError>>}
  */
 routes.sharingListFileMembersContinue = function (arg) {
   return this.request('sharing/list_file_members/continue', arg, 'api', 'rpc');
@@ -2596,15 +2367,8 @@ routes.sharingListFileMembersContinue = function (arg) {
  * Returns shared folder membership by its folder ID. Apps must have full
  * Dropbox access to use this endpoint.
  * @function Dropbox#sharingListFolderMembers
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @arg {Array|null} arg.actions - This is a list indicating whether each
- * returned member will include a boolean value MemberPermission.allow that
- * describes whether the current user can perform the MemberAction on the
- * member.
- * @arg {Number} arg.limit - The maximum number of results that include members,
- * groups and invitees to return per request.
- * @returns {Object}
+ * @arg {SharingListFolderMembersArgs} arg - The request parameters.
+ * @returns {Promise.<SharingSharedFolderMembers, Error.<SharingSharedFolderAccessError>>}
  */
 routes.sharingListFolderMembers = function (arg) {
   return this.request('sharing/list_folder_members', arg, 'api', 'rpc');
@@ -2615,10 +2379,8 @@ routes.sharingListFolderMembers = function (arg) {
  * paginate through all shared folder members. Apps must have full Dropbox
  * access to use this endpoint.
  * @function Dropbox#sharingListFolderMembersContinue
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.cursor - The cursor returned by your last call to
- * list_folder_members or list_folder_members/continue.
- * @returns {Object}
+ * @arg {SharingListFolderMembersContinueArg} arg - The request parameters.
+ * @returns {Promise.<SharingSharedFolderMembers, Error.<SharingListFolderMembersContinueError>>}
  */
 routes.sharingListFolderMembersContinue = function (arg) {
   return this.request('sharing/list_folder_members/continue', arg, 'api', 'rpc');
@@ -2628,14 +2390,8 @@ routes.sharingListFolderMembersContinue = function (arg) {
  * Return the list of all shared folders the current user has access to. Apps
  * must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingListFolders
- * @arg {Object} arg - The request parameters.
- * @arg {Number} arg.limit - The maximum number of results to return per
- * request.
- * @arg {Array|null} arg.actions - This is a list indicating whether each
- * returned folder data entry will include a boolean field
- * FolderPermission.allow that describes whether the current user can perform
- * the `FolderAction` on the folder.
- * @returns {Object}
+ * @arg {SharingListFoldersArgs} arg - The request parameters.
+ * @returns {Promise.<SharingListFoldersResult, Error.<void>>}
  */
 routes.sharingListFolders = function (arg) {
   return this.request('sharing/list_folders', arg, 'api', 'rpc');
@@ -2647,10 +2403,8 @@ routes.sharingListFolders = function (arg) {
  * list_folders or list_folders/continue. Apps must have full Dropbox access to
  * use this endpoint.
  * @function Dropbox#sharingListFoldersContinue
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.cursor - The cursor returned by the previous API call
- * specified in the endpoint description.
- * @returns {Object}
+ * @arg {SharingListFoldersContinueArg} arg - The request parameters.
+ * @returns {Promise.<SharingListFoldersResult, Error.<SharingListFoldersContinueError>>}
  */
 routes.sharingListFoldersContinue = function (arg) {
   return this.request('sharing/list_folders/continue', arg, 'api', 'rpc');
@@ -2660,14 +2414,8 @@ routes.sharingListFoldersContinue = function (arg) {
  * Return the list of all shared folders the current user can mount or unmount.
  * Apps must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingListMountableFolders
- * @arg {Object} arg - The request parameters.
- * @arg {Number} arg.limit - The maximum number of results to return per
- * request.
- * @arg {Array|null} arg.actions - This is a list indicating whether each
- * returned folder data entry will include a boolean field
- * FolderPermission.allow that describes whether the current user can perform
- * the `FolderAction` on the folder.
- * @returns {Object}
+ * @arg {SharingListFoldersArgs} arg - The request parameters.
+ * @returns {Promise.<SharingListFoldersResult, Error.<void>>}
  */
 routes.sharingListMountableFolders = function (arg) {
   return this.request('sharing/list_mountable_folders', arg, 'api', 'rpc');
@@ -2679,10 +2427,8 @@ routes.sharingListMountableFolders = function (arg) {
  * previous call to list_mountable_folders or list_mountable_folders/continue.
  * Apps must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingListMountableFoldersContinue
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.cursor - The cursor returned by the previous API call
- * specified in the endpoint description.
- * @returns {Object}
+ * @arg {SharingListFoldersContinueArg} arg - The request parameters.
+ * @returns {Promise.<SharingListFoldersResult, Error.<SharingListFoldersContinueError>>}
  */
 routes.sharingListMountableFoldersContinue = function (arg) {
   return this.request('sharing/list_mountable_folders/continue', arg, 'api', 'rpc');
@@ -2693,11 +2439,8 @@ routes.sharingListMountableFoldersContinue = function (arg) {
  * the user has received via shared folders, and does  not include unclaimed
  * invitations.
  * @function Dropbox#sharingListReceivedFiles
- * @arg {Object} arg - The request parameters.
- * @arg {Number} arg.limit - Number of files to return max per query. Defaults
- * to 100 if no limit is specified.
- * @arg {Array|null} arg.actions - File actions to query.
- * @returns {Object}
+ * @arg {SharingListFilesArg} arg - The request parameters.
+ * @returns {Promise.<SharingListFilesResult, Error.<SharingSharingUserError>>}
  */
 routes.sharingListReceivedFiles = function (arg) {
   return this.request('sharing/list_received_files', arg, 'api', 'rpc');
@@ -2706,28 +2449,22 @@ routes.sharingListReceivedFiles = function (arg) {
 /**
  * Get more results with a cursor from list_received_files.
  * @function Dropbox#sharingListReceivedFilesContinue
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.cursor - Cursor in ListFilesResult.cursor
- * @returns {Object}
+ * @arg {SharingListFilesContinueArg} arg - The request parameters.
+ * @returns {Promise.<SharingListFilesResult, Error.<SharingListFilesContinueError>>}
  */
 routes.sharingListReceivedFilesContinue = function (arg) {
   return this.request('sharing/list_received_files/continue', arg, 'api', 'rpc');
 };
 
 /**
- * List shared links of this user. If no path is given or the path is empty,
- * returns a list of all shared links for the current user. If a non-empty path
- * is given, returns a list of all shared links that allow access to the given
- * path - direct links to the given path and links to parent folders of the
- * given path. Links to parent folders can be suppressed by setting direct_only
- * to true.
+ * List shared links of this user. If no path is given, returns a list of all
+ * shared links for the current user. If a non-empty path is given, returns a
+ * list of all shared links that allow access to the given path - direct links
+ * to the given path and links to parent folders of the given path. Links to
+ * parent folders can be suppressed by setting direct_only to true.
  * @function Dropbox#sharingListSharedLinks
- * @arg {Object} arg - The request parameters.
- * @arg {String|null} arg.path - See list_shared_links description.
- * @arg {String|null} arg.cursor - The cursor returned by your last call to
- * list_shared_links.
- * @arg {Boolean|null} arg.direct_only - See list_shared_links description.
- * @returns {Object}
+ * @arg {SharingListSharedLinksArg} arg - The request parameters.
+ * @returns {Promise.<SharingListSharedLinksResult, Error.<SharingListSharedLinksError>>}
  */
 routes.sharingListSharedLinks = function (arg) {
   return this.request('sharing/list_shared_links', arg, 'api', 'rpc');
@@ -2741,12 +2478,8 @@ routes.sharingListSharedLinks = function (arg) {
  * shared link and the LinkPermissions.requested_visibility will reflect the
  * requested visibility.
  * @function Dropbox#sharingModifySharedLinkSettings
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.url - URL of the shared link to change its settings
- * @arg {Object} arg.settings - Set of settings for the shared link.
- * @arg {Boolean} arg.remove_expiration - If set to true, removes the expiration
- * of the shared link.
- * @returns {Object}
+ * @arg {SharingModifySharedLinkSettingsArgs} arg - The request parameters.
+ * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingModifySharedLinkSettingsError>>}
  */
 routes.sharingModifySharedLinkSettings = function (arg) {
   return this.request('sharing/modify_shared_link_settings', arg, 'api', 'rpc');
@@ -2758,9 +2491,8 @@ routes.sharingModifySharedLinkSettings = function (arg) {
  * will appear in their Dropbox. Apps must have full Dropbox access to use this
  * endpoint.
  * @function Dropbox#sharingMountFolder
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID of the shared folder to mount.
- * @returns {Object}
+ * @arg {SharingMountFolderArg} arg - The request parameters.
+ * @returns {Promise.<SharingSharedFolderMetadata, Error.<SharingMountFolderError>>}
  */
 routes.sharingMountFolder = function (arg) {
   return this.request('sharing/mount_folder', arg, 'api', 'rpc');
@@ -2771,9 +2503,8 @@ routes.sharingMountFolder = function (arg) {
  * that the current user may still have inherited access to this file through
  * the parent folder. Apps must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingRelinquishFileMembership
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.file - The path or id for the file.
- * @returns {null}
+ * @arg {SharingRelinquishFileMembershipArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<SharingRelinquishFileMembershipError>>}
  */
 routes.sharingRelinquishFileMembership = function (arg) {
   return this.request('sharing/relinquish_file_membership', arg, 'api', 'rpc');
@@ -2786,11 +2517,8 @@ routes.sharingRelinquishFileMembership = function (arg) {
  * leave_a_copy is false, and asynchronously if leave_a_copy is true. Apps must
  * have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingRelinquishFolderMembership
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @arg {Boolean} arg.leave_a_copy - Keep a copy of the folder's contents upon
- * relinquishing membership.
- * @returns {Object}
+ * @arg {SharingRelinquishFolderMembershipArg} arg - The request parameters.
+ * @returns {Promise.<AsyncLaunchEmptyResult, Error.<SharingRelinquishFolderMembershipError>>}
  */
 routes.sharingRelinquishFolderMembership = function (arg) {
   return this.request('sharing/relinquish_folder_membership', arg, 'api', 'rpc');
@@ -2800,12 +2528,8 @@ routes.sharingRelinquishFolderMembership = function (arg) {
  * Identical to remove_file_member_2 but with less information returned.
  * @function Dropbox#sharingRemoveFileMember
  * @deprecated
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.file - File from which to remove members.
- * @arg {Object} arg.member - Member to remove from this file. Note that even if
- * an email is specified, it may result in the removal of a user (not an
- * invitee) if the user's main account corresponds to that email address.
- * @returns {Object}
+ * @arg {SharingRemoveFileMemberArg} arg - The request parameters.
+ * @returns {Promise.<SharingFileMemberActionIndividualResult, Error.<SharingRemoveFileMemberError>>}
  */
 routes.sharingRemoveFileMember = function (arg) {
   return this.request('sharing/remove_file_member', arg, 'api', 'rpc');
@@ -2814,12 +2538,8 @@ routes.sharingRemoveFileMember = function (arg) {
 /**
  * Removes a specified member from the file.
  * @function Dropbox#sharingRemoveFileMember2
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.file - File from which to remove members.
- * @arg {Object} arg.member - Member to remove from this file. Note that even if
- * an email is specified, it may result in the removal of a user (not an
- * invitee) if the user's main account corresponds to that email address.
- * @returns {Object}
+ * @arg {SharingRemoveFileMemberArg} arg - The request parameters.
+ * @returns {Promise.<SharingFileMemberRemoveActionResult, Error.<SharingRemoveFileMemberError>>}
  */
 routes.sharingRemoveFileMember2 = function (arg) {
   return this.request('sharing/remove_file_member_2', arg, 'api', 'rpc');
@@ -2830,14 +2550,8 @@ routes.sharingRemoveFileMember2 = function (arg) {
  * folder to remove another member. Apps must have full Dropbox access to use
  * this endpoint.
  * @function Dropbox#sharingRemoveFolderMember
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @arg {Object} arg.member - The member to remove from the folder.
- * @arg {Boolean} arg.leave_a_copy - If true, the removed user will keep their
- * copy of the folder after it's unshared, assuming it was mounted. Otherwise,
- * it will be removed from their Dropbox. Also, this must be set to false when
- * kicking a group.
- * @returns {Object}
+ * @arg {SharingRemoveFolderMemberArg} arg - The request parameters.
+ * @returns {Promise.<AsyncLaunchResultBase, Error.<SharingRemoveFolderMemberError>>}
  */
 routes.sharingRemoveFolderMember = function (arg) {
   return this.request('sharing/remove_folder_member', arg, 'api', 'rpc');
@@ -2850,9 +2564,8 @@ routes.sharingRemoveFolderMember = function (arg) {
  * specific file, you can use the list_shared_links with the file as the
  * ListSharedLinksArg.path argument.
  * @function Dropbox#sharingRevokeSharedLink
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.url - URL of the shared link.
- * @returns {null}
+ * @arg {SharingRevokeSharedLinkArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<SharingRevokeSharedLinkError>>}
  */
 routes.sharingRevokeSharedLink = function (arg) {
   return this.request('sharing/revoke_shared_link', arg, 'api', 'rpc');
@@ -2866,19 +2579,8 @@ routes.sharingRevokeSharedLink = function (arg) {
  * check_share_job_status until the action completes to get the metadata for the
  * folder. Apps must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingShareFolder
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.path - The path to the folder to share. If it does not
- * exist, then a new one is created.
- * @arg {Object} arg.member_policy - Who can be a member of this shared folder.
- * Only applicable if the current user is on a team.
- * @arg {Object} arg.acl_update_policy - Who can add and remove members of this
- * shared folder.
- * @arg {Object} arg.shared_link_policy - The policy to apply to shared links
- * created for content inside this shared folder.  The current user must be on a
- * team to set this policy to SharedLinkPolicy.members.
- * @arg {Boolean} arg.force_async - Whether to force the share to happen
- * asynchronously.
- * @returns {Object}
+ * @arg {SharingShareFolderArg} arg - The request parameters.
+ * @returns {Promise.<SharingShareFolderLaunch, Error.<SharingShareFolderError>>}
  */
 routes.sharingShareFolder = function (arg) {
   return this.request('sharing/share_folder', arg, 'api', 'rpc');
@@ -2889,11 +2591,8 @@ routes.sharingShareFolder = function (arg) {
  * must have AccessLevel.owner access to the shared folder to perform a
  * transfer. Apps must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingTransferFolder
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @arg {String} arg.to_dropbox_id - A account or team member ID to transfer
- * ownership to.
- * @returns {null}
+ * @arg {SharingTransferFolderArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<SharingTransferFolderError>>}
  */
 routes.sharingTransferFolder = function (arg) {
   return this.request('sharing/transfer_folder', arg, 'api', 'rpc');
@@ -2904,9 +2603,8 @@ routes.sharingTransferFolder = function (arg) {
  * at a later time using mount_folder. Apps must have full Dropbox access to use
  * this endpoint.
  * @function Dropbox#sharingUnmountFolder
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @returns {null}
+ * @arg {SharingUnmountFolderArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<SharingUnmountFolderError>>}
  */
 routes.sharingUnmountFolder = function (arg) {
   return this.request('sharing/unmount_folder', arg, 'api', 'rpc');
@@ -2915,9 +2613,8 @@ routes.sharingUnmountFolder = function (arg) {
 /**
  * Remove all members from this file. Does not remove inherited members.
  * @function Dropbox#sharingUnshareFile
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.file - The file to unshare.
- * @returns {null}
+ * @arg {SharingUnshareFileArg} arg - The request parameters.
+ * @returns {Promise.<void, Error.<SharingUnshareFileError>>}
  */
 routes.sharingUnshareFile = function (arg) {
   return this.request('sharing/unshare_file', arg, 'api', 'rpc');
@@ -2928,13 +2625,8 @@ routes.sharingUnshareFile = function (arg) {
  * check_job_status to determine if the action has completed successfully. Apps
  * must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingUnshareFolder
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @arg {Boolean} arg.leave_a_copy - If true, members of this shared folder will
- * get a copy of this folder after it's unshared. Otherwise, it will be removed
- * from their Dropbox. The current user, who is an owner, will always retain
- * their copy.
- * @returns {Object}
+ * @arg {SharingUnshareFolderArg} arg - The request parameters.
+ * @returns {Promise.<AsyncLaunchEmptyResult, Error.<SharingUnshareFolderError>>}
  */
 routes.sharingUnshareFolder = function (arg) {
   return this.request('sharing/unshare_folder', arg, 'api', 'rpc');
@@ -2944,13 +2636,8 @@ routes.sharingUnshareFolder = function (arg) {
  * Allows an owner or editor of a shared folder to update another member's
  * permissions. Apps must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingUpdateFolderMember
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @arg {Object} arg.member - The member of the shared folder to update.  Only
- * the MemberSelector.dropbox_id may be set at this time.
- * @arg {Object} arg.access_level - The new access level for member.
- * AccessLevel.owner is disallowed.
- * @returns {Object}
+ * @arg {SharingUpdateFolderMemberArg} arg - The request parameters.
+ * @returns {Promise.<SharingMemberAccessLevelResult, Error.<SharingUpdateFolderMemberError>>}
  */
 routes.sharingUpdateFolderMember = function (arg) {
   return this.request('sharing/update_folder_member', arg, 'api', 'rpc');
@@ -2961,16 +2648,8 @@ routes.sharingUpdateFolderMember = function (arg) {
  * AccessLevel.owner access to the shared folder to update its policies. Apps
  * must have full Dropbox access to use this endpoint.
  * @function Dropbox#sharingUpdateFolderPolicy
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.shared_folder_id - The ID for the shared folder.
- * @arg {Object|null} arg.member_policy - Who can be a member of this shared
- * folder. Only applicable if the current user is on a team.
- * @arg {Object|null} arg.acl_update_policy - Who can add and remove members of
- * this shared folder.
- * @arg {Object|null} arg.shared_link_policy - The policy to apply to shared
- * links created for content inside this shared folder. The current user must be
- * on a team to set this policy to SharedLinkPolicy.members.
- * @returns {Object}
+ * @arg {SharingUpdateFolderPolicyArg} arg - The request parameters.
+ * @returns {Promise.<SharingSharedFolderMetadata, Error.<SharingUpdateFolderPolicyError>>}
  */
 routes.sharingUpdateFolderPolicy = function (arg) {
   return this.request('sharing/update_folder_policy', arg, 'api', 'rpc');
@@ -2979,9 +2658,8 @@ routes.sharingUpdateFolderPolicy = function (arg) {
 /**
  * Get information about a user's account.
  * @function Dropbox#usersGetAccount
- * @arg {Object} arg - The request parameters.
- * @arg {String} arg.account_id - A user's account identifier.
- * @returns {Object}
+ * @arg {UsersGetAccountArg} arg - The request parameters.
+ * @returns {Promise.<UsersBasicAccount, Error.<UsersGetAccountError>>}
  */
 routes.usersGetAccount = function (arg) {
   return this.request('users/get_account', arg, 'api', 'rpc');
@@ -2991,10 +2669,8 @@ routes.usersGetAccount = function (arg) {
  * Get information about multiple user accounts.  At most 300 accounts may be
  * queried per request.
  * @function Dropbox#usersGetAccountBatch
- * @arg {Object} arg - The request parameters.
- * @arg {Array} arg.account_ids - List of user account identifiers.  Should not
- * contain any duplicate account IDs.
- * @returns {Object}
+ * @arg {UsersGetAccountBatchArg} arg - The request parameters.
+ * @returns {Promise.<Object, Error.<UsersGetAccountBatchError>>}
  */
 routes.usersGetAccountBatch = function (arg) {
   return this.request('users/get_account_batch', arg, 'api', 'rpc');
@@ -3003,8 +2679,8 @@ routes.usersGetAccountBatch = function (arg) {
 /**
  * Get information about the current user's account.
  * @function Dropbox#usersGetCurrentAccount
- * @arg {null} arg - The request parameters.
- * @returns {Object}
+ * @arg {void} arg - The request parameters.
+ * @returns {Promise.<UsersFullAccount, Error.<void>>}
  */
 routes.usersGetCurrentAccount = function (arg) {
   return this.request('users/get_current_account', arg, 'api', 'rpc');
@@ -3013,8 +2689,8 @@ routes.usersGetCurrentAccount = function (arg) {
 /**
  * Get the space usage information for the current user's account.
  * @function Dropbox#usersGetSpaceUsage
- * @arg {null} arg - The request parameters.
- * @returns {Object}
+ * @arg {void} arg - The request parameters.
+ * @returns {Promise.<UsersSpaceUsage, Error.<void>>}
  */
 routes.usersGetSpaceUsage = function (arg) {
   return this.request('users/get_space_usage', arg, 'api', 'rpc');
@@ -3022,7 +2698,7 @@ routes.usersGetSpaceUsage = function (arg) {
 
 module.exports = routes;
 
-},{}],13:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 var request = require('superagent');
 var Promise = require('es6-promise').Promise;
 
@@ -3032,7 +2708,7 @@ var BASE_URL = 'https://api.dropboxapi.com/2/';
 var buildCustomError = function (error, response) {
   return {
     status: error.status,
-    error: response.text,
+    error: (response ? response.text : null) || error.toString(),
     response: response
   };
 };
@@ -3084,7 +2760,7 @@ var rpcRequest = function (path, body, accessToken, selectUser) {
 
 module.exports = rpcRequest;
 
-},{"es6-promise":16,"superagent":2}],14:[function(require,module,exports){
+},{"es6-promise":2,"superagent":103}],11:[function(require,module,exports){
 var request = require('superagent');
 var Promise = require('es6-promise').Promise;
 
@@ -3094,7 +2770,7 @@ var BASE_URL = 'https://content.dropboxapi.com/2/';
 var buildCustomError = function (error, response) {
   return {
     status: error.status,
-    error: response.text,
+    error: (response ? response.text : null) || error.toString(),
     response: response
   };
 };
@@ -3147,972 +2823,9 @@ var uploadRequest = function (path, args, accessToken, selectUser) {
 
 module.exports = uploadRequest;
 
-},{"es6-promise":16,"superagent":2}],15:[function(require,module,exports){
+},{"es6-promise":2,"superagent":103}],12:[function(require,module,exports){
 module.exports={"Aacute":"\u00C1","aacute":"\u00E1","Abreve":"\u0102","abreve":"\u0103","ac":"\u223E","acd":"\u223F","acE":"\u223E\u0333","Acirc":"\u00C2","acirc":"\u00E2","acute":"\u00B4","Acy":"\u0410","acy":"\u0430","AElig":"\u00C6","aelig":"\u00E6","af":"\u2061","Afr":"\uD835\uDD04","afr":"\uD835\uDD1E","Agrave":"\u00C0","agrave":"\u00E0","alefsym":"\u2135","aleph":"\u2135","Alpha":"\u0391","alpha":"\u03B1","Amacr":"\u0100","amacr":"\u0101","amalg":"\u2A3F","amp":"&","AMP":"&","andand":"\u2A55","And":"\u2A53","and":"\u2227","andd":"\u2A5C","andslope":"\u2A58","andv":"\u2A5A","ang":"\u2220","ange":"\u29A4","angle":"\u2220","angmsdaa":"\u29A8","angmsdab":"\u29A9","angmsdac":"\u29AA","angmsdad":"\u29AB","angmsdae":"\u29AC","angmsdaf":"\u29AD","angmsdag":"\u29AE","angmsdah":"\u29AF","angmsd":"\u2221","angrt":"\u221F","angrtvb":"\u22BE","angrtvbd":"\u299D","angsph":"\u2222","angst":"\u00C5","angzarr":"\u237C","Aogon":"\u0104","aogon":"\u0105","Aopf":"\uD835\uDD38","aopf":"\uD835\uDD52","apacir":"\u2A6F","ap":"\u2248","apE":"\u2A70","ape":"\u224A","apid":"\u224B","apos":"'","ApplyFunction":"\u2061","approx":"\u2248","approxeq":"\u224A","Aring":"\u00C5","aring":"\u00E5","Ascr":"\uD835\uDC9C","ascr":"\uD835\uDCB6","Assign":"\u2254","ast":"*","asymp":"\u2248","asympeq":"\u224D","Atilde":"\u00C3","atilde":"\u00E3","Auml":"\u00C4","auml":"\u00E4","awconint":"\u2233","awint":"\u2A11","backcong":"\u224C","backepsilon":"\u03F6","backprime":"\u2035","backsim":"\u223D","backsimeq":"\u22CD","Backslash":"\u2216","Barv":"\u2AE7","barvee":"\u22BD","barwed":"\u2305","Barwed":"\u2306","barwedge":"\u2305","bbrk":"\u23B5","bbrktbrk":"\u23B6","bcong":"\u224C","Bcy":"\u0411","bcy":"\u0431","bdquo":"\u201E","becaus":"\u2235","because":"\u2235","Because":"\u2235","bemptyv":"\u29B0","bepsi":"\u03F6","bernou":"\u212C","Bernoullis":"\u212C","Beta":"\u0392","beta":"\u03B2","beth":"\u2136","between":"\u226C","Bfr":"\uD835\uDD05","bfr":"\uD835\uDD1F","bigcap":"\u22C2","bigcirc":"\u25EF","bigcup":"\u22C3","bigodot":"\u2A00","bigoplus":"\u2A01","bigotimes":"\u2A02","bigsqcup":"\u2A06","bigstar":"\u2605","bigtriangledown":"\u25BD","bigtriangleup":"\u25B3","biguplus":"\u2A04","bigvee":"\u22C1","bigwedge":"\u22C0","bkarow":"\u290D","blacklozenge":"\u29EB","blacksquare":"\u25AA","blacktriangle":"\u25B4","blacktriangledown":"\u25BE","blacktriangleleft":"\u25C2","blacktriangleright":"\u25B8","blank":"\u2423","blk12":"\u2592","blk14":"\u2591","blk34":"\u2593","block":"\u2588","bne":"=\u20E5","bnequiv":"\u2261\u20E5","bNot":"\u2AED","bnot":"\u2310","Bopf":"\uD835\uDD39","bopf":"\uD835\uDD53","bot":"\u22A5","bottom":"\u22A5","bowtie":"\u22C8","boxbox":"\u29C9","boxdl":"\u2510","boxdL":"\u2555","boxDl":"\u2556","boxDL":"\u2557","boxdr":"\u250C","boxdR":"\u2552","boxDr":"\u2553","boxDR":"\u2554","boxh":"\u2500","boxH":"\u2550","boxhd":"\u252C","boxHd":"\u2564","boxhD":"\u2565","boxHD":"\u2566","boxhu":"\u2534","boxHu":"\u2567","boxhU":"\u2568","boxHU":"\u2569","boxminus":"\u229F","boxplus":"\u229E","boxtimes":"\u22A0","boxul":"\u2518","boxuL":"\u255B","boxUl":"\u255C","boxUL":"\u255D","boxur":"\u2514","boxuR":"\u2558","boxUr":"\u2559","boxUR":"\u255A","boxv":"\u2502","boxV":"\u2551","boxvh":"\u253C","boxvH":"\u256A","boxVh":"\u256B","boxVH":"\u256C","boxvl":"\u2524","boxvL":"\u2561","boxVl":"\u2562","boxVL":"\u2563","boxvr":"\u251C","boxvR":"\u255E","boxVr":"\u255F","boxVR":"\u2560","bprime":"\u2035","breve":"\u02D8","Breve":"\u02D8","brvbar":"\u00A6","bscr":"\uD835\uDCB7","Bscr":"\u212C","bsemi":"\u204F","bsim":"\u223D","bsime":"\u22CD","bsolb":"\u29C5","bsol":"\\","bsolhsub":"\u27C8","bull":"\u2022","bullet":"\u2022","bump":"\u224E","bumpE":"\u2AAE","bumpe":"\u224F","Bumpeq":"\u224E","bumpeq":"\u224F","Cacute":"\u0106","cacute":"\u0107","capand":"\u2A44","capbrcup":"\u2A49","capcap":"\u2A4B","cap":"\u2229","Cap":"\u22D2","capcup":"\u2A47","capdot":"\u2A40","CapitalDifferentialD":"\u2145","caps":"\u2229\uFE00","caret":"\u2041","caron":"\u02C7","Cayleys":"\u212D","ccaps":"\u2A4D","Ccaron":"\u010C","ccaron":"\u010D","Ccedil":"\u00C7","ccedil":"\u00E7","Ccirc":"\u0108","ccirc":"\u0109","Cconint":"\u2230","ccups":"\u2A4C","ccupssm":"\u2A50","Cdot":"\u010A","cdot":"\u010B","cedil":"\u00B8","Cedilla":"\u00B8","cemptyv":"\u29B2","cent":"\u00A2","centerdot":"\u00B7","CenterDot":"\u00B7","cfr":"\uD835\uDD20","Cfr":"\u212D","CHcy":"\u0427","chcy":"\u0447","check":"\u2713","checkmark":"\u2713","Chi":"\u03A7","chi":"\u03C7","circ":"\u02C6","circeq":"\u2257","circlearrowleft":"\u21BA","circlearrowright":"\u21BB","circledast":"\u229B","circledcirc":"\u229A","circleddash":"\u229D","CircleDot":"\u2299","circledR":"\u00AE","circledS":"\u24C8","CircleMinus":"\u2296","CirclePlus":"\u2295","CircleTimes":"\u2297","cir":"\u25CB","cirE":"\u29C3","cire":"\u2257","cirfnint":"\u2A10","cirmid":"\u2AEF","cirscir":"\u29C2","ClockwiseContourIntegral":"\u2232","CloseCurlyDoubleQuote":"\u201D","CloseCurlyQuote":"\u2019","clubs":"\u2663","clubsuit":"\u2663","colon":":","Colon":"\u2237","Colone":"\u2A74","colone":"\u2254","coloneq":"\u2254","comma":",","commat":"@","comp":"\u2201","compfn":"\u2218","complement":"\u2201","complexes":"\u2102","cong":"\u2245","congdot":"\u2A6D","Congruent":"\u2261","conint":"\u222E","Conint":"\u222F","ContourIntegral":"\u222E","copf":"\uD835\uDD54","Copf":"\u2102","coprod":"\u2210","Coproduct":"\u2210","copy":"\u00A9","COPY":"\u00A9","copysr":"\u2117","CounterClockwiseContourIntegral":"\u2233","crarr":"\u21B5","cross":"\u2717","Cross":"\u2A2F","Cscr":"\uD835\uDC9E","cscr":"\uD835\uDCB8","csub":"\u2ACF","csube":"\u2AD1","csup":"\u2AD0","csupe":"\u2AD2","ctdot":"\u22EF","cudarrl":"\u2938","cudarrr":"\u2935","cuepr":"\u22DE","cuesc":"\u22DF","cularr":"\u21B6","cularrp":"\u293D","cupbrcap":"\u2A48","cupcap":"\u2A46","CupCap":"\u224D","cup":"\u222A","Cup":"\u22D3","cupcup":"\u2A4A","cupdot":"\u228D","cupor":"\u2A45","cups":"\u222A\uFE00","curarr":"\u21B7","curarrm":"\u293C","curlyeqprec":"\u22DE","curlyeqsucc":"\u22DF","curlyvee":"\u22CE","curlywedge":"\u22CF","curren":"\u00A4","curvearrowleft":"\u21B6","curvearrowright":"\u21B7","cuvee":"\u22CE","cuwed":"\u22CF","cwconint":"\u2232","cwint":"\u2231","cylcty":"\u232D","dagger":"\u2020","Dagger":"\u2021","daleth":"\u2138","darr":"\u2193","Darr":"\u21A1","dArr":"\u21D3","dash":"\u2010","Dashv":"\u2AE4","dashv":"\u22A3","dbkarow":"\u290F","dblac":"\u02DD","Dcaron":"\u010E","dcaron":"\u010F","Dcy":"\u0414","dcy":"\u0434","ddagger":"\u2021","ddarr":"\u21CA","DD":"\u2145","dd":"\u2146","DDotrahd":"\u2911","ddotseq":"\u2A77","deg":"\u00B0","Del":"\u2207","Delta":"\u0394","delta":"\u03B4","demptyv":"\u29B1","dfisht":"\u297F","Dfr":"\uD835\uDD07","dfr":"\uD835\uDD21","dHar":"\u2965","dharl":"\u21C3","dharr":"\u21C2","DiacriticalAcute":"\u00B4","DiacriticalDot":"\u02D9","DiacriticalDoubleAcute":"\u02DD","DiacriticalGrave":"`","DiacriticalTilde":"\u02DC","diam":"\u22C4","diamond":"\u22C4","Diamond":"\u22C4","diamondsuit":"\u2666","diams":"\u2666","die":"\u00A8","DifferentialD":"\u2146","digamma":"\u03DD","disin":"\u22F2","div":"\u00F7","divide":"\u00F7","divideontimes":"\u22C7","divonx":"\u22C7","DJcy":"\u0402","djcy":"\u0452","dlcorn":"\u231E","dlcrop":"\u230D","dollar":"$","Dopf":"\uD835\uDD3B","dopf":"\uD835\uDD55","Dot":"\u00A8","dot":"\u02D9","DotDot":"\u20DC","doteq":"\u2250","doteqdot":"\u2251","DotEqual":"\u2250","dotminus":"\u2238","dotplus":"\u2214","dotsquare":"\u22A1","doublebarwedge":"\u2306","DoubleContourIntegral":"\u222F","DoubleDot":"\u00A8","DoubleDownArrow":"\u21D3","DoubleLeftArrow":"\u21D0","DoubleLeftRightArrow":"\u21D4","DoubleLeftTee":"\u2AE4","DoubleLongLeftArrow":"\u27F8","DoubleLongLeftRightArrow":"\u27FA","DoubleLongRightArrow":"\u27F9","DoubleRightArrow":"\u21D2","DoubleRightTee":"\u22A8","DoubleUpArrow":"\u21D1","DoubleUpDownArrow":"\u21D5","DoubleVerticalBar":"\u2225","DownArrowBar":"\u2913","downarrow":"\u2193","DownArrow":"\u2193","Downarrow":"\u21D3","DownArrowUpArrow":"\u21F5","DownBreve":"\u0311","downdownarrows":"\u21CA","downharpoonleft":"\u21C3","downharpoonright":"\u21C2","DownLeftRightVector":"\u2950","DownLeftTeeVector":"\u295E","DownLeftVectorBar":"\u2956","DownLeftVector":"\u21BD","DownRightTeeVector":"\u295F","DownRightVectorBar":"\u2957","DownRightVector":"\u21C1","DownTeeArrow":"\u21A7","DownTee":"\u22A4","drbkarow":"\u2910","drcorn":"\u231F","drcrop":"\u230C","Dscr":"\uD835\uDC9F","dscr":"\uD835\uDCB9","DScy":"\u0405","dscy":"\u0455","dsol":"\u29F6","Dstrok":"\u0110","dstrok":"\u0111","dtdot":"\u22F1","dtri":"\u25BF","dtrif":"\u25BE","duarr":"\u21F5","duhar":"\u296F","dwangle":"\u29A6","DZcy":"\u040F","dzcy":"\u045F","dzigrarr":"\u27FF","Eacute":"\u00C9","eacute":"\u00E9","easter":"\u2A6E","Ecaron":"\u011A","ecaron":"\u011B","Ecirc":"\u00CA","ecirc":"\u00EA","ecir":"\u2256","ecolon":"\u2255","Ecy":"\u042D","ecy":"\u044D","eDDot":"\u2A77","Edot":"\u0116","edot":"\u0117","eDot":"\u2251","ee":"\u2147","efDot":"\u2252","Efr":"\uD835\uDD08","efr":"\uD835\uDD22","eg":"\u2A9A","Egrave":"\u00C8","egrave":"\u00E8","egs":"\u2A96","egsdot":"\u2A98","el":"\u2A99","Element":"\u2208","elinters":"\u23E7","ell":"\u2113","els":"\u2A95","elsdot":"\u2A97","Emacr":"\u0112","emacr":"\u0113","empty":"\u2205","emptyset":"\u2205","EmptySmallSquare":"\u25FB","emptyv":"\u2205","EmptyVerySmallSquare":"\u25AB","emsp13":"\u2004","emsp14":"\u2005","emsp":"\u2003","ENG":"\u014A","eng":"\u014B","ensp":"\u2002","Eogon":"\u0118","eogon":"\u0119","Eopf":"\uD835\uDD3C","eopf":"\uD835\uDD56","epar":"\u22D5","eparsl":"\u29E3","eplus":"\u2A71","epsi":"\u03B5","Epsilon":"\u0395","epsilon":"\u03B5","epsiv":"\u03F5","eqcirc":"\u2256","eqcolon":"\u2255","eqsim":"\u2242","eqslantgtr":"\u2A96","eqslantless":"\u2A95","Equal":"\u2A75","equals":"=","EqualTilde":"\u2242","equest":"\u225F","Equilibrium":"\u21CC","equiv":"\u2261","equivDD":"\u2A78","eqvparsl":"\u29E5","erarr":"\u2971","erDot":"\u2253","escr":"\u212F","Escr":"\u2130","esdot":"\u2250","Esim":"\u2A73","esim":"\u2242","Eta":"\u0397","eta":"\u03B7","ETH":"\u00D0","eth":"\u00F0","Euml":"\u00CB","euml":"\u00EB","euro":"\u20AC","excl":"!","exist":"\u2203","Exists":"\u2203","expectation":"\u2130","exponentiale":"\u2147","ExponentialE":"\u2147","fallingdotseq":"\u2252","Fcy":"\u0424","fcy":"\u0444","female":"\u2640","ffilig":"\uFB03","fflig":"\uFB00","ffllig":"\uFB04","Ffr":"\uD835\uDD09","ffr":"\uD835\uDD23","filig":"\uFB01","FilledSmallSquare":"\u25FC","FilledVerySmallSquare":"\u25AA","fjlig":"fj","flat":"\u266D","fllig":"\uFB02","fltns":"\u25B1","fnof":"\u0192","Fopf":"\uD835\uDD3D","fopf":"\uD835\uDD57","forall":"\u2200","ForAll":"\u2200","fork":"\u22D4","forkv":"\u2AD9","Fouriertrf":"\u2131","fpartint":"\u2A0D","frac12":"\u00BD","frac13":"\u2153","frac14":"\u00BC","frac15":"\u2155","frac16":"\u2159","frac18":"\u215B","frac23":"\u2154","frac25":"\u2156","frac34":"\u00BE","frac35":"\u2157","frac38":"\u215C","frac45":"\u2158","frac56":"\u215A","frac58":"\u215D","frac78":"\u215E","frasl":"\u2044","frown":"\u2322","fscr":"\uD835\uDCBB","Fscr":"\u2131","gacute":"\u01F5","Gamma":"\u0393","gamma":"\u03B3","Gammad":"\u03DC","gammad":"\u03DD","gap":"\u2A86","Gbreve":"\u011E","gbreve":"\u011F","Gcedil":"\u0122","Gcirc":"\u011C","gcirc":"\u011D","Gcy":"\u0413","gcy":"\u0433","Gdot":"\u0120","gdot":"\u0121","ge":"\u2265","gE":"\u2267","gEl":"\u2A8C","gel":"\u22DB","geq":"\u2265","geqq":"\u2267","geqslant":"\u2A7E","gescc":"\u2AA9","ges":"\u2A7E","gesdot":"\u2A80","gesdoto":"\u2A82","gesdotol":"\u2A84","gesl":"\u22DB\uFE00","gesles":"\u2A94","Gfr":"\uD835\uDD0A","gfr":"\uD835\uDD24","gg":"\u226B","Gg":"\u22D9","ggg":"\u22D9","gimel":"\u2137","GJcy":"\u0403","gjcy":"\u0453","gla":"\u2AA5","gl":"\u2277","glE":"\u2A92","glj":"\u2AA4","gnap":"\u2A8A","gnapprox":"\u2A8A","gne":"\u2A88","gnE":"\u2269","gneq":"\u2A88","gneqq":"\u2269","gnsim":"\u22E7","Gopf":"\uD835\uDD3E","gopf":"\uD835\uDD58","grave":"`","GreaterEqual":"\u2265","GreaterEqualLess":"\u22DB","GreaterFullEqual":"\u2267","GreaterGreater":"\u2AA2","GreaterLess":"\u2277","GreaterSlantEqual":"\u2A7E","GreaterTilde":"\u2273","Gscr":"\uD835\uDCA2","gscr":"\u210A","gsim":"\u2273","gsime":"\u2A8E","gsiml":"\u2A90","gtcc":"\u2AA7","gtcir":"\u2A7A","gt":">","GT":">","Gt":"\u226B","gtdot":"\u22D7","gtlPar":"\u2995","gtquest":"\u2A7C","gtrapprox":"\u2A86","gtrarr":"\u2978","gtrdot":"\u22D7","gtreqless":"\u22DB","gtreqqless":"\u2A8C","gtrless":"\u2277","gtrsim":"\u2273","gvertneqq":"\u2269\uFE00","gvnE":"\u2269\uFE00","Hacek":"\u02C7","hairsp":"\u200A","half":"\u00BD","hamilt":"\u210B","HARDcy":"\u042A","hardcy":"\u044A","harrcir":"\u2948","harr":"\u2194","hArr":"\u21D4","harrw":"\u21AD","Hat":"^","hbar":"\u210F","Hcirc":"\u0124","hcirc":"\u0125","hearts":"\u2665","heartsuit":"\u2665","hellip":"\u2026","hercon":"\u22B9","hfr":"\uD835\uDD25","Hfr":"\u210C","HilbertSpace":"\u210B","hksearow":"\u2925","hkswarow":"\u2926","hoarr":"\u21FF","homtht":"\u223B","hookleftarrow":"\u21A9","hookrightarrow":"\u21AA","hopf":"\uD835\uDD59","Hopf":"\u210D","horbar":"\u2015","HorizontalLine":"\u2500","hscr":"\uD835\uDCBD","Hscr":"\u210B","hslash":"\u210F","Hstrok":"\u0126","hstrok":"\u0127","HumpDownHump":"\u224E","HumpEqual":"\u224F","hybull":"\u2043","hyphen":"\u2010","Iacute":"\u00CD","iacute":"\u00ED","ic":"\u2063","Icirc":"\u00CE","icirc":"\u00EE","Icy":"\u0418","icy":"\u0438","Idot":"\u0130","IEcy":"\u0415","iecy":"\u0435","iexcl":"\u00A1","iff":"\u21D4","ifr":"\uD835\uDD26","Ifr":"\u2111","Igrave":"\u00CC","igrave":"\u00EC","ii":"\u2148","iiiint":"\u2A0C","iiint":"\u222D","iinfin":"\u29DC","iiota":"\u2129","IJlig":"\u0132","ijlig":"\u0133","Imacr":"\u012A","imacr":"\u012B","image":"\u2111","ImaginaryI":"\u2148","imagline":"\u2110","imagpart":"\u2111","imath":"\u0131","Im":"\u2111","imof":"\u22B7","imped":"\u01B5","Implies":"\u21D2","incare":"\u2105","in":"\u2208","infin":"\u221E","infintie":"\u29DD","inodot":"\u0131","intcal":"\u22BA","int":"\u222B","Int":"\u222C","integers":"\u2124","Integral":"\u222B","intercal":"\u22BA","Intersection":"\u22C2","intlarhk":"\u2A17","intprod":"\u2A3C","InvisibleComma":"\u2063","InvisibleTimes":"\u2062","IOcy":"\u0401","iocy":"\u0451","Iogon":"\u012E","iogon":"\u012F","Iopf":"\uD835\uDD40","iopf":"\uD835\uDD5A","Iota":"\u0399","iota":"\u03B9","iprod":"\u2A3C","iquest":"\u00BF","iscr":"\uD835\uDCBE","Iscr":"\u2110","isin":"\u2208","isindot":"\u22F5","isinE":"\u22F9","isins":"\u22F4","isinsv":"\u22F3","isinv":"\u2208","it":"\u2062","Itilde":"\u0128","itilde":"\u0129","Iukcy":"\u0406","iukcy":"\u0456","Iuml":"\u00CF","iuml":"\u00EF","Jcirc":"\u0134","jcirc":"\u0135","Jcy":"\u0419","jcy":"\u0439","Jfr":"\uD835\uDD0D","jfr":"\uD835\uDD27","jmath":"\u0237","Jopf":"\uD835\uDD41","jopf":"\uD835\uDD5B","Jscr":"\uD835\uDCA5","jscr":"\uD835\uDCBF","Jsercy":"\u0408","jsercy":"\u0458","Jukcy":"\u0404","jukcy":"\u0454","Kappa":"\u039A","kappa":"\u03BA","kappav":"\u03F0","Kcedil":"\u0136","kcedil":"\u0137","Kcy":"\u041A","kcy":"\u043A","Kfr":"\uD835\uDD0E","kfr":"\uD835\uDD28","kgreen":"\u0138","KHcy":"\u0425","khcy":"\u0445","KJcy":"\u040C","kjcy":"\u045C","Kopf":"\uD835\uDD42","kopf":"\uD835\uDD5C","Kscr":"\uD835\uDCA6","kscr":"\uD835\uDCC0","lAarr":"\u21DA","Lacute":"\u0139","lacute":"\u013A","laemptyv":"\u29B4","lagran":"\u2112","Lambda":"\u039B","lambda":"\u03BB","lang":"\u27E8","Lang":"\u27EA","langd":"\u2991","langle":"\u27E8","lap":"\u2A85","Laplacetrf":"\u2112","laquo":"\u00AB","larrb":"\u21E4","larrbfs":"\u291F","larr":"\u2190","Larr":"\u219E","lArr":"\u21D0","larrfs":"\u291D","larrhk":"\u21A9","larrlp":"\u21AB","larrpl":"\u2939","larrsim":"\u2973","larrtl":"\u21A2","latail":"\u2919","lAtail":"\u291B","lat":"\u2AAB","late":"\u2AAD","lates":"\u2AAD\uFE00","lbarr":"\u290C","lBarr":"\u290E","lbbrk":"\u2772","lbrace":"{","lbrack":"[","lbrke":"\u298B","lbrksld":"\u298F","lbrkslu":"\u298D","Lcaron":"\u013D","lcaron":"\u013E","Lcedil":"\u013B","lcedil":"\u013C","lceil":"\u2308","lcub":"{","Lcy":"\u041B","lcy":"\u043B","ldca":"\u2936","ldquo":"\u201C","ldquor":"\u201E","ldrdhar":"\u2967","ldrushar":"\u294B","ldsh":"\u21B2","le":"\u2264","lE":"\u2266","LeftAngleBracket":"\u27E8","LeftArrowBar":"\u21E4","leftarrow":"\u2190","LeftArrow":"\u2190","Leftarrow":"\u21D0","LeftArrowRightArrow":"\u21C6","leftarrowtail":"\u21A2","LeftCeiling":"\u2308","LeftDoubleBracket":"\u27E6","LeftDownTeeVector":"\u2961","LeftDownVectorBar":"\u2959","LeftDownVector":"\u21C3","LeftFloor":"\u230A","leftharpoondown":"\u21BD","leftharpoonup":"\u21BC","leftleftarrows":"\u21C7","leftrightarrow":"\u2194","LeftRightArrow":"\u2194","Leftrightarrow":"\u21D4","leftrightarrows":"\u21C6","leftrightharpoons":"\u21CB","leftrightsquigarrow":"\u21AD","LeftRightVector":"\u294E","LeftTeeArrow":"\u21A4","LeftTee":"\u22A3","LeftTeeVector":"\u295A","leftthreetimes":"\u22CB","LeftTriangleBar":"\u29CF","LeftTriangle":"\u22B2","LeftTriangleEqual":"\u22B4","LeftUpDownVector":"\u2951","LeftUpTeeVector":"\u2960","LeftUpVectorBar":"\u2958","LeftUpVector":"\u21BF","LeftVectorBar":"\u2952","LeftVector":"\u21BC","lEg":"\u2A8B","leg":"\u22DA","leq":"\u2264","leqq":"\u2266","leqslant":"\u2A7D","lescc":"\u2AA8","les":"\u2A7D","lesdot":"\u2A7F","lesdoto":"\u2A81","lesdotor":"\u2A83","lesg":"\u22DA\uFE00","lesges":"\u2A93","lessapprox":"\u2A85","lessdot":"\u22D6","lesseqgtr":"\u22DA","lesseqqgtr":"\u2A8B","LessEqualGreater":"\u22DA","LessFullEqual":"\u2266","LessGreater":"\u2276","lessgtr":"\u2276","LessLess":"\u2AA1","lesssim":"\u2272","LessSlantEqual":"\u2A7D","LessTilde":"\u2272","lfisht":"\u297C","lfloor":"\u230A","Lfr":"\uD835\uDD0F","lfr":"\uD835\uDD29","lg":"\u2276","lgE":"\u2A91","lHar":"\u2962","lhard":"\u21BD","lharu":"\u21BC","lharul":"\u296A","lhblk":"\u2584","LJcy":"\u0409","ljcy":"\u0459","llarr":"\u21C7","ll":"\u226A","Ll":"\u22D8","llcorner":"\u231E","Lleftarrow":"\u21DA","llhard":"\u296B","lltri":"\u25FA","Lmidot":"\u013F","lmidot":"\u0140","lmoustache":"\u23B0","lmoust":"\u23B0","lnap":"\u2A89","lnapprox":"\u2A89","lne":"\u2A87","lnE":"\u2268","lneq":"\u2A87","lneqq":"\u2268","lnsim":"\u22E6","loang":"\u27EC","loarr":"\u21FD","lobrk":"\u27E6","longleftarrow":"\u27F5","LongLeftArrow":"\u27F5","Longleftarrow":"\u27F8","longleftrightarrow":"\u27F7","LongLeftRightArrow":"\u27F7","Longleftrightarrow":"\u27FA","longmapsto":"\u27FC","longrightarrow":"\u27F6","LongRightArrow":"\u27F6","Longrightarrow":"\u27F9","looparrowleft":"\u21AB","looparrowright":"\u21AC","lopar":"\u2985","Lopf":"\uD835\uDD43","lopf":"\uD835\uDD5D","loplus":"\u2A2D","lotimes":"\u2A34","lowast":"\u2217","lowbar":"_","LowerLeftArrow":"\u2199","LowerRightArrow":"\u2198","loz":"\u25CA","lozenge":"\u25CA","lozf":"\u29EB","lpar":"(","lparlt":"\u2993","lrarr":"\u21C6","lrcorner":"\u231F","lrhar":"\u21CB","lrhard":"\u296D","lrm":"\u200E","lrtri":"\u22BF","lsaquo":"\u2039","lscr":"\uD835\uDCC1","Lscr":"\u2112","lsh":"\u21B0","Lsh":"\u21B0","lsim":"\u2272","lsime":"\u2A8D","lsimg":"\u2A8F","lsqb":"[","lsquo":"\u2018","lsquor":"\u201A","Lstrok":"\u0141","lstrok":"\u0142","ltcc":"\u2AA6","ltcir":"\u2A79","lt":"<","LT":"<","Lt":"\u226A","ltdot":"\u22D6","lthree":"\u22CB","ltimes":"\u22C9","ltlarr":"\u2976","ltquest":"\u2A7B","ltri":"\u25C3","ltrie":"\u22B4","ltrif":"\u25C2","ltrPar":"\u2996","lurdshar":"\u294A","luruhar":"\u2966","lvertneqq":"\u2268\uFE00","lvnE":"\u2268\uFE00","macr":"\u00AF","male":"\u2642","malt":"\u2720","maltese":"\u2720","Map":"\u2905","map":"\u21A6","mapsto":"\u21A6","mapstodown":"\u21A7","mapstoleft":"\u21A4","mapstoup":"\u21A5","marker":"\u25AE","mcomma":"\u2A29","Mcy":"\u041C","mcy":"\u043C","mdash":"\u2014","mDDot":"\u223A","measuredangle":"\u2221","MediumSpace":"\u205F","Mellintrf":"\u2133","Mfr":"\uD835\uDD10","mfr":"\uD835\uDD2A","mho":"\u2127","micro":"\u00B5","midast":"*","midcir":"\u2AF0","mid":"\u2223","middot":"\u00B7","minusb":"\u229F","minus":"\u2212","minusd":"\u2238","minusdu":"\u2A2A","MinusPlus":"\u2213","mlcp":"\u2ADB","mldr":"\u2026","mnplus":"\u2213","models":"\u22A7","Mopf":"\uD835\uDD44","mopf":"\uD835\uDD5E","mp":"\u2213","mscr":"\uD835\uDCC2","Mscr":"\u2133","mstpos":"\u223E","Mu":"\u039C","mu":"\u03BC","multimap":"\u22B8","mumap":"\u22B8","nabla":"\u2207","Nacute":"\u0143","nacute":"\u0144","nang":"\u2220\u20D2","nap":"\u2249","napE":"\u2A70\u0338","napid":"\u224B\u0338","napos":"\u0149","napprox":"\u2249","natural":"\u266E","naturals":"\u2115","natur":"\u266E","nbsp":"\u00A0","nbump":"\u224E\u0338","nbumpe":"\u224F\u0338","ncap":"\u2A43","Ncaron":"\u0147","ncaron":"\u0148","Ncedil":"\u0145","ncedil":"\u0146","ncong":"\u2247","ncongdot":"\u2A6D\u0338","ncup":"\u2A42","Ncy":"\u041D","ncy":"\u043D","ndash":"\u2013","nearhk":"\u2924","nearr":"\u2197","neArr":"\u21D7","nearrow":"\u2197","ne":"\u2260","nedot":"\u2250\u0338","NegativeMediumSpace":"\u200B","NegativeThickSpace":"\u200B","NegativeThinSpace":"\u200B","NegativeVeryThinSpace":"\u200B","nequiv":"\u2262","nesear":"\u2928","nesim":"\u2242\u0338","NestedGreaterGreater":"\u226B","NestedLessLess":"\u226A","NewLine":"\n","nexist":"\u2204","nexists":"\u2204","Nfr":"\uD835\uDD11","nfr":"\uD835\uDD2B","ngE":"\u2267\u0338","nge":"\u2271","ngeq":"\u2271","ngeqq":"\u2267\u0338","ngeqslant":"\u2A7E\u0338","nges":"\u2A7E\u0338","nGg":"\u22D9\u0338","ngsim":"\u2275","nGt":"\u226B\u20D2","ngt":"\u226F","ngtr":"\u226F","nGtv":"\u226B\u0338","nharr":"\u21AE","nhArr":"\u21CE","nhpar":"\u2AF2","ni":"\u220B","nis":"\u22FC","nisd":"\u22FA","niv":"\u220B","NJcy":"\u040A","njcy":"\u045A","nlarr":"\u219A","nlArr":"\u21CD","nldr":"\u2025","nlE":"\u2266\u0338","nle":"\u2270","nleftarrow":"\u219A","nLeftarrow":"\u21CD","nleftrightarrow":"\u21AE","nLeftrightarrow":"\u21CE","nleq":"\u2270","nleqq":"\u2266\u0338","nleqslant":"\u2A7D\u0338","nles":"\u2A7D\u0338","nless":"\u226E","nLl":"\u22D8\u0338","nlsim":"\u2274","nLt":"\u226A\u20D2","nlt":"\u226E","nltri":"\u22EA","nltrie":"\u22EC","nLtv":"\u226A\u0338","nmid":"\u2224","NoBreak":"\u2060","NonBreakingSpace":"\u00A0","nopf":"\uD835\uDD5F","Nopf":"\u2115","Not":"\u2AEC","not":"\u00AC","NotCongruent":"\u2262","NotCupCap":"\u226D","NotDoubleVerticalBar":"\u2226","NotElement":"\u2209","NotEqual":"\u2260","NotEqualTilde":"\u2242\u0338","NotExists":"\u2204","NotGreater":"\u226F","NotGreaterEqual":"\u2271","NotGreaterFullEqual":"\u2267\u0338","NotGreaterGreater":"\u226B\u0338","NotGreaterLess":"\u2279","NotGreaterSlantEqual":"\u2A7E\u0338","NotGreaterTilde":"\u2275","NotHumpDownHump":"\u224E\u0338","NotHumpEqual":"\u224F\u0338","notin":"\u2209","notindot":"\u22F5\u0338","notinE":"\u22F9\u0338","notinva":"\u2209","notinvb":"\u22F7","notinvc":"\u22F6","NotLeftTriangleBar":"\u29CF\u0338","NotLeftTriangle":"\u22EA","NotLeftTriangleEqual":"\u22EC","NotLess":"\u226E","NotLessEqual":"\u2270","NotLessGreater":"\u2278","NotLessLess":"\u226A\u0338","NotLessSlantEqual":"\u2A7D\u0338","NotLessTilde":"\u2274","NotNestedGreaterGreater":"\u2AA2\u0338","NotNestedLessLess":"\u2AA1\u0338","notni":"\u220C","notniva":"\u220C","notnivb":"\u22FE","notnivc":"\u22FD","NotPrecedes":"\u2280","NotPrecedesEqual":"\u2AAF\u0338","NotPrecedesSlantEqual":"\u22E0","NotReverseElement":"\u220C","NotRightTriangleBar":"\u29D0\u0338","NotRightTriangle":"\u22EB","NotRightTriangleEqual":"\u22ED","NotSquareSubset":"\u228F\u0338","NotSquareSubsetEqual":"\u22E2","NotSquareSuperset":"\u2290\u0338","NotSquareSupersetEqual":"\u22E3","NotSubset":"\u2282\u20D2","NotSubsetEqual":"\u2288","NotSucceeds":"\u2281","NotSucceedsEqual":"\u2AB0\u0338","NotSucceedsSlantEqual":"\u22E1","NotSucceedsTilde":"\u227F\u0338","NotSuperset":"\u2283\u20D2","NotSupersetEqual":"\u2289","NotTilde":"\u2241","NotTildeEqual":"\u2244","NotTildeFullEqual":"\u2247","NotTildeTilde":"\u2249","NotVerticalBar":"\u2224","nparallel":"\u2226","npar":"\u2226","nparsl":"\u2AFD\u20E5","npart":"\u2202\u0338","npolint":"\u2A14","npr":"\u2280","nprcue":"\u22E0","nprec":"\u2280","npreceq":"\u2AAF\u0338","npre":"\u2AAF\u0338","nrarrc":"\u2933\u0338","nrarr":"\u219B","nrArr":"\u21CF","nrarrw":"\u219D\u0338","nrightarrow":"\u219B","nRightarrow":"\u21CF","nrtri":"\u22EB","nrtrie":"\u22ED","nsc":"\u2281","nsccue":"\u22E1","nsce":"\u2AB0\u0338","Nscr":"\uD835\uDCA9","nscr":"\uD835\uDCC3","nshortmid":"\u2224","nshortparallel":"\u2226","nsim":"\u2241","nsime":"\u2244","nsimeq":"\u2244","nsmid":"\u2224","nspar":"\u2226","nsqsube":"\u22E2","nsqsupe":"\u22E3","nsub":"\u2284","nsubE":"\u2AC5\u0338","nsube":"\u2288","nsubset":"\u2282\u20D2","nsubseteq":"\u2288","nsubseteqq":"\u2AC5\u0338","nsucc":"\u2281","nsucceq":"\u2AB0\u0338","nsup":"\u2285","nsupE":"\u2AC6\u0338","nsupe":"\u2289","nsupset":"\u2283\u20D2","nsupseteq":"\u2289","nsupseteqq":"\u2AC6\u0338","ntgl":"\u2279","Ntilde":"\u00D1","ntilde":"\u00F1","ntlg":"\u2278","ntriangleleft":"\u22EA","ntrianglelefteq":"\u22EC","ntriangleright":"\u22EB","ntrianglerighteq":"\u22ED","Nu":"\u039D","nu":"\u03BD","num":"#","numero":"\u2116","numsp":"\u2007","nvap":"\u224D\u20D2","nvdash":"\u22AC","nvDash":"\u22AD","nVdash":"\u22AE","nVDash":"\u22AF","nvge":"\u2265\u20D2","nvgt":">\u20D2","nvHarr":"\u2904","nvinfin":"\u29DE","nvlArr":"\u2902","nvle":"\u2264\u20D2","nvlt":"<\u20D2","nvltrie":"\u22B4\u20D2","nvrArr":"\u2903","nvrtrie":"\u22B5\u20D2","nvsim":"\u223C\u20D2","nwarhk":"\u2923","nwarr":"\u2196","nwArr":"\u21D6","nwarrow":"\u2196","nwnear":"\u2927","Oacute":"\u00D3","oacute":"\u00F3","oast":"\u229B","Ocirc":"\u00D4","ocirc":"\u00F4","ocir":"\u229A","Ocy":"\u041E","ocy":"\u043E","odash":"\u229D","Odblac":"\u0150","odblac":"\u0151","odiv":"\u2A38","odot":"\u2299","odsold":"\u29BC","OElig":"\u0152","oelig":"\u0153","ofcir":"\u29BF","Ofr":"\uD835\uDD12","ofr":"\uD835\uDD2C","ogon":"\u02DB","Ograve":"\u00D2","ograve":"\u00F2","ogt":"\u29C1","ohbar":"\u29B5","ohm":"\u03A9","oint":"\u222E","olarr":"\u21BA","olcir":"\u29BE","olcross":"\u29BB","oline":"\u203E","olt":"\u29C0","Omacr":"\u014C","omacr":"\u014D","Omega":"\u03A9","omega":"\u03C9","Omicron":"\u039F","omicron":"\u03BF","omid":"\u29B6","ominus":"\u2296","Oopf":"\uD835\uDD46","oopf":"\uD835\uDD60","opar":"\u29B7","OpenCurlyDoubleQuote":"\u201C","OpenCurlyQuote":"\u2018","operp":"\u29B9","oplus":"\u2295","orarr":"\u21BB","Or":"\u2A54","or":"\u2228","ord":"\u2A5D","order":"\u2134","orderof":"\u2134","ordf":"\u00AA","ordm":"\u00BA","origof":"\u22B6","oror":"\u2A56","orslope":"\u2A57","orv":"\u2A5B","oS":"\u24C8","Oscr":"\uD835\uDCAA","oscr":"\u2134","Oslash":"\u00D8","oslash":"\u00F8","osol":"\u2298","Otilde":"\u00D5","otilde":"\u00F5","otimesas":"\u2A36","Otimes":"\u2A37","otimes":"\u2297","Ouml":"\u00D6","ouml":"\u00F6","ovbar":"\u233D","OverBar":"\u203E","OverBrace":"\u23DE","OverBracket":"\u23B4","OverParenthesis":"\u23DC","para":"\u00B6","parallel":"\u2225","par":"\u2225","parsim":"\u2AF3","parsl":"\u2AFD","part":"\u2202","PartialD":"\u2202","Pcy":"\u041F","pcy":"\u043F","percnt":"%","period":".","permil":"\u2030","perp":"\u22A5","pertenk":"\u2031","Pfr":"\uD835\uDD13","pfr":"\uD835\uDD2D","Phi":"\u03A6","phi":"\u03C6","phiv":"\u03D5","phmmat":"\u2133","phone":"\u260E","Pi":"\u03A0","pi":"\u03C0","pitchfork":"\u22D4","piv":"\u03D6","planck":"\u210F","planckh":"\u210E","plankv":"\u210F","plusacir":"\u2A23","plusb":"\u229E","pluscir":"\u2A22","plus":"+","plusdo":"\u2214","plusdu":"\u2A25","pluse":"\u2A72","PlusMinus":"\u00B1","plusmn":"\u00B1","plussim":"\u2A26","plustwo":"\u2A27","pm":"\u00B1","Poincareplane":"\u210C","pointint":"\u2A15","popf":"\uD835\uDD61","Popf":"\u2119","pound":"\u00A3","prap":"\u2AB7","Pr":"\u2ABB","pr":"\u227A","prcue":"\u227C","precapprox":"\u2AB7","prec":"\u227A","preccurlyeq":"\u227C","Precedes":"\u227A","PrecedesEqual":"\u2AAF","PrecedesSlantEqual":"\u227C","PrecedesTilde":"\u227E","preceq":"\u2AAF","precnapprox":"\u2AB9","precneqq":"\u2AB5","precnsim":"\u22E8","pre":"\u2AAF","prE":"\u2AB3","precsim":"\u227E","prime":"\u2032","Prime":"\u2033","primes":"\u2119","prnap":"\u2AB9","prnE":"\u2AB5","prnsim":"\u22E8","prod":"\u220F","Product":"\u220F","profalar":"\u232E","profline":"\u2312","profsurf":"\u2313","prop":"\u221D","Proportional":"\u221D","Proportion":"\u2237","propto":"\u221D","prsim":"\u227E","prurel":"\u22B0","Pscr":"\uD835\uDCAB","pscr":"\uD835\uDCC5","Psi":"\u03A8","psi":"\u03C8","puncsp":"\u2008","Qfr":"\uD835\uDD14","qfr":"\uD835\uDD2E","qint":"\u2A0C","qopf":"\uD835\uDD62","Qopf":"\u211A","qprime":"\u2057","Qscr":"\uD835\uDCAC","qscr":"\uD835\uDCC6","quaternions":"\u210D","quatint":"\u2A16","quest":"?","questeq":"\u225F","quot":"\"","QUOT":"\"","rAarr":"\u21DB","race":"\u223D\u0331","Racute":"\u0154","racute":"\u0155","radic":"\u221A","raemptyv":"\u29B3","rang":"\u27E9","Rang":"\u27EB","rangd":"\u2992","range":"\u29A5","rangle":"\u27E9","raquo":"\u00BB","rarrap":"\u2975","rarrb":"\u21E5","rarrbfs":"\u2920","rarrc":"\u2933","rarr":"\u2192","Rarr":"\u21A0","rArr":"\u21D2","rarrfs":"\u291E","rarrhk":"\u21AA","rarrlp":"\u21AC","rarrpl":"\u2945","rarrsim":"\u2974","Rarrtl":"\u2916","rarrtl":"\u21A3","rarrw":"\u219D","ratail":"\u291A","rAtail":"\u291C","ratio":"\u2236","rationals":"\u211A","rbarr":"\u290D","rBarr":"\u290F","RBarr":"\u2910","rbbrk":"\u2773","rbrace":"}","rbrack":"]","rbrke":"\u298C","rbrksld":"\u298E","rbrkslu":"\u2990","Rcaron":"\u0158","rcaron":"\u0159","Rcedil":"\u0156","rcedil":"\u0157","rceil":"\u2309","rcub":"}","Rcy":"\u0420","rcy":"\u0440","rdca":"\u2937","rdldhar":"\u2969","rdquo":"\u201D","rdquor":"\u201D","rdsh":"\u21B3","real":"\u211C","realine":"\u211B","realpart":"\u211C","reals":"\u211D","Re":"\u211C","rect":"\u25AD","reg":"\u00AE","REG":"\u00AE","ReverseElement":"\u220B","ReverseEquilibrium":"\u21CB","ReverseUpEquilibrium":"\u296F","rfisht":"\u297D","rfloor":"\u230B","rfr":"\uD835\uDD2F","Rfr":"\u211C","rHar":"\u2964","rhard":"\u21C1","rharu":"\u21C0","rharul":"\u296C","Rho":"\u03A1","rho":"\u03C1","rhov":"\u03F1","RightAngleBracket":"\u27E9","RightArrowBar":"\u21E5","rightarrow":"\u2192","RightArrow":"\u2192","Rightarrow":"\u21D2","RightArrowLeftArrow":"\u21C4","rightarrowtail":"\u21A3","RightCeiling":"\u2309","RightDoubleBracket":"\u27E7","RightDownTeeVector":"\u295D","RightDownVectorBar":"\u2955","RightDownVector":"\u21C2","RightFloor":"\u230B","rightharpoondown":"\u21C1","rightharpoonup":"\u21C0","rightleftarrows":"\u21C4","rightleftharpoons":"\u21CC","rightrightarrows":"\u21C9","rightsquigarrow":"\u219D","RightTeeArrow":"\u21A6","RightTee":"\u22A2","RightTeeVector":"\u295B","rightthreetimes":"\u22CC","RightTriangleBar":"\u29D0","RightTriangle":"\u22B3","RightTriangleEqual":"\u22B5","RightUpDownVector":"\u294F","RightUpTeeVector":"\u295C","RightUpVectorBar":"\u2954","RightUpVector":"\u21BE","RightVectorBar":"\u2953","RightVector":"\u21C0","ring":"\u02DA","risingdotseq":"\u2253","rlarr":"\u21C4","rlhar":"\u21CC","rlm":"\u200F","rmoustache":"\u23B1","rmoust":"\u23B1","rnmid":"\u2AEE","roang":"\u27ED","roarr":"\u21FE","robrk":"\u27E7","ropar":"\u2986","ropf":"\uD835\uDD63","Ropf":"\u211D","roplus":"\u2A2E","rotimes":"\u2A35","RoundImplies":"\u2970","rpar":")","rpargt":"\u2994","rppolint":"\u2A12","rrarr":"\u21C9","Rrightarrow":"\u21DB","rsaquo":"\u203A","rscr":"\uD835\uDCC7","Rscr":"\u211B","rsh":"\u21B1","Rsh":"\u21B1","rsqb":"]","rsquo":"\u2019","rsquor":"\u2019","rthree":"\u22CC","rtimes":"\u22CA","rtri":"\u25B9","rtrie":"\u22B5","rtrif":"\u25B8","rtriltri":"\u29CE","RuleDelayed":"\u29F4","ruluhar":"\u2968","rx":"\u211E","Sacute":"\u015A","sacute":"\u015B","sbquo":"\u201A","scap":"\u2AB8","Scaron":"\u0160","scaron":"\u0161","Sc":"\u2ABC","sc":"\u227B","sccue":"\u227D","sce":"\u2AB0","scE":"\u2AB4","Scedil":"\u015E","scedil":"\u015F","Scirc":"\u015C","scirc":"\u015D","scnap":"\u2ABA","scnE":"\u2AB6","scnsim":"\u22E9","scpolint":"\u2A13","scsim":"\u227F","Scy":"\u0421","scy":"\u0441","sdotb":"\u22A1","sdot":"\u22C5","sdote":"\u2A66","searhk":"\u2925","searr":"\u2198","seArr":"\u21D8","searrow":"\u2198","sect":"\u00A7","semi":";","seswar":"\u2929","setminus":"\u2216","setmn":"\u2216","sext":"\u2736","Sfr":"\uD835\uDD16","sfr":"\uD835\uDD30","sfrown":"\u2322","sharp":"\u266F","SHCHcy":"\u0429","shchcy":"\u0449","SHcy":"\u0428","shcy":"\u0448","ShortDownArrow":"\u2193","ShortLeftArrow":"\u2190","shortmid":"\u2223","shortparallel":"\u2225","ShortRightArrow":"\u2192","ShortUpArrow":"\u2191","shy":"\u00AD","Sigma":"\u03A3","sigma":"\u03C3","sigmaf":"\u03C2","sigmav":"\u03C2","sim":"\u223C","simdot":"\u2A6A","sime":"\u2243","simeq":"\u2243","simg":"\u2A9E","simgE":"\u2AA0","siml":"\u2A9D","simlE":"\u2A9F","simne":"\u2246","simplus":"\u2A24","simrarr":"\u2972","slarr":"\u2190","SmallCircle":"\u2218","smallsetminus":"\u2216","smashp":"\u2A33","smeparsl":"\u29E4","smid":"\u2223","smile":"\u2323","smt":"\u2AAA","smte":"\u2AAC","smtes":"\u2AAC\uFE00","SOFTcy":"\u042C","softcy":"\u044C","solbar":"\u233F","solb":"\u29C4","sol":"/","Sopf":"\uD835\uDD4A","sopf":"\uD835\uDD64","spades":"\u2660","spadesuit":"\u2660","spar":"\u2225","sqcap":"\u2293","sqcaps":"\u2293\uFE00","sqcup":"\u2294","sqcups":"\u2294\uFE00","Sqrt":"\u221A","sqsub":"\u228F","sqsube":"\u2291","sqsubset":"\u228F","sqsubseteq":"\u2291","sqsup":"\u2290","sqsupe":"\u2292","sqsupset":"\u2290","sqsupseteq":"\u2292","square":"\u25A1","Square":"\u25A1","SquareIntersection":"\u2293","SquareSubset":"\u228F","SquareSubsetEqual":"\u2291","SquareSuperset":"\u2290","SquareSupersetEqual":"\u2292","SquareUnion":"\u2294","squarf":"\u25AA","squ":"\u25A1","squf":"\u25AA","srarr":"\u2192","Sscr":"\uD835\uDCAE","sscr":"\uD835\uDCC8","ssetmn":"\u2216","ssmile":"\u2323","sstarf":"\u22C6","Star":"\u22C6","star":"\u2606","starf":"\u2605","straightepsilon":"\u03F5","straightphi":"\u03D5","strns":"\u00AF","sub":"\u2282","Sub":"\u22D0","subdot":"\u2ABD","subE":"\u2AC5","sube":"\u2286","subedot":"\u2AC3","submult":"\u2AC1","subnE":"\u2ACB","subne":"\u228A","subplus":"\u2ABF","subrarr":"\u2979","subset":"\u2282","Subset":"\u22D0","subseteq":"\u2286","subseteqq":"\u2AC5","SubsetEqual":"\u2286","subsetneq":"\u228A","subsetneqq":"\u2ACB","subsim":"\u2AC7","subsub":"\u2AD5","subsup":"\u2AD3","succapprox":"\u2AB8","succ":"\u227B","succcurlyeq":"\u227D","Succeeds":"\u227B","SucceedsEqual":"\u2AB0","SucceedsSlantEqual":"\u227D","SucceedsTilde":"\u227F","succeq":"\u2AB0","succnapprox":"\u2ABA","succneqq":"\u2AB6","succnsim":"\u22E9","succsim":"\u227F","SuchThat":"\u220B","sum":"\u2211","Sum":"\u2211","sung":"\u266A","sup1":"\u00B9","sup2":"\u00B2","sup3":"\u00B3","sup":"\u2283","Sup":"\u22D1","supdot":"\u2ABE","supdsub":"\u2AD8","supE":"\u2AC6","supe":"\u2287","supedot":"\u2AC4","Superset":"\u2283","SupersetEqual":"\u2287","suphsol":"\u27C9","suphsub":"\u2AD7","suplarr":"\u297B","supmult":"\u2AC2","supnE":"\u2ACC","supne":"\u228B","supplus":"\u2AC0","supset":"\u2283","Supset":"\u22D1","supseteq":"\u2287","supseteqq":"\u2AC6","supsetneq":"\u228B","supsetneqq":"\u2ACC","supsim":"\u2AC8","supsub":"\u2AD4","supsup":"\u2AD6","swarhk":"\u2926","swarr":"\u2199","swArr":"\u21D9","swarrow":"\u2199","swnwar":"\u292A","szlig":"\u00DF","Tab":"\t","target":"\u2316","Tau":"\u03A4","tau":"\u03C4","tbrk":"\u23B4","Tcaron":"\u0164","tcaron":"\u0165","Tcedil":"\u0162","tcedil":"\u0163","Tcy":"\u0422","tcy":"\u0442","tdot":"\u20DB","telrec":"\u2315","Tfr":"\uD835\uDD17","tfr":"\uD835\uDD31","there4":"\u2234","therefore":"\u2234","Therefore":"\u2234","Theta":"\u0398","theta":"\u03B8","thetasym":"\u03D1","thetav":"\u03D1","thickapprox":"\u2248","thicksim":"\u223C","ThickSpace":"\u205F\u200A","ThinSpace":"\u2009","thinsp":"\u2009","thkap":"\u2248","thksim":"\u223C","THORN":"\u00DE","thorn":"\u00FE","tilde":"\u02DC","Tilde":"\u223C","TildeEqual":"\u2243","TildeFullEqual":"\u2245","TildeTilde":"\u2248","timesbar":"\u2A31","timesb":"\u22A0","times":"\u00D7","timesd":"\u2A30","tint":"\u222D","toea":"\u2928","topbot":"\u2336","topcir":"\u2AF1","top":"\u22A4","Topf":"\uD835\uDD4B","topf":"\uD835\uDD65","topfork":"\u2ADA","tosa":"\u2929","tprime":"\u2034","trade":"\u2122","TRADE":"\u2122","triangle":"\u25B5","triangledown":"\u25BF","triangleleft":"\u25C3","trianglelefteq":"\u22B4","triangleq":"\u225C","triangleright":"\u25B9","trianglerighteq":"\u22B5","tridot":"\u25EC","trie":"\u225C","triminus":"\u2A3A","TripleDot":"\u20DB","triplus":"\u2A39","trisb":"\u29CD","tritime":"\u2A3B","trpezium":"\u23E2","Tscr":"\uD835\uDCAF","tscr":"\uD835\uDCC9","TScy":"\u0426","tscy":"\u0446","TSHcy":"\u040B","tshcy":"\u045B","Tstrok":"\u0166","tstrok":"\u0167","twixt":"\u226C","twoheadleftarrow":"\u219E","twoheadrightarrow":"\u21A0","Uacute":"\u00DA","uacute":"\u00FA","uarr":"\u2191","Uarr":"\u219F","uArr":"\u21D1","Uarrocir":"\u2949","Ubrcy":"\u040E","ubrcy":"\u045E","Ubreve":"\u016C","ubreve":"\u016D","Ucirc":"\u00DB","ucirc":"\u00FB","Ucy":"\u0423","ucy":"\u0443","udarr":"\u21C5","Udblac":"\u0170","udblac":"\u0171","udhar":"\u296E","ufisht":"\u297E","Ufr":"\uD835\uDD18","ufr":"\uD835\uDD32","Ugrave":"\u00D9","ugrave":"\u00F9","uHar":"\u2963","uharl":"\u21BF","uharr":"\u21BE","uhblk":"\u2580","ulcorn":"\u231C","ulcorner":"\u231C","ulcrop":"\u230F","ultri":"\u25F8","Umacr":"\u016A","umacr":"\u016B","uml":"\u00A8","UnderBar":"_","UnderBrace":"\u23DF","UnderBracket":"\u23B5","UnderParenthesis":"\u23DD","Union":"\u22C3","UnionPlus":"\u228E","Uogon":"\u0172","uogon":"\u0173","Uopf":"\uD835\uDD4C","uopf":"\uD835\uDD66","UpArrowBar":"\u2912","uparrow":"\u2191","UpArrow":"\u2191","Uparrow":"\u21D1","UpArrowDownArrow":"\u21C5","updownarrow":"\u2195","UpDownArrow":"\u2195","Updownarrow":"\u21D5","UpEquilibrium":"\u296E","upharpoonleft":"\u21BF","upharpoonright":"\u21BE","uplus":"\u228E","UpperLeftArrow":"\u2196","UpperRightArrow":"\u2197","upsi":"\u03C5","Upsi":"\u03D2","upsih":"\u03D2","Upsilon":"\u03A5","upsilon":"\u03C5","UpTeeArrow":"\u21A5","UpTee":"\u22A5","upuparrows":"\u21C8","urcorn":"\u231D","urcorner":"\u231D","urcrop":"\u230E","Uring":"\u016E","uring":"\u016F","urtri":"\u25F9","Uscr":"\uD835\uDCB0","uscr":"\uD835\uDCCA","utdot":"\u22F0","Utilde":"\u0168","utilde":"\u0169","utri":"\u25B5","utrif":"\u25B4","uuarr":"\u21C8","Uuml":"\u00DC","uuml":"\u00FC","uwangle":"\u29A7","vangrt":"\u299C","varepsilon":"\u03F5","varkappa":"\u03F0","varnothing":"\u2205","varphi":"\u03D5","varpi":"\u03D6","varpropto":"\u221D","varr":"\u2195","vArr":"\u21D5","varrho":"\u03F1","varsigma":"\u03C2","varsubsetneq":"\u228A\uFE00","varsubsetneqq":"\u2ACB\uFE00","varsupsetneq":"\u228B\uFE00","varsupsetneqq":"\u2ACC\uFE00","vartheta":"\u03D1","vartriangleleft":"\u22B2","vartriangleright":"\u22B3","vBar":"\u2AE8","Vbar":"\u2AEB","vBarv":"\u2AE9","Vcy":"\u0412","vcy":"\u0432","vdash":"\u22A2","vDash":"\u22A8","Vdash":"\u22A9","VDash":"\u22AB","Vdashl":"\u2AE6","veebar":"\u22BB","vee":"\u2228","Vee":"\u22C1","veeeq":"\u225A","vellip":"\u22EE","verbar":"|","Verbar":"\u2016","vert":"|","Vert":"\u2016","VerticalBar":"\u2223","VerticalLine":"|","VerticalSeparator":"\u2758","VerticalTilde":"\u2240","VeryThinSpace":"\u200A","Vfr":"\uD835\uDD19","vfr":"\uD835\uDD33","vltri":"\u22B2","vnsub":"\u2282\u20D2","vnsup":"\u2283\u20D2","Vopf":"\uD835\uDD4D","vopf":"\uD835\uDD67","vprop":"\u221D","vrtri":"\u22B3","Vscr":"\uD835\uDCB1","vscr":"\uD835\uDCCB","vsubnE":"\u2ACB\uFE00","vsubne":"\u228A\uFE00","vsupnE":"\u2ACC\uFE00","vsupne":"\u228B\uFE00","Vvdash":"\u22AA","vzigzag":"\u299A","Wcirc":"\u0174","wcirc":"\u0175","wedbar":"\u2A5F","wedge":"\u2227","Wedge":"\u22C0","wedgeq":"\u2259","weierp":"\u2118","Wfr":"\uD835\uDD1A","wfr":"\uD835\uDD34","Wopf":"\uD835\uDD4E","wopf":"\uD835\uDD68","wp":"\u2118","wr":"\u2240","wreath":"\u2240","Wscr":"\uD835\uDCB2","wscr":"\uD835\uDCCC","xcap":"\u22C2","xcirc":"\u25EF","xcup":"\u22C3","xdtri":"\u25BD","Xfr":"\uD835\uDD1B","xfr":"\uD835\uDD35","xharr":"\u27F7","xhArr":"\u27FA","Xi":"\u039E","xi":"\u03BE","xlarr":"\u27F5","xlArr":"\u27F8","xmap":"\u27FC","xnis":"\u22FB","xodot":"\u2A00","Xopf":"\uD835\uDD4F","xopf":"\uD835\uDD69","xoplus":"\u2A01","xotime":"\u2A02","xrarr":"\u27F6","xrArr":"\u27F9","Xscr":"\uD835\uDCB3","xscr":"\uD835\uDCCD","xsqcup":"\u2A06","xuplus":"\u2A04","xutri":"\u25B3","xvee":"\u22C1","xwedge":"\u22C0","Yacute":"\u00DD","yacute":"\u00FD","YAcy":"\u042F","yacy":"\u044F","Ycirc":"\u0176","ycirc":"\u0177","Ycy":"\u042B","ycy":"\u044B","yen":"\u00A5","Yfr":"\uD835\uDD1C","yfr":"\uD835\uDD36","YIcy":"\u0407","yicy":"\u0457","Yopf":"\uD835\uDD50","yopf":"\uD835\uDD6A","Yscr":"\uD835\uDCB4","yscr":"\uD835\uDCCE","YUcy":"\u042E","yucy":"\u044E","yuml":"\u00FF","Yuml":"\u0178","Zacute":"\u0179","zacute":"\u017A","Zcaron":"\u017D","zcaron":"\u017E","Zcy":"\u0417","zcy":"\u0437","Zdot":"\u017B","zdot":"\u017C","zeetrf":"\u2128","ZeroWidthSpace":"\u200B","Zeta":"\u0396","zeta":"\u03B6","zfr":"\uD835\uDD37","Zfr":"\u2128","ZHcy":"\u0416","zhcy":"\u0436","zigrarr":"\u21DD","zopf":"\uD835\uDD6B","Zopf":"\u2124","Zscr":"\uD835\uDCB5","zscr":"\uD835\uDCCF","zwj":"\u200D","zwnj":"\u200C"}
-},{}],16:[function(require,module,exports){
-(function (process,global){
-/*!
- * @overview es6-promise - a tiny implementation of Promises/A+.
- * @copyright Copyright (c) 2014 Yehuda Katz, Tom Dale, Stefan Penner and contributors (Conversion to ES6 API by Jake Archibald)
- * @license   Licensed under MIT license
- *            See https://raw.githubusercontent.com/jakearchibald/es6-promise/master/LICENSE
- * @version   3.2.1
- */
-
-(function() {
-    "use strict";
-    function lib$es6$promise$utils$$objectOrFunction(x) {
-      return typeof x === 'function' || (typeof x === 'object' && x !== null);
-    }
-
-    function lib$es6$promise$utils$$isFunction(x) {
-      return typeof x === 'function';
-    }
-
-    function lib$es6$promise$utils$$isMaybeThenable(x) {
-      return typeof x === 'object' && x !== null;
-    }
-
-    var lib$es6$promise$utils$$_isArray;
-    if (!Array.isArray) {
-      lib$es6$promise$utils$$_isArray = function (x) {
-        return Object.prototype.toString.call(x) === '[object Array]';
-      };
-    } else {
-      lib$es6$promise$utils$$_isArray = Array.isArray;
-    }
-
-    var lib$es6$promise$utils$$isArray = lib$es6$promise$utils$$_isArray;
-    var lib$es6$promise$asap$$len = 0;
-    var lib$es6$promise$asap$$vertxNext;
-    var lib$es6$promise$asap$$customSchedulerFn;
-
-    var lib$es6$promise$asap$$asap = function asap(callback, arg) {
-      lib$es6$promise$asap$$queue[lib$es6$promise$asap$$len] = callback;
-      lib$es6$promise$asap$$queue[lib$es6$promise$asap$$len + 1] = arg;
-      lib$es6$promise$asap$$len += 2;
-      if (lib$es6$promise$asap$$len === 2) {
-        // If len is 2, that means that we need to schedule an async flush.
-        // If additional callbacks are queued before the queue is flushed, they
-        // will be processed by this flush that we are scheduling.
-        if (lib$es6$promise$asap$$customSchedulerFn) {
-          lib$es6$promise$asap$$customSchedulerFn(lib$es6$promise$asap$$flush);
-        } else {
-          lib$es6$promise$asap$$scheduleFlush();
-        }
-      }
-    }
-
-    function lib$es6$promise$asap$$setScheduler(scheduleFn) {
-      lib$es6$promise$asap$$customSchedulerFn = scheduleFn;
-    }
-
-    function lib$es6$promise$asap$$setAsap(asapFn) {
-      lib$es6$promise$asap$$asap = asapFn;
-    }
-
-    var lib$es6$promise$asap$$browserWindow = (typeof window !== 'undefined') ? window : undefined;
-    var lib$es6$promise$asap$$browserGlobal = lib$es6$promise$asap$$browserWindow || {};
-    var lib$es6$promise$asap$$BrowserMutationObserver = lib$es6$promise$asap$$browserGlobal.MutationObserver || lib$es6$promise$asap$$browserGlobal.WebKitMutationObserver;
-    var lib$es6$promise$asap$$isNode = typeof self === 'undefined' && typeof process !== 'undefined' && {}.toString.call(process) === '[object process]';
-
-    // test for web worker but not in IE10
-    var lib$es6$promise$asap$$isWorker = typeof Uint8ClampedArray !== 'undefined' &&
-      typeof importScripts !== 'undefined' &&
-      typeof MessageChannel !== 'undefined';
-
-    // node
-    function lib$es6$promise$asap$$useNextTick() {
-      // node version 0.10.x displays a deprecation warning when nextTick is used recursively
-      // see https://github.com/cujojs/when/issues/410 for details
-      return function() {
-        process.nextTick(lib$es6$promise$asap$$flush);
-      };
-    }
-
-    // vertx
-    function lib$es6$promise$asap$$useVertxTimer() {
-      return function() {
-        lib$es6$promise$asap$$vertxNext(lib$es6$promise$asap$$flush);
-      };
-    }
-
-    function lib$es6$promise$asap$$useMutationObserver() {
-      var iterations = 0;
-      var observer = new lib$es6$promise$asap$$BrowserMutationObserver(lib$es6$promise$asap$$flush);
-      var node = document.createTextNode('');
-      observer.observe(node, { characterData: true });
-
-      return function() {
-        node.data = (iterations = ++iterations % 2);
-      };
-    }
-
-    // web worker
-    function lib$es6$promise$asap$$useMessageChannel() {
-      var channel = new MessageChannel();
-      channel.port1.onmessage = lib$es6$promise$asap$$flush;
-      return function () {
-        channel.port2.postMessage(0);
-      };
-    }
-
-    function lib$es6$promise$asap$$useSetTimeout() {
-      return function() {
-        setTimeout(lib$es6$promise$asap$$flush, 1);
-      };
-    }
-
-    var lib$es6$promise$asap$$queue = new Array(1000);
-    function lib$es6$promise$asap$$flush() {
-      for (var i = 0; i < lib$es6$promise$asap$$len; i+=2) {
-        var callback = lib$es6$promise$asap$$queue[i];
-        var arg = lib$es6$promise$asap$$queue[i+1];
-
-        callback(arg);
-
-        lib$es6$promise$asap$$queue[i] = undefined;
-        lib$es6$promise$asap$$queue[i+1] = undefined;
-      }
-
-      lib$es6$promise$asap$$len = 0;
-    }
-
-    function lib$es6$promise$asap$$attemptVertx() {
-      try {
-        var r = require;
-        var vertx = r('vertx');
-        lib$es6$promise$asap$$vertxNext = vertx.runOnLoop || vertx.runOnContext;
-        return lib$es6$promise$asap$$useVertxTimer();
-      } catch(e) {
-        return lib$es6$promise$asap$$useSetTimeout();
-      }
-    }
-
-    var lib$es6$promise$asap$$scheduleFlush;
-    // Decide what async method to use to triggering processing of queued callbacks:
-    if (lib$es6$promise$asap$$isNode) {
-      lib$es6$promise$asap$$scheduleFlush = lib$es6$promise$asap$$useNextTick();
-    } else if (lib$es6$promise$asap$$BrowserMutationObserver) {
-      lib$es6$promise$asap$$scheduleFlush = lib$es6$promise$asap$$useMutationObserver();
-    } else if (lib$es6$promise$asap$$isWorker) {
-      lib$es6$promise$asap$$scheduleFlush = lib$es6$promise$asap$$useMessageChannel();
-    } else if (lib$es6$promise$asap$$browserWindow === undefined && typeof require === 'function') {
-      lib$es6$promise$asap$$scheduleFlush = lib$es6$promise$asap$$attemptVertx();
-    } else {
-      lib$es6$promise$asap$$scheduleFlush = lib$es6$promise$asap$$useSetTimeout();
-    }
-    function lib$es6$promise$then$$then(onFulfillment, onRejection) {
-      var parent = this;
-
-      var child = new this.constructor(lib$es6$promise$$internal$$noop);
-
-      if (child[lib$es6$promise$$internal$$PROMISE_ID] === undefined) {
-        lib$es6$promise$$internal$$makePromise(child);
-      }
-
-      var state = parent._state;
-
-      if (state) {
-        var callback = arguments[state - 1];
-        lib$es6$promise$asap$$asap(function(){
-          lib$es6$promise$$internal$$invokeCallback(state, child, callback, parent._result);
-        });
-      } else {
-        lib$es6$promise$$internal$$subscribe(parent, child, onFulfillment, onRejection);
-      }
-
-      return child;
-    }
-    var lib$es6$promise$then$$default = lib$es6$promise$then$$then;
-    function lib$es6$promise$promise$resolve$$resolve(object) {
-      /*jshint validthis:true */
-      var Constructor = this;
-
-      if (object && typeof object === 'object' && object.constructor === Constructor) {
-        return object;
-      }
-
-      var promise = new Constructor(lib$es6$promise$$internal$$noop);
-      lib$es6$promise$$internal$$resolve(promise, object);
-      return promise;
-    }
-    var lib$es6$promise$promise$resolve$$default = lib$es6$promise$promise$resolve$$resolve;
-    var lib$es6$promise$$internal$$PROMISE_ID = Math.random().toString(36).substring(16);
-
-    function lib$es6$promise$$internal$$noop() {}
-
-    var lib$es6$promise$$internal$$PENDING   = void 0;
-    var lib$es6$promise$$internal$$FULFILLED = 1;
-    var lib$es6$promise$$internal$$REJECTED  = 2;
-
-    var lib$es6$promise$$internal$$GET_THEN_ERROR = new lib$es6$promise$$internal$$ErrorObject();
-
-    function lib$es6$promise$$internal$$selfFulfillment() {
-      return new TypeError("You cannot resolve a promise with itself");
-    }
-
-    function lib$es6$promise$$internal$$cannotReturnOwn() {
-      return new TypeError('A promises callback cannot return that same promise.');
-    }
-
-    function lib$es6$promise$$internal$$getThen(promise) {
-      try {
-        return promise.then;
-      } catch(error) {
-        lib$es6$promise$$internal$$GET_THEN_ERROR.error = error;
-        return lib$es6$promise$$internal$$GET_THEN_ERROR;
-      }
-    }
-
-    function lib$es6$promise$$internal$$tryThen(then, value, fulfillmentHandler, rejectionHandler) {
-      try {
-        then.call(value, fulfillmentHandler, rejectionHandler);
-      } catch(e) {
-        return e;
-      }
-    }
-
-    function lib$es6$promise$$internal$$handleForeignThenable(promise, thenable, then) {
-       lib$es6$promise$asap$$asap(function(promise) {
-        var sealed = false;
-        var error = lib$es6$promise$$internal$$tryThen(then, thenable, function(value) {
-          if (sealed) { return; }
-          sealed = true;
-          if (thenable !== value) {
-            lib$es6$promise$$internal$$resolve(promise, value);
-          } else {
-            lib$es6$promise$$internal$$fulfill(promise, value);
-          }
-        }, function(reason) {
-          if (sealed) { return; }
-          sealed = true;
-
-          lib$es6$promise$$internal$$reject(promise, reason);
-        }, 'Settle: ' + (promise._label || ' unknown promise'));
-
-        if (!sealed && error) {
-          sealed = true;
-          lib$es6$promise$$internal$$reject(promise, error);
-        }
-      }, promise);
-    }
-
-    function lib$es6$promise$$internal$$handleOwnThenable(promise, thenable) {
-      if (thenable._state === lib$es6$promise$$internal$$FULFILLED) {
-        lib$es6$promise$$internal$$fulfill(promise, thenable._result);
-      } else if (thenable._state === lib$es6$promise$$internal$$REJECTED) {
-        lib$es6$promise$$internal$$reject(promise, thenable._result);
-      } else {
-        lib$es6$promise$$internal$$subscribe(thenable, undefined, function(value) {
-          lib$es6$promise$$internal$$resolve(promise, value);
-        }, function(reason) {
-          lib$es6$promise$$internal$$reject(promise, reason);
-        });
-      }
-    }
-
-    function lib$es6$promise$$internal$$handleMaybeThenable(promise, maybeThenable, then) {
-      if (maybeThenable.constructor === promise.constructor &&
-          then === lib$es6$promise$then$$default &&
-          constructor.resolve === lib$es6$promise$promise$resolve$$default) {
-        lib$es6$promise$$internal$$handleOwnThenable(promise, maybeThenable);
-      } else {
-        if (then === lib$es6$promise$$internal$$GET_THEN_ERROR) {
-          lib$es6$promise$$internal$$reject(promise, lib$es6$promise$$internal$$GET_THEN_ERROR.error);
-        } else if (then === undefined) {
-          lib$es6$promise$$internal$$fulfill(promise, maybeThenable);
-        } else if (lib$es6$promise$utils$$isFunction(then)) {
-          lib$es6$promise$$internal$$handleForeignThenable(promise, maybeThenable, then);
-        } else {
-          lib$es6$promise$$internal$$fulfill(promise, maybeThenable);
-        }
-      }
-    }
-
-    function lib$es6$promise$$internal$$resolve(promise, value) {
-      if (promise === value) {
-        lib$es6$promise$$internal$$reject(promise, lib$es6$promise$$internal$$selfFulfillment());
-      } else if (lib$es6$promise$utils$$objectOrFunction(value)) {
-        lib$es6$promise$$internal$$handleMaybeThenable(promise, value, lib$es6$promise$$internal$$getThen(value));
-      } else {
-        lib$es6$promise$$internal$$fulfill(promise, value);
-      }
-    }
-
-    function lib$es6$promise$$internal$$publishRejection(promise) {
-      if (promise._onerror) {
-        promise._onerror(promise._result);
-      }
-
-      lib$es6$promise$$internal$$publish(promise);
-    }
-
-    function lib$es6$promise$$internal$$fulfill(promise, value) {
-      if (promise._state !== lib$es6$promise$$internal$$PENDING) { return; }
-
-      promise._result = value;
-      promise._state = lib$es6$promise$$internal$$FULFILLED;
-
-      if (promise._subscribers.length !== 0) {
-        lib$es6$promise$asap$$asap(lib$es6$promise$$internal$$publish, promise);
-      }
-    }
-
-    function lib$es6$promise$$internal$$reject(promise, reason) {
-      if (promise._state !== lib$es6$promise$$internal$$PENDING) { return; }
-      promise._state = lib$es6$promise$$internal$$REJECTED;
-      promise._result = reason;
-
-      lib$es6$promise$asap$$asap(lib$es6$promise$$internal$$publishRejection, promise);
-    }
-
-    function lib$es6$promise$$internal$$subscribe(parent, child, onFulfillment, onRejection) {
-      var subscribers = parent._subscribers;
-      var length = subscribers.length;
-
-      parent._onerror = null;
-
-      subscribers[length] = child;
-      subscribers[length + lib$es6$promise$$internal$$FULFILLED] = onFulfillment;
-      subscribers[length + lib$es6$promise$$internal$$REJECTED]  = onRejection;
-
-      if (length === 0 && parent._state) {
-        lib$es6$promise$asap$$asap(lib$es6$promise$$internal$$publish, parent);
-      }
-    }
-
-    function lib$es6$promise$$internal$$publish(promise) {
-      var subscribers = promise._subscribers;
-      var settled = promise._state;
-
-      if (subscribers.length === 0) { return; }
-
-      var child, callback, detail = promise._result;
-
-      for (var i = 0; i < subscribers.length; i += 3) {
-        child = subscribers[i];
-        callback = subscribers[i + settled];
-
-        if (child) {
-          lib$es6$promise$$internal$$invokeCallback(settled, child, callback, detail);
-        } else {
-          callback(detail);
-        }
-      }
-
-      promise._subscribers.length = 0;
-    }
-
-    function lib$es6$promise$$internal$$ErrorObject() {
-      this.error = null;
-    }
-
-    var lib$es6$promise$$internal$$TRY_CATCH_ERROR = new lib$es6$promise$$internal$$ErrorObject();
-
-    function lib$es6$promise$$internal$$tryCatch(callback, detail) {
-      try {
-        return callback(detail);
-      } catch(e) {
-        lib$es6$promise$$internal$$TRY_CATCH_ERROR.error = e;
-        return lib$es6$promise$$internal$$TRY_CATCH_ERROR;
-      }
-    }
-
-    function lib$es6$promise$$internal$$invokeCallback(settled, promise, callback, detail) {
-      var hasCallback = lib$es6$promise$utils$$isFunction(callback),
-          value, error, succeeded, failed;
-
-      if (hasCallback) {
-        value = lib$es6$promise$$internal$$tryCatch(callback, detail);
-
-        if (value === lib$es6$promise$$internal$$TRY_CATCH_ERROR) {
-          failed = true;
-          error = value.error;
-          value = null;
-        } else {
-          succeeded = true;
-        }
-
-        if (promise === value) {
-          lib$es6$promise$$internal$$reject(promise, lib$es6$promise$$internal$$cannotReturnOwn());
-          return;
-        }
-
-      } else {
-        value = detail;
-        succeeded = true;
-      }
-
-      if (promise._state !== lib$es6$promise$$internal$$PENDING) {
-        // noop
-      } else if (hasCallback && succeeded) {
-        lib$es6$promise$$internal$$resolve(promise, value);
-      } else if (failed) {
-        lib$es6$promise$$internal$$reject(promise, error);
-      } else if (settled === lib$es6$promise$$internal$$FULFILLED) {
-        lib$es6$promise$$internal$$fulfill(promise, value);
-      } else if (settled === lib$es6$promise$$internal$$REJECTED) {
-        lib$es6$promise$$internal$$reject(promise, value);
-      }
-    }
-
-    function lib$es6$promise$$internal$$initializePromise(promise, resolver) {
-      try {
-        resolver(function resolvePromise(value){
-          lib$es6$promise$$internal$$resolve(promise, value);
-        }, function rejectPromise(reason) {
-          lib$es6$promise$$internal$$reject(promise, reason);
-        });
-      } catch(e) {
-        lib$es6$promise$$internal$$reject(promise, e);
-      }
-    }
-
-    var lib$es6$promise$$internal$$id = 0;
-    function lib$es6$promise$$internal$$nextId() {
-      return lib$es6$promise$$internal$$id++;
-    }
-
-    function lib$es6$promise$$internal$$makePromise(promise) {
-      promise[lib$es6$promise$$internal$$PROMISE_ID] = lib$es6$promise$$internal$$id++;
-      promise._state = undefined;
-      promise._result = undefined;
-      promise._subscribers = [];
-    }
-
-    function lib$es6$promise$promise$all$$all(entries) {
-      return new lib$es6$promise$enumerator$$default(this, entries).promise;
-    }
-    var lib$es6$promise$promise$all$$default = lib$es6$promise$promise$all$$all;
-    function lib$es6$promise$promise$race$$race(entries) {
-      /*jshint validthis:true */
-      var Constructor = this;
-
-      if (!lib$es6$promise$utils$$isArray(entries)) {
-        return new Constructor(function(resolve, reject) {
-          reject(new TypeError('You must pass an array to race.'));
-        });
-      } else {
-        return new Constructor(function(resolve, reject) {
-          var length = entries.length;
-          for (var i = 0; i < length; i++) {
-            Constructor.resolve(entries[i]).then(resolve, reject);
-          }
-        });
-      }
-    }
-    var lib$es6$promise$promise$race$$default = lib$es6$promise$promise$race$$race;
-    function lib$es6$promise$promise$reject$$reject(reason) {
-      /*jshint validthis:true */
-      var Constructor = this;
-      var promise = new Constructor(lib$es6$promise$$internal$$noop);
-      lib$es6$promise$$internal$$reject(promise, reason);
-      return promise;
-    }
-    var lib$es6$promise$promise$reject$$default = lib$es6$promise$promise$reject$$reject;
-
-
-    function lib$es6$promise$promise$$needsResolver() {
-      throw new TypeError('You must pass a resolver function as the first argument to the promise constructor');
-    }
-
-    function lib$es6$promise$promise$$needsNew() {
-      throw new TypeError("Failed to construct 'Promise': Please use the 'new' operator, this object constructor cannot be called as a function.");
-    }
-
-    var lib$es6$promise$promise$$default = lib$es6$promise$promise$$Promise;
-    /**
-      Promise objects represent the eventual result of an asynchronous operation. The
-      primary way of interacting with a promise is through its `then` method, which
-      registers callbacks to receive either a promise's eventual value or the reason
-      why the promise cannot be fulfilled.
-
-      Terminology
-      -----------
-
-      - `promise` is an object or function with a `then` method whose behavior conforms to this specification.
-      - `thenable` is an object or function that defines a `then` method.
-      - `value` is any legal JavaScript value (including undefined, a thenable, or a promise).
-      - `exception` is a value that is thrown using the throw statement.
-      - `reason` is a value that indicates why a promise was rejected.
-      - `settled` the final resting state of a promise, fulfilled or rejected.
-
-      A promise can be in one of three states: pending, fulfilled, or rejected.
-
-      Promises that are fulfilled have a fulfillment value and are in the fulfilled
-      state.  Promises that are rejected have a rejection reason and are in the
-      rejected state.  A fulfillment value is never a thenable.
-
-      Promises can also be said to *resolve* a value.  If this value is also a
-      promise, then the original promise's settled state will match the value's
-      settled state.  So a promise that *resolves* a promise that rejects will
-      itself reject, and a promise that *resolves* a promise that fulfills will
-      itself fulfill.
-
-
-      Basic Usage:
-      ------------
-
-      ```js
-      var promise = new Promise(function(resolve, reject) {
-        // on success
-        resolve(value);
-
-        // on failure
-        reject(reason);
-      });
-
-      promise.then(function(value) {
-        // on fulfillment
-      }, function(reason) {
-        // on rejection
-      });
-      ```
-
-      Advanced Usage:
-      ---------------
-
-      Promises shine when abstracting away asynchronous interactions such as
-      `XMLHttpRequest`s.
-
-      ```js
-      function getJSON(url) {
-        return new Promise(function(resolve, reject){
-          var xhr = new XMLHttpRequest();
-
-          xhr.open('GET', url);
-          xhr.onreadystatechange = handler;
-          xhr.responseType = 'json';
-          xhr.setRequestHeader('Accept', 'application/json');
-          xhr.send();
-
-          function handler() {
-            if (this.readyState === this.DONE) {
-              if (this.status === 200) {
-                resolve(this.response);
-              } else {
-                reject(new Error('getJSON: `' + url + '` failed with status: [' + this.status + ']'));
-              }
-            }
-          };
-        });
-      }
-
-      getJSON('/posts.json').then(function(json) {
-        // on fulfillment
-      }, function(reason) {
-        // on rejection
-      });
-      ```
-
-      Unlike callbacks, promises are great composable primitives.
-
-      ```js
-      Promise.all([
-        getJSON('/posts'),
-        getJSON('/comments')
-      ]).then(function(values){
-        values[0] // => postsJSON
-        values[1] // => commentsJSON
-
-        return values;
-      });
-      ```
-
-      @class Promise
-      @param {function} resolver
-      Useful for tooling.
-      @constructor
-    */
-    function lib$es6$promise$promise$$Promise(resolver) {
-      this[lib$es6$promise$$internal$$PROMISE_ID] = lib$es6$promise$$internal$$nextId();
-      this._result = this._state = undefined;
-      this._subscribers = [];
-
-      if (lib$es6$promise$$internal$$noop !== resolver) {
-        typeof resolver !== 'function' && lib$es6$promise$promise$$needsResolver();
-        this instanceof lib$es6$promise$promise$$Promise ? lib$es6$promise$$internal$$initializePromise(this, resolver) : lib$es6$promise$promise$$needsNew();
-      }
-    }
-
-    lib$es6$promise$promise$$Promise.all = lib$es6$promise$promise$all$$default;
-    lib$es6$promise$promise$$Promise.race = lib$es6$promise$promise$race$$default;
-    lib$es6$promise$promise$$Promise.resolve = lib$es6$promise$promise$resolve$$default;
-    lib$es6$promise$promise$$Promise.reject = lib$es6$promise$promise$reject$$default;
-    lib$es6$promise$promise$$Promise._setScheduler = lib$es6$promise$asap$$setScheduler;
-    lib$es6$promise$promise$$Promise._setAsap = lib$es6$promise$asap$$setAsap;
-    lib$es6$promise$promise$$Promise._asap = lib$es6$promise$asap$$asap;
-
-    lib$es6$promise$promise$$Promise.prototype = {
-      constructor: lib$es6$promise$promise$$Promise,
-
-    /**
-      The primary way of interacting with a promise is through its `then` method,
-      which registers callbacks to receive either a promise's eventual value or the
-      reason why the promise cannot be fulfilled.
-
-      ```js
-      findUser().then(function(user){
-        // user is available
-      }, function(reason){
-        // user is unavailable, and you are given the reason why
-      });
-      ```
-
-      Chaining
-      --------
-
-      The return value of `then` is itself a promise.  This second, 'downstream'
-      promise is resolved with the return value of the first promise's fulfillment
-      or rejection handler, or rejected if the handler throws an exception.
-
-      ```js
-      findUser().then(function (user) {
-        return user.name;
-      }, function (reason) {
-        return 'default name';
-      }).then(function (userName) {
-        // If `findUser` fulfilled, `userName` will be the user's name, otherwise it
-        // will be `'default name'`
-      });
-
-      findUser().then(function (user) {
-        throw new Error('Found user, but still unhappy');
-      }, function (reason) {
-        throw new Error('`findUser` rejected and we're unhappy');
-      }).then(function (value) {
-        // never reached
-      }, function (reason) {
-        // if `findUser` fulfilled, `reason` will be 'Found user, but still unhappy'.
-        // If `findUser` rejected, `reason` will be '`findUser` rejected and we're unhappy'.
-      });
-      ```
-      If the downstream promise does not specify a rejection handler, rejection reasons will be propagated further downstream.
-
-      ```js
-      findUser().then(function (user) {
-        throw new PedagogicalException('Upstream error');
-      }).then(function (value) {
-        // never reached
-      }).then(function (value) {
-        // never reached
-      }, function (reason) {
-        // The `PedgagocialException` is propagated all the way down to here
-      });
-      ```
-
-      Assimilation
-      ------------
-
-      Sometimes the value you want to propagate to a downstream promise can only be
-      retrieved asynchronously. This can be achieved by returning a promise in the
-      fulfillment or rejection handler. The downstream promise will then be pending
-      until the returned promise is settled. This is called *assimilation*.
-
-      ```js
-      findUser().then(function (user) {
-        return findCommentsByAuthor(user);
-      }).then(function (comments) {
-        // The user's comments are now available
-      });
-      ```
-
-      If the assimliated promise rejects, then the downstream promise will also reject.
-
-      ```js
-      findUser().then(function (user) {
-        return findCommentsByAuthor(user);
-      }).then(function (comments) {
-        // If `findCommentsByAuthor` fulfills, we'll have the value here
-      }, function (reason) {
-        // If `findCommentsByAuthor` rejects, we'll have the reason here
-      });
-      ```
-
-      Simple Example
-      --------------
-
-      Synchronous Example
-
-      ```javascript
-      var result;
-
-      try {
-        result = findResult();
-        // success
-      } catch(reason) {
-        // failure
-      }
-      ```
-
-      Errback Example
-
-      ```js
-      findResult(function(result, err){
-        if (err) {
-          // failure
-        } else {
-          // success
-        }
-      });
-      ```
-
-      Promise Example;
-
-      ```javascript
-      findResult().then(function(result){
-        // success
-      }, function(reason){
-        // failure
-      });
-      ```
-
-      Advanced Example
-      --------------
-
-      Synchronous Example
-
-      ```javascript
-      var author, books;
-
-      try {
-        author = findAuthor();
-        books  = findBooksByAuthor(author);
-        // success
-      } catch(reason) {
-        // failure
-      }
-      ```
-
-      Errback Example
-
-      ```js
-
-      function foundBooks(books) {
-
-      }
-
-      function failure(reason) {
-
-      }
-
-      findAuthor(function(author, err){
-        if (err) {
-          failure(err);
-          // failure
-        } else {
-          try {
-            findBoooksByAuthor(author, function(books, err) {
-              if (err) {
-                failure(err);
-              } else {
-                try {
-                  foundBooks(books);
-                } catch(reason) {
-                  failure(reason);
-                }
-              }
-            });
-          } catch(error) {
-            failure(err);
-          }
-          // success
-        }
-      });
-      ```
-
-      Promise Example;
-
-      ```javascript
-      findAuthor().
-        then(findBooksByAuthor).
-        then(function(books){
-          // found books
-      }).catch(function(reason){
-        // something went wrong
-      });
-      ```
-
-      @method then
-      @param {Function} onFulfilled
-      @param {Function} onRejected
-      Useful for tooling.
-      @return {Promise}
-    */
-      then: lib$es6$promise$then$$default,
-
-    /**
-      `catch` is simply sugar for `then(undefined, onRejection)` which makes it the same
-      as the catch block of a try/catch statement.
-
-      ```js
-      function findAuthor(){
-        throw new Error('couldn't find that author');
-      }
-
-      // synchronous
-      try {
-        findAuthor();
-      } catch(reason) {
-        // something went wrong
-      }
-
-      // async with promises
-      findAuthor().catch(function(reason){
-        // something went wrong
-      });
-      ```
-
-      @method catch
-      @param {Function} onRejection
-      Useful for tooling.
-      @return {Promise}
-    */
-      'catch': function(onRejection) {
-        return this.then(null, onRejection);
-      }
-    };
-    var lib$es6$promise$enumerator$$default = lib$es6$promise$enumerator$$Enumerator;
-    function lib$es6$promise$enumerator$$Enumerator(Constructor, input) {
-      this._instanceConstructor = Constructor;
-      this.promise = new Constructor(lib$es6$promise$$internal$$noop);
-
-      if (!this.promise[lib$es6$promise$$internal$$PROMISE_ID]) {
-        lib$es6$promise$$internal$$makePromise(this.promise);
-      }
-
-      if (lib$es6$promise$utils$$isArray(input)) {
-        this._input     = input;
-        this.length     = input.length;
-        this._remaining = input.length;
-
-        this._result = new Array(this.length);
-
-        if (this.length === 0) {
-          lib$es6$promise$$internal$$fulfill(this.promise, this._result);
-        } else {
-          this.length = this.length || 0;
-          this._enumerate();
-          if (this._remaining === 0) {
-            lib$es6$promise$$internal$$fulfill(this.promise, this._result);
-          }
-        }
-      } else {
-        lib$es6$promise$$internal$$reject(this.promise, lib$es6$promise$enumerator$$validationError());
-      }
-    }
-
-    function lib$es6$promise$enumerator$$validationError() {
-      return new Error('Array Methods must be provided an Array');
-    }
-
-    lib$es6$promise$enumerator$$Enumerator.prototype._enumerate = function() {
-      var length  = this.length;
-      var input   = this._input;
-
-      for (var i = 0; this._state === lib$es6$promise$$internal$$PENDING && i < length; i++) {
-        this._eachEntry(input[i], i);
-      }
-    };
-
-    lib$es6$promise$enumerator$$Enumerator.prototype._eachEntry = function(entry, i) {
-      var c = this._instanceConstructor;
-      var resolve = c.resolve;
-
-      if (resolve === lib$es6$promise$promise$resolve$$default) {
-        var then = lib$es6$promise$$internal$$getThen(entry);
-
-        if (then === lib$es6$promise$then$$default &&
-            entry._state !== lib$es6$promise$$internal$$PENDING) {
-          this._settledAt(entry._state, i, entry._result);
-        } else if (typeof then !== 'function') {
-          this._remaining--;
-          this._result[i] = entry;
-        } else if (c === lib$es6$promise$promise$$default) {
-          var promise = new c(lib$es6$promise$$internal$$noop);
-          lib$es6$promise$$internal$$handleMaybeThenable(promise, entry, then);
-          this._willSettleAt(promise, i);
-        } else {
-          this._willSettleAt(new c(function(resolve) { resolve(entry); }), i);
-        }
-      } else {
-        this._willSettleAt(resolve(entry), i);
-      }
-    };
-
-    lib$es6$promise$enumerator$$Enumerator.prototype._settledAt = function(state, i, value) {
-      var promise = this.promise;
-
-      if (promise._state === lib$es6$promise$$internal$$PENDING) {
-        this._remaining--;
-
-        if (state === lib$es6$promise$$internal$$REJECTED) {
-          lib$es6$promise$$internal$$reject(promise, value);
-        } else {
-          this._result[i] = value;
-        }
-      }
-
-      if (this._remaining === 0) {
-        lib$es6$promise$$internal$$fulfill(promise, this._result);
-      }
-    };
-
-    lib$es6$promise$enumerator$$Enumerator.prototype._willSettleAt = function(promise, i) {
-      var enumerator = this;
-
-      lib$es6$promise$$internal$$subscribe(promise, undefined, function(value) {
-        enumerator._settledAt(lib$es6$promise$$internal$$FULFILLED, i, value);
-      }, function(reason) {
-        enumerator._settledAt(lib$es6$promise$$internal$$REJECTED, i, reason);
-      });
-    };
-    function lib$es6$promise$polyfill$$polyfill() {
-      var local;
-
-      if (typeof global !== 'undefined') {
-          local = global;
-      } else if (typeof self !== 'undefined') {
-          local = self;
-      } else {
-          try {
-              local = Function('return this')();
-          } catch (e) {
-              throw new Error('polyfill failed because global object is unavailable in this environment');
-          }
-      }
-
-      var P = local.Promise;
-
-      if (P && Object.prototype.toString.call(P.resolve()) === '[object Promise]' && !P.cast) {
-        return;
-      }
-
-      local.Promise = lib$es6$promise$promise$$default;
-    }
-    var lib$es6$promise$polyfill$$default = lib$es6$promise$polyfill$$polyfill;
-
-    var lib$es6$promise$umd$$ES6Promise = {
-      'Promise': lib$es6$promise$promise$$default,
-      'polyfill': lib$es6$promise$polyfill$$default
-    };
-
-    /* global define:true module:true window: true */
-    if (typeof define === 'function' && define['amd']) {
-      define(function() { return lib$es6$promise$umd$$ES6Promise; });
-    } else if (typeof module !== 'undefined' && module['exports']) {
-      module['exports'] = lib$es6$promise$umd$$ES6Promise;
-    } else if (typeof this !== 'undefined') {
-      this['ES6Promise'] = lib$es6$promise$umd$$ES6Promise;
-    }
-
-    lib$es6$promise$polyfill$$default();
-}).call(this);
-
-
-}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"_process":102}],17:[function(require,module,exports){
+},{}],13:[function(require,module,exports){
 /**
  * This is the main entry point for KaTeX. Here, we expose functions for
  * rendering expressions either to DOM nodes or to markup strings.
@@ -4187,7 +2900,7 @@ module.exports = {
     ParseError: ParseError
 };
 
-},{"./src/ParseError":20,"./src/Settings":22,"./src/buildTree":27,"./src/parseTree":36,"./src/utils":38}],18:[function(require,module,exports){
+},{"./src/ParseError":16,"./src/Settings":18,"./src/buildTree":23,"./src/parseTree":32,"./src/utils":34}],14:[function(require,module,exports){
 /**
  * The Lexer class handles tokenizing the input in various ways. Since our
  * parser expects us to be able to backtrack, the lexer allows lexing from any
@@ -4383,7 +3096,7 @@ Lexer.prototype.lex = function(pos, mode) {
 
 module.exports = Lexer;
 
-},{"./ParseError":20,"match-at":94}],19:[function(require,module,exports){
+},{"./ParseError":16,"match-at":90}],15:[function(require,module,exports){
 /**
  * This file contains information about the options that the Parser carries
  * around with it while parsing. Data is held in an `Options` object, and when
@@ -4574,7 +3287,7 @@ Options.prototype.getColor = function() {
 
 module.exports = Options;
 
-},{}],20:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 /**
  * This is the ParseError class, which is the main error thrown by KaTeX
  * functions when something has gone wrong. This is used to distinguish internal
@@ -4616,7 +3329,7 @@ ParseError.prototype.__proto__ = Error.prototype;
 
 module.exports = ParseError;
 
-},{}],21:[function(require,module,exports){
+},{}],17:[function(require,module,exports){
 var functions = require("./functions");
 var environments = require("./environments");
 var Lexer = require("./Lexer");
@@ -5338,7 +4051,7 @@ Parser.prototype.ParseNode = ParseNode;
 
 module.exports = Parser;
 
-},{"./Lexer":18,"./ParseError":20,"./environments":30,"./functions":33,"./parseData":35,"./symbols":37,"./utils":38}],22:[function(require,module,exports){
+},{"./Lexer":14,"./ParseError":16,"./environments":26,"./functions":29,"./parseData":31,"./symbols":33,"./utils":34}],18:[function(require,module,exports){
 /**
  * This is a module for storing settings passed into KaTeX. It correctly handles
  * default settings.
@@ -5368,7 +4081,7 @@ function Settings(options) {
 
 module.exports = Settings;
 
-},{}],23:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
 /**
  * This file contains information and classes for the various kinds of styles
  * used in TeX. It provides a generic `Style` class, which holds information
@@ -5496,7 +4209,7 @@ module.exports = {
     SCRIPTSCRIPT: styles[SS]
 };
 
-},{}],24:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 /**
  * This module contains general functions that can be used for building
  * different kinds of domTree nodes in a consistent manner.
@@ -5945,7 +4658,7 @@ module.exports = {
     spacingFunctions: spacingFunctions
 };
 
-},{"./domTree":29,"./fontMetrics":31,"./symbols":37,"./utils":38}],25:[function(require,module,exports){
+},{"./domTree":25,"./fontMetrics":27,"./symbols":33,"./utils":34}],21:[function(require,module,exports){
 /**
  * This file does the main work of building a domTree structure from a parse
  * tree. The entry point is the `buildHTML` function, which takes a parse tree.
@@ -7309,7 +6022,7 @@ var buildHTML = function(tree, options) {
 
 module.exports = buildHTML;
 
-},{"./ParseError":20,"./Style":23,"./buildCommon":24,"./delimiter":28,"./domTree":29,"./fontMetrics":31,"./utils":38}],26:[function(require,module,exports){
+},{"./ParseError":16,"./Style":19,"./buildCommon":20,"./delimiter":24,"./domTree":25,"./fontMetrics":27,"./utils":34}],22:[function(require,module,exports){
 /**
  * This file converts a parse tree into a cooresponding MathML tree. The main
  * entry point is the `buildMathML` function, which takes a parse tree from the
@@ -7830,7 +6543,7 @@ var buildMathML = function(tree, texExpression, options) {
 
 module.exports = buildMathML;
 
-},{"./ParseError":20,"./buildCommon":24,"./fontMetrics":31,"./mathMLTree":34,"./symbols":37,"./utils":38}],27:[function(require,module,exports){
+},{"./ParseError":16,"./buildCommon":20,"./fontMetrics":27,"./mathMLTree":30,"./symbols":33,"./utils":34}],23:[function(require,module,exports){
 var buildHTML = require("./buildHTML");
 var buildMathML = require("./buildMathML");
 var buildCommon = require("./buildCommon");
@@ -7872,7 +6585,7 @@ var buildTree = function(tree, expression, settings) {
 
 module.exports = buildTree;
 
-},{"./Options":19,"./Settings":22,"./Style":23,"./buildCommon":24,"./buildHTML":25,"./buildMathML":26}],28:[function(require,module,exports){
+},{"./Options":15,"./Settings":18,"./Style":19,"./buildCommon":20,"./buildHTML":21,"./buildMathML":22}],24:[function(require,module,exports){
 /**
  * This file deals with creating delimiters of various sizes. The TeXbook
  * discusses these routines on page 441-442, in the "Another subroutine sets box
@@ -8413,7 +7126,7 @@ module.exports = {
     leftRightDelim: makeLeftRightDelim
 };
 
-},{"./ParseError":20,"./Style":23,"./buildCommon":24,"./fontMetrics":31,"./symbols":37,"./utils":38}],29:[function(require,module,exports){
+},{"./ParseError":16,"./Style":19,"./buildCommon":20,"./fontMetrics":27,"./symbols":33,"./utils":34}],25:[function(require,module,exports){
 /**
  * These objects store the data about the DOM nodes we create, as well as some
  * extra data. They can then be transformed into real DOM nodes with the
@@ -8684,7 +7397,7 @@ module.exports = {
     symbolNode: symbolNode
 };
 
-},{"./utils":38}],30:[function(require,module,exports){
+},{"./utils":34}],26:[function(require,module,exports){
 var fontMetrics = require("./fontMetrics");
 var parseData = require("./parseData");
 var ParseError = require("./ParseError");
@@ -8864,7 +7577,7 @@ module.exports = (function() {
     return exports;
 })();
 
-},{"./ParseError":20,"./fontMetrics":31,"./parseData":35}],31:[function(require,module,exports){
+},{"./ParseError":16,"./fontMetrics":27,"./parseData":31}],27:[function(require,module,exports){
 /* jshint unused:false */
 
 var Style = require("./Style");
@@ -9001,7 +7714,7 @@ module.exports = {
     getCharacterMetrics: getCharacterMetrics
 };
 
-},{"./Style":23,"./fontMetricsData":32}],32:[function(require,module,exports){
+},{"./Style":19,"./fontMetricsData":28}],28:[function(require,module,exports){
 module.exports = {
 "AMS-Regular": {
   "65": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
@@ -10754,7 +9467,7 @@ module.exports = {
   "8242": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0}
 }};
 
-},{}],33:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 var utils = require("./utils");
 var ParseError = require("./ParseError");
 
@@ -11385,7 +10098,7 @@ module.exports = {
     funcs: functions
 };
 
-},{"./ParseError":20,"./utils":38}],34:[function(require,module,exports){
+},{"./ParseError":16,"./utils":34}],30:[function(require,module,exports){
 /**
  * These objects store data about MathML nodes. This is the MathML equivalent
  * of the types in domTree.js. Since MathML handles its own rendering, and
@@ -11489,7 +10202,7 @@ module.exports = {
     TextNode: TextNode
 };
 
-},{"./utils":38}],35:[function(require,module,exports){
+},{"./utils":34}],31:[function(require,module,exports){
 /**
  * The resulting parse tree nodes of the parse tree.
  */
@@ -11514,7 +10227,7 @@ module.exports = {
 };
 
 
-},{}],36:[function(require,module,exports){
+},{}],32:[function(require,module,exports){
 /**
  * Provides a single function for parsing an expression using a Parser
  * TODO(emily): Remove this
@@ -11533,7 +10246,7 @@ var parseTree = function(toParse, settings) {
 
 module.exports = parseTree;
 
-},{"./Parser":21}],37:[function(require,module,exports){
+},{"./Parser":17}],33:[function(require,module,exports){
 /**
  * This file holds a list of all no-argument functions and single-character
  * symbols (like 'a' or ';').
@@ -14120,7 +12833,7 @@ for (var i = 0; i < letters.length; i++) {
 
 module.exports = symbols;
 
-},{}],38:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 /**
  * This file contains a list of utility functions which are useful in other
  * files.
@@ -14227,7 +12940,7 @@ module.exports = {
     clearNode: clearNode
 };
 
-},{}],39:[function(require,module,exports){
+},{}],35:[function(require,module,exports){
 'use strict';
 
 
@@ -14866,7 +13579,7 @@ LinkifyIt.prototype.onCompile = function onCompile() {
 
 module.exports = LinkifyIt;
 
-},{"./lib/re":40}],40:[function(require,module,exports){
+},{"./lib/re":36}],36:[function(require,module,exports){
 'use strict';
 
 
@@ -14898,8 +13611,8 @@ module.exports = function (opts) {
 
     '(?:(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)';
 
-  // Prohibit [@/] in user/pass to avoid wrong domain fetch.
-  re.src_auth    = '(?:(?:(?!' + re.src_ZCc + '|[@/]).)+@)?';
+  // Prohibit any of "@/[]()" in user/pass to avoid wrong domain fetch.
+  re.src_auth    = '(?:(?:(?!' + re.src_ZCc + '|[@/\\[\\]()]).)+@)?';
 
   re.src_port =
 
@@ -15041,7 +13754,7 @@ module.exports = function (opts) {
   return re;
 };
 
-},{"uc.micro/categories/Cc/regex":107,"uc.micro/categories/P/regex":109,"uc.micro/categories/Z/regex":110,"uc.micro/properties/Any/regex":112}],41:[function(require,module,exports){
+},{"uc.micro/categories/Cc/regex":107,"uc.micro/categories/P/regex":109,"uc.micro/categories/Z/regex":110,"uc.micro/properties/Any/regex":112}],37:[function(require,module,exports){
 /* Process inline math */
 /*
 Like markdown-it-simplemath, this is a stripped down, simplified version of:
@@ -15216,13 +13929,13 @@ module.exports = function math_plugin(md, options) {
   md.renderer.rules.math_block = blockRenderer;
 };
 
-},{"katex":17}],42:[function(require,module,exports){
+},{"katex":13}],38:[function(require,module,exports){
 'use strict';
 
 
 module.exports = require('./lib/');
 
-},{"./lib/":51}],43:[function(require,module,exports){
+},{"./lib/":47}],39:[function(require,module,exports){
 // HTML5 entities map: { name -> utf16string }
 //
 'use strict';
@@ -15230,7 +13943,7 @@ module.exports = require('./lib/');
 /*eslint quotes:0*/
 module.exports = require('entities/maps/entities.json');
 
-},{"entities/maps/entities.json":15}],44:[function(require,module,exports){
+},{"entities/maps/entities.json":12}],40:[function(require,module,exports){
 // List of valid html blocks names, accorting to commonmark spec
 // http://jgm.github.io/CommonMark/spec.html#html-blocks
 
@@ -15300,7 +14013,7 @@ module.exports = [
   'ul'
 ];
 
-},{}],45:[function(require,module,exports){
+},{}],41:[function(require,module,exports){
 // Regexps to match html elements
 
 'use strict';
@@ -15330,7 +14043,7 @@ var HTML_OPEN_CLOSE_TAG_RE = new RegExp('^(?:' + open_tag + '|' + close_tag + ')
 module.exports.HTML_TAG_RE = HTML_TAG_RE;
 module.exports.HTML_OPEN_CLOSE_TAG_RE = HTML_OPEN_CLOSE_TAG_RE;
 
-},{}],46:[function(require,module,exports){
+},{}],42:[function(require,module,exports){
 // Utilities
 //
 'use strict';
@@ -15607,7 +14320,7 @@ exports.isPunctChar         = isPunctChar;
 exports.escapeRE            = escapeRE;
 exports.normalizeReference  = normalizeReference;
 
-},{"./entities":43,"mdurl":98,"uc.micro":111,"uc.micro/categories/P/regex":109}],47:[function(require,module,exports){
+},{"./entities":39,"mdurl":94,"uc.micro":111,"uc.micro/categories/P/regex":109}],43:[function(require,module,exports){
 // Just a shortcut for bulk export
 'use strict';
 
@@ -15616,7 +14329,7 @@ exports.parseLinkLabel       = require('./parse_link_label');
 exports.parseLinkDestination = require('./parse_link_destination');
 exports.parseLinkTitle       = require('./parse_link_title');
 
-},{"./parse_link_destination":48,"./parse_link_label":49,"./parse_link_title":50}],48:[function(require,module,exports){
+},{"./parse_link_destination":44,"./parse_link_label":45,"./parse_link_title":46}],44:[function(require,module,exports){
 // Parse link destination
 //
 'use strict';
@@ -15698,7 +14411,7 @@ module.exports = function parseLinkDestination(str, pos, max) {
   return result;
 };
 
-},{"../common/utils":46}],49:[function(require,module,exports){
+},{"../common/utils":42}],45:[function(require,module,exports){
 // Parse link label
 //
 // this function assumes that first character ("[") already matches;
@@ -15748,7 +14461,7 @@ module.exports = function parseLinkLabel(state, start, disableNested) {
   return labelEnd;
 };
 
-},{}],50:[function(require,module,exports){
+},{}],46:[function(require,module,exports){
 // Parse link title
 //
 'use strict';
@@ -15803,7 +14516,7 @@ module.exports = function parseLinkTitle(str, pos, max) {
   return result;
 };
 
-},{"../common/utils":46}],51:[function(require,module,exports){
+},{"../common/utils":42}],47:[function(require,module,exports){
 // Main parser class
 
 'use strict';
@@ -16382,7 +15095,7 @@ MarkdownIt.prototype.renderInline = function (src, env) {
 
 module.exports = MarkdownIt;
 
-},{"./common/utils":46,"./helpers":47,"./parser_block":52,"./parser_core":53,"./parser_inline":54,"./presets/commonmark":55,"./presets/default":56,"./presets/zero":57,"./renderer":58,"linkify-it":39,"mdurl":98,"punycode":103}],52:[function(require,module,exports){
+},{"./common/utils":42,"./helpers":43,"./parser_block":48,"./parser_core":49,"./parser_inline":50,"./presets/commonmark":51,"./presets/default":52,"./presets/zero":53,"./renderer":54,"linkify-it":35,"mdurl":94,"punycode":99}],48:[function(require,module,exports){
 /** internal
  * class ParserBlock
  *
@@ -16479,9 +15192,6 @@ ParserBlock.prototype.tokenize = function (state, startLine, endLine) {
     if (line < endLine && state.isEmpty(line)) {
       hasEmptyLines = true;
       line++;
-
-      // two empty lines should stop the parser in list mode
-      if (line < endLine && state.parentType === 'list' && state.isEmpty(line)) { break; }
       state.line = line;
     }
   }
@@ -16509,7 +15219,7 @@ ParserBlock.prototype.State = require('./rules_block/state_block');
 
 module.exports = ParserBlock;
 
-},{"./ruler":59,"./rules_block/blockquote":60,"./rules_block/code":61,"./rules_block/fence":62,"./rules_block/heading":63,"./rules_block/hr":64,"./rules_block/html_block":65,"./rules_block/lheading":66,"./rules_block/list":67,"./rules_block/paragraph":68,"./rules_block/reference":69,"./rules_block/state_block":70,"./rules_block/table":71}],53:[function(require,module,exports){
+},{"./ruler":55,"./rules_block/blockquote":56,"./rules_block/code":57,"./rules_block/fence":58,"./rules_block/heading":59,"./rules_block/hr":60,"./rules_block/html_block":61,"./rules_block/lheading":62,"./rules_block/list":63,"./rules_block/paragraph":64,"./rules_block/reference":65,"./rules_block/state_block":66,"./rules_block/table":67}],49:[function(require,module,exports){
 /** internal
  * class Core
  *
@@ -16569,7 +15279,7 @@ Core.prototype.State = require('./rules_core/state_core');
 
 module.exports = Core;
 
-},{"./ruler":59,"./rules_core/block":72,"./rules_core/inline":73,"./rules_core/linkify":74,"./rules_core/normalize":75,"./rules_core/replacements":76,"./rules_core/smartquotes":77,"./rules_core/state_core":78}],54:[function(require,module,exports){
+},{"./ruler":55,"./rules_core/block":68,"./rules_core/inline":69,"./rules_core/linkify":70,"./rules_core/normalize":71,"./rules_core/replacements":72,"./rules_core/smartquotes":73,"./rules_core/state_core":74}],50:[function(require,module,exports){
 /** internal
  * class ParserInline
  *
@@ -16748,7 +15458,7 @@ ParserInline.prototype.State = require('./rules_inline/state_inline');
 
 module.exports = ParserInline;
 
-},{"./ruler":59,"./rules_inline/autolink":79,"./rules_inline/backticks":80,"./rules_inline/balance_pairs":81,"./rules_inline/emphasis":82,"./rules_inline/entity":83,"./rules_inline/escape":84,"./rules_inline/html_inline":85,"./rules_inline/image":86,"./rules_inline/link":87,"./rules_inline/newline":88,"./rules_inline/state_inline":89,"./rules_inline/strikethrough":90,"./rules_inline/text":91,"./rules_inline/text_collapse":92}],55:[function(require,module,exports){
+},{"./ruler":55,"./rules_inline/autolink":75,"./rules_inline/backticks":76,"./rules_inline/balance_pairs":77,"./rules_inline/emphasis":78,"./rules_inline/entity":79,"./rules_inline/escape":80,"./rules_inline/html_inline":81,"./rules_inline/image":82,"./rules_inline/link":83,"./rules_inline/newline":84,"./rules_inline/state_inline":85,"./rules_inline/strikethrough":86,"./rules_inline/text":87,"./rules_inline/text_collapse":88}],51:[function(require,module,exports){
 // Commonmark default options
 
 'use strict';
@@ -16830,7 +15540,7 @@ module.exports = {
   }
 };
 
-},{}],56:[function(require,module,exports){
+},{}],52:[function(require,module,exports){
 // markdown-it default options
 
 'use strict';
@@ -16873,7 +15583,7 @@ module.exports = {
   }
 };
 
-},{}],57:[function(require,module,exports){
+},{}],53:[function(require,module,exports){
 // "Zero" preset, with nothing enabled. Useful for manual configuring of simple
 // modes. For example, to parse bold/italic only.
 
@@ -16937,7 +15647,7 @@ module.exports = {
   }
 };
 
-},{}],58:[function(require,module,exports){
+},{}],54:[function(require,module,exports){
 /**
  * class Renderer
  *
@@ -16959,20 +15669,18 @@ var default_rules = {};
 
 
 default_rules.code_inline = function (tokens, idx, options, env, slf) {
-  var token = tokens[idx],
-      attrs = slf.renderAttrs(token);
+  var token = tokens[idx];
 
-  return  '<code' + (attrs ? ' ' + attrs : '') + '>' +
+  return  '<code' + slf.renderAttrs(token) + '>' +
           escapeHtml(tokens[idx].content) +
           '</code>';
 };
 
 
 default_rules.code_block = function (tokens, idx, options, env, slf) {
-  var token = tokens[idx],
-      attrs = slf.renderAttrs(token);
+  var token = tokens[idx];
 
-  return  '<pre' + (attrs ? ' ' + attrs : '') + '><code>' +
+  return  '<pre' + slf.renderAttrs(token) + '><code>' +
           escapeHtml(tokens[idx].content) +
           '</code></pre>\n';
 };
@@ -17008,7 +15716,7 @@ default_rules.fence = function (tokens, idx, options, env, slf) {
     if (i < 0) {
       tmpAttrs.push([ 'class', options.langPrefix + langName ]);
     } else {
-      tmpAttrs[i] += ' ' + options.langPrefix + langName;
+      tmpAttrs[i][1] += ' ' + options.langPrefix + langName;
     }
 
     // Fake token just to render attributes
@@ -17276,7 +15984,7 @@ Renderer.prototype.render = function (tokens, options, env) {
 
 module.exports = Renderer;
 
-},{"./common/utils":46}],59:[function(require,module,exports){
+},{"./common/utils":42}],55:[function(require,module,exports){
 /**
  * class Ruler
  *
@@ -17630,7 +16338,7 @@ Ruler.prototype.getRules = function (chainName) {
 
 module.exports = Ruler;
 
-},{}],60:[function(require,module,exports){
+},{}],56:[function(require,module,exports){
 // Block quotes
 
 'use strict';
@@ -17639,9 +16347,25 @@ var isSpace = require('../common/utils').isSpace;
 
 
 module.exports = function blockquote(state, startLine, endLine, silent) {
-  var nextLine, lastLineEmpty, oldTShift, oldSCount, oldBMarks, oldIndent, oldParentType, lines, initial, offset, ch,
-      terminatorRules, token,
-      i, l, terminate,
+  var adjustTab,
+      ch,
+      i,
+      initial,
+      l,
+      lastLineEmpty,
+      lines,
+      nextLine,
+      offset,
+      oldBMarks,
+      oldBSCount,
+      oldIndent,
+      oldParentType,
+      oldSCount,
+      oldTShift,
+      spaceAfterMarker,
+      terminate,
+      terminatorRules,
+      token,
       pos = state.bMarks[startLine] + state.tShift[startLine],
       max = state.eMarks[startLine];
 
@@ -17652,14 +16376,40 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
   // so no point trying to find the end of it in silent mode
   if (silent) { return true; }
 
-  // skip one optional space (but not tab, check cmark impl) after '>'
-  if (state.src.charCodeAt(pos) === 0x20) { pos++; }
-
   oldIndent = state.blkIndent;
   state.blkIndent = 0;
 
   // skip spaces after ">" and re-calculate offset
   initial = offset = state.sCount[startLine] + pos - (state.bMarks[startLine] + state.tShift[startLine]);
+
+  // skip one optional space after '>'
+  if (state.src.charCodeAt(pos) === 0x20 /* space */) {
+    // ' >   test '
+    //     ^ -- position start of line here:
+    pos++;
+    initial++;
+    offset++;
+    adjustTab = false;
+    spaceAfterMarker = true;
+  } else if (state.src.charCodeAt(pos) === 0x09 /* tab */) {
+    spaceAfterMarker = true;
+
+    if ((state.bsCount[startLine] + offset) % 4 === 3) {
+      // '  >\t  test '
+      //       ^ -- position start of line here (tab has width===1)
+      pos++;
+      initial++;
+      offset++;
+      adjustTab = false;
+    } else {
+      // ' >\t  test '
+      //    ^ -- position start of line here + shift bsCount slightly
+      //         to make extra space appear
+      adjustTab = true;
+    }
+  } else {
+    spaceAfterMarker = false;
+  }
 
   oldBMarks = [ state.bMarks[startLine] ];
   state.bMarks[startLine] = pos;
@@ -17669,7 +16419,7 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
 
     if (isSpace(ch)) {
       if (ch === 0x09) {
-        offset += 4 - offset % 4;
+        offset += 4 - (offset + state.bsCount[startLine] + (adjustTab ? 1 : 0)) % 4;
       } else {
         offset++;
       }
@@ -17680,6 +16430,9 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
     pos++;
   }
 
+  oldBSCount = [ state.bsCount[startLine] ];
+  state.bsCount[startLine] = state.sCount[startLine] + 1 + (spaceAfterMarker ? 1 : 0);
+
   lastLineEmpty = pos >= max;
 
   oldSCount = [ state.sCount[startLine] ];
@@ -17689,6 +16442,9 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
   state.tShift[startLine] = pos - state.bMarks[startLine];
 
   terminatorRules = state.md.block.ruler.getRules('blockquote');
+
+  oldParentType = state.parentType;
+  state.parentType = 'blockquote';
 
   // Search the end of the block
   //
@@ -17722,11 +16478,37 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
     if (state.src.charCodeAt(pos++) === 0x3E/* > */) {
       // This line is inside the blockquote.
 
-      // skip one optional space (but not tab, check cmark impl) after '>'
-      if (state.src.charCodeAt(pos) === 0x20) { pos++; }
-
       // skip spaces after ">" and re-calculate offset
       initial = offset = state.sCount[nextLine] + pos - (state.bMarks[nextLine] + state.tShift[nextLine]);
+
+      // skip one optional space after '>'
+      if (state.src.charCodeAt(pos) === 0x20 /* space */) {
+        // ' >   test '
+        //     ^ -- position start of line here:
+        pos++;
+        initial++;
+        offset++;
+        adjustTab = false;
+        spaceAfterMarker = true;
+      } else if (state.src.charCodeAt(pos) === 0x09 /* tab */) {
+        spaceAfterMarker = true;
+
+        if ((state.bsCount[nextLine] + offset) % 4 === 3) {
+          // '  >\t  test '
+          //       ^ -- position start of line here (tab has width===1)
+          pos++;
+          initial++;
+          offset++;
+          adjustTab = false;
+        } else {
+          // ' >\t  test '
+          //    ^ -- position start of line here + shift bsCount slightly
+          //         to make extra space appear
+          adjustTab = true;
+        }
+      } else {
+        spaceAfterMarker = false;
+      }
 
       oldBMarks.push(state.bMarks[nextLine]);
       state.bMarks[nextLine] = pos;
@@ -17736,7 +16518,7 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
 
         if (isSpace(ch)) {
           if (ch === 0x09) {
-            offset += 4 - offset % 4;
+            offset += 4 - (offset + state.bsCount[nextLine] + (adjustTab ? 1 : 0)) % 4;
           } else {
             offset++;
           }
@@ -17748,6 +16530,9 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
       }
 
       lastLineEmpty = pos >= max;
+
+      oldBSCount.push(state.bsCount[nextLine]);
+      state.bsCount[nextLine] = state.sCount[nextLine] + 1 + (spaceAfterMarker ? 1 : 0);
 
       oldSCount.push(state.sCount[nextLine]);
       state.sCount[nextLine] = offset - initial;
@@ -17771,6 +16556,7 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
     if (terminate) { break; }
 
     oldBMarks.push(state.bMarks[nextLine]);
+    oldBSCount.push(state.bsCount[nextLine]);
     oldTShift.push(state.tShift[nextLine]);
     oldSCount.push(state.sCount[nextLine]);
 
@@ -17778,9 +16564,6 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
     //
     state.sCount[nextLine] = -1;
   }
-
-  oldParentType = state.parentType;
-  state.parentType = 'blockquote';
 
   token        = state.push('blockquote_open', 'blockquote', 1);
   token.markup = '>';
@@ -17800,20 +16583,21 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
     state.bMarks[i + startLine] = oldBMarks[i];
     state.tShift[i + startLine] = oldTShift[i];
     state.sCount[i + startLine] = oldSCount[i];
+    state.bsCount[i + startLine] = oldBSCount[i];
   }
   state.blkIndent = oldIndent;
 
   return true;
 };
 
-},{"../common/utils":46}],61:[function(require,module,exports){
+},{"../common/utils":42}],57:[function(require,module,exports){
 // Code block (4 spaces padded)
 
 'use strict';
 
 
 module.exports = function code(state, startLine, endLine/*, silent*/) {
-  var nextLine, last, token, emptyLines = 0;
+  var nextLine, last, token;
 
   if (state.sCount[startLine] - state.blkIndent < 4) { return false; }
 
@@ -17821,19 +16605,9 @@ module.exports = function code(state, startLine, endLine/*, silent*/) {
 
   while (nextLine < endLine) {
     if (state.isEmpty(nextLine)) {
-      emptyLines++;
-
-      // workaround for lists: 2 blank lines should terminate indented
-      // code block, but not fenced code block
-      if (emptyLines >= 2 && state.parentType === 'list') {
-        break;
-      }
-
       nextLine++;
       continue;
     }
-
-    emptyLines = 0;
 
     if (state.sCount[nextLine] - state.blkIndent >= 4) {
       nextLine++;
@@ -17852,7 +16626,7 @@ module.exports = function code(state, startLine, endLine/*, silent*/) {
   return true;
 };
 
-},{}],62:[function(require,module,exports){
+},{}],58:[function(require,module,exports){
 // fences (``` lang, ~~~ lang)
 
 'use strict';
@@ -17945,7 +16719,7 @@ module.exports = function fence(state, startLine, endLine, silent) {
   return true;
 };
 
-},{}],63:[function(require,module,exports){
+},{}],59:[function(require,module,exports){
 // heading (#, ##, ...)
 
 'use strict';
@@ -17970,7 +16744,7 @@ module.exports = function heading(state, startLine, endLine, silent) {
     ch = state.src.charCodeAt(++pos);
   }
 
-  if (level > 6 || (pos < max && ch !== 0x20/* space */)) { return false; }
+  if (level > 6 || (pos < max && !isSpace(ch))) { return false; }
 
   if (silent) { return true; }
 
@@ -17999,7 +16773,7 @@ module.exports = function heading(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":46}],64:[function(require,module,exports){
+},{"../common/utils":42}],60:[function(require,module,exports){
 // Horizontal rule
 
 'use strict';
@@ -18043,7 +16817,7 @@ module.exports = function hr(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":46}],65:[function(require,module,exports){
+},{"../common/utils":42}],61:[function(require,module,exports){
 // HTML block
 
 'use strict';
@@ -18116,7 +16890,7 @@ module.exports = function html_block(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/html_blocks":44,"../common/html_re":45}],66:[function(require,module,exports){
+},{"../common/html_blocks":40,"../common/html_re":41}],62:[function(require,module,exports){
 // lheading (---, ===)
 
 'use strict';
@@ -18124,8 +16898,11 @@ module.exports = function html_block(state, startLine, endLine, silent) {
 
 module.exports = function lheading(state, startLine, endLine/*, silent*/) {
   var content, terminate, i, l, token, pos, max, level, marker,
-      nextLine = startLine + 1,
+      nextLine = startLine + 1, oldParentType,
       terminatorRules = state.md.block.ruler.getRules('paragraph');
+
+  oldParentType = state.parentType;
+  state.parentType = 'paragraph'; // use paragraph to match terminatorRules
 
   // jump line-by-line until empty one or EOF
   for (; nextLine < endLine && !state.isEmpty(nextLine); nextLine++) {
@@ -18190,10 +16967,12 @@ module.exports = function lheading(state, startLine, endLine/*, silent*/) {
   token          = state.push('heading_close', 'h' + String(level), -1);
   token.markup   = String.fromCharCode(marker);
 
+  state.parentType = oldParentType;
+
   return true;
 };
 
-},{}],67:[function(require,module,exports){
+},{}],63:[function(require,module,exports){
 // Lists
 
 'use strict';
@@ -18294,41 +17073,71 @@ function markTightParagraphs(state, idx) {
 
 
 module.exports = function list(state, startLine, endLine, silent) {
-  var nextLine,
-      initial,
-      offset,
+  var ch,
+      contentStart,
+      i,
       indent,
-      oldTShift,
+      indentAfterMarker,
+      initial,
+      isOrdered,
+      itemLines,
+      l,
+      listLines,
+      listTokIdx,
+      markerCharCode,
+      markerValue,
+      max,
+      nextLine,
+      offset,
       oldIndent,
       oldLIndent,
-      oldTight,
       oldParentType,
-      start,
-      posAfterMarker,
-      ch,
+      oldTShift,
+      oldTight,
       pos,
-      max,
-      indentAfterMarker,
-      markerValue,
-      markerCharCode,
-      isOrdered,
-      contentStart,
-      listTokIdx,
+      posAfterMarker,
       prevEmptyEnd,
-      listLines,
-      itemLines,
-      tight = true,
+      start,
+      terminate,
       terminatorRules,
       token,
-      i, l, terminate;
+      isTerminatingParagraph = false,
+      tight = true;
+
+  // limit conditions when list can interrupt
+  // a paragraph (validation mode only)
+  if (silent && state.parentType === 'paragraph') {
+    // Next list item should still terminate previous list item;
+    //
+    // This code can fail if plugins use blkIndent as well as lists,
+    // but I hope the spec gets fixed long before that happens.
+    //
+    if (state.tShift[startLine] >= state.blkIndent) {
+      isTerminatingParagraph = true;
+    }
+  }
 
   // Detect list type and position after marker
   if ((posAfterMarker = skipOrderedListMarker(state, startLine)) >= 0) {
     isOrdered = true;
+    start = state.bMarks[startLine] + state.tShift[startLine];
+    markerValue = Number(state.src.substr(start, posAfterMarker - start - 1));
+
+    // If we're starting a new ordered list right after
+    // a paragraph, it should start with 1.
+    if (isTerminatingParagraph && markerValue !== 1) return false;
+
   } else if ((posAfterMarker = skipBulletListMarker(state, startLine)) >= 0) {
     isOrdered = false;
+
   } else {
     return false;
+  }
+
+  // If we're starting a new unordered list right after
+  // a paragraph, first line should not be empty.
+  if (isTerminatingParagraph) {
+    if (state.skipSpaces(posAfterMarker) >= state.eMarks[startLine]) return false;
   }
 
   // We should terminate list on style change. Remember first one to compare.
@@ -18341,9 +17150,6 @@ module.exports = function list(state, startLine, endLine, silent) {
   listTokIdx = state.tokens.length;
 
   if (isOrdered) {
-    start = state.bMarks[startLine] + state.tShift[startLine];
-    markerValue = Number(state.src.substr(start, posAfterMarker - start - 1));
-
     token       = state.push('ordered_list_open', 'ol', 1);
     if (markerValue !== 1) {
       token.attrs = [ [ 'start', markerValue ] ];
@@ -18364,6 +17170,9 @@ module.exports = function list(state, startLine, endLine, silent) {
   prevEmptyEnd = false;
   terminatorRules = state.md.block.ruler.getRules('list');
 
+  oldParentType = state.parentType;
+  state.parentType = 'list';
+
   while (nextLine < endLine) {
     pos = posAfterMarker;
     max = state.eMarks[nextLine];
@@ -18375,7 +17184,7 @@ module.exports = function list(state, startLine, endLine, silent) {
 
       if (isSpace(ch)) {
         if (ch === 0x09) {
-          offset += 4 - offset % 4;
+          offset += 4 - (offset + state.bsCount[nextLine]) % 4;
         } else {
           offset++;
         }
@@ -18412,10 +17221,8 @@ module.exports = function list(state, startLine, endLine, silent) {
     oldTight = state.tight;
     oldTShift = state.tShift[startLine];
     oldLIndent = state.sCount[startLine];
-    oldParentType = state.parentType;
     state.blkIndent = indent;
     state.tight = true;
-    state.parentType = 'list';
     state.tShift[startLine] = contentStart - state.bMarks[startLine];
     state.sCount[startLine] = offset;
 
@@ -18444,7 +17251,6 @@ module.exports = function list(state, startLine, endLine, silent) {
     state.tShift[startLine] = oldTShift;
     state.sCount[startLine] = oldLIndent;
     state.tight = oldTight;
-    state.parentType = oldParentType;
 
     token        = state.push('list_item_close', 'li', -1);
     token.markup = String.fromCharCode(markerCharCode);
@@ -18454,10 +17260,6 @@ module.exports = function list(state, startLine, endLine, silent) {
     contentStart = state.bMarks[startLine];
 
     if (nextLine >= endLine) { break; }
-
-    if (state.isEmpty(nextLine)) {
-      break;
-    }
 
     //
     // Try to check if list is terminated or continued.
@@ -18497,6 +17299,8 @@ module.exports = function list(state, startLine, endLine, silent) {
   listLines[1] = nextLine;
   state.line = nextLine;
 
+  state.parentType = oldParentType;
+
   // mark paragraphs tight if needed
   if (tight) {
     markTightParagraphs(state, listTokIdx);
@@ -18505,17 +17309,20 @@ module.exports = function list(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":46}],68:[function(require,module,exports){
+},{"../common/utils":42}],64:[function(require,module,exports){
 // Paragraph
 
 'use strict';
 
 
 module.exports = function paragraph(state, startLine/*, endLine*/) {
-  var content, terminate, i, l, token,
+  var content, terminate, i, l, token, oldParentType,
       nextLine = startLine + 1,
       terminatorRules = state.md.block.ruler.getRules('paragraph'),
       endLine = state.lineMax;
+
+  oldParentType = state.parentType;
+  state.parentType = 'paragraph';
 
   // jump line-by-line until empty one or EOF
   for (; nextLine < endLine && !state.isEmpty(nextLine); nextLine++) {
@@ -18551,10 +17358,12 @@ module.exports = function paragraph(state, startLine/*, endLine*/) {
 
   token          = state.push('paragraph_close', 'p', -1);
 
+  state.parentType = oldParentType;
+
   return true;
 };
 
-},{}],69:[function(require,module,exports){
+},{}],65:[function(require,module,exports){
 'use strict';
 
 
@@ -18574,6 +17383,7 @@ module.exports = function reference(state, startLine, _endLine, silent) {
       l,
       label,
       labelEnd,
+      oldParentType,
       res,
       start,
       str,
@@ -18602,6 +17412,9 @@ module.exports = function reference(state, startLine, _endLine, silent) {
 
   // jump line-by-line until empty one or EOF
   terminatorRules = state.md.block.ruler.getRules('reference');
+
+  oldParentType = state.parentType;
+  state.parentType = 'reference';
 
   for (; nextLine < endLine && !state.isEmpty(nextLine); nextLine++) {
     // this would be a code block normally, but after paragraph
@@ -18743,11 +17556,13 @@ module.exports = function reference(state, startLine, _endLine, silent) {
     state.env.references[label] = { title: title, href: href };
   }
 
+  state.parentType = oldParentType;
+
   state.line = startLine + lines + 1;
   return true;
 };
 
-},{"../common/utils":46,"../helpers/parse_link_destination":48,"../helpers/parse_link_title":50}],70:[function(require,module,exports){
+},{"../common/utils":42,"../helpers/parse_link_destination":44,"../helpers/parse_link_title":46}],66:[function(require,module,exports){
 // Parser state class
 
 'use strict';
@@ -18777,14 +17592,29 @@ function StateBlock(src, md, env, tokens) {
   this.tShift = [];  // offsets of the first non-space characters (tabs not expanded)
   this.sCount = [];  // indents for each line (tabs expanded)
 
+  // An amount of virtual spaces (tabs expanded) between beginning
+  // of each line (bMarks) and real beginning of that line.
+  //
+  // It exists only as a hack because blockquotes override bMarks
+  // losing information in the process.
+  //
+  // It's used only when expanding tabs, you can think about it as
+  // an initial tab length, e.g. bsCount=21 applied to string `\t123`
+  // means first tab should be expanded to 4-21%4 === 3 spaces.
+  //
+  this.bsCount = [];
+
   // block parser variables
   this.blkIndent  = 0; // required block content indent
                        // (for example, if we are in list)
   this.line       = 0; // line index in src
   this.lineMax    = 0; // lines count
   this.tight      = false;  // loose/tight mode for lists
-  this.parentType = 'root'; // if `list`, block parser stops on two newlines
   this.ddIndent   = -1; // indent of the current dd block (-1 if there isn't any)
+
+  // can be 'blockquote', 'list', 'root', 'paragraph' or 'reference'
+  // used in lists to determine if they interrupt a paragraph
+  this.parentType = 'root';
 
   this.level = 0;
 
@@ -18820,6 +17650,7 @@ function StateBlock(src, md, env, tokens) {
       this.eMarks.push(pos);
       this.tShift.push(indent);
       this.sCount.push(offset);
+      this.bsCount.push(0);
 
       indent_found = false;
       indent = 0;
@@ -18833,6 +17664,7 @@ function StateBlock(src, md, env, tokens) {
   this.eMarks.push(s.length);
   this.tShift.push(0);
   this.sCount.push(0);
+  this.bsCount.push(0);
 
   this.lineMax = this.bMarks.length - 1; // don't count last fake line
 }
@@ -18930,7 +17762,7 @@ StateBlock.prototype.getLines = function getLines(begin, end, indent, keepLastLF
 
       if (isSpace(ch)) {
         if (ch === 0x09) {
-          lineIndent += 4 - lineIndent % 4;
+          lineIndent += 4 - (lineIndent + this.bsCount[line]) % 4;
         } else {
           lineIndent++;
         }
@@ -18944,7 +17776,13 @@ StateBlock.prototype.getLines = function getLines(begin, end, indent, keepLastLF
       first++;
     }
 
-    queue[i] = this.src.slice(first, last);
+    if (lineIndent > indent) {
+      // partially expanding tabs in code blocks, e.g '\t\tfoobar'
+      // with indent=2 becomes '  \tfoobar'
+      queue[i] = new Array(lineIndent - indent + 1).join(' ') + this.src.slice(first, last);
+    } else {
+      queue[i] = this.src.slice(first, last);
+    }
   }
 
   return queue.join('');
@@ -18956,7 +17794,7 @@ StateBlock.prototype.Token = Token;
 
 module.exports = StateBlock;
 
-},{"../common/utils":46,"../token":93}],71:[function(require,module,exports){
+},{"../common/utils":42,"../token":89}],67:[function(require,module,exports){
 // GFM table, non-standard
 
 'use strict';
@@ -19132,7 +17970,7 @@ module.exports = function table(state, startLine, endLine, silent) {
   return true;
 };
 
-},{}],72:[function(require,module,exports){
+},{}],68:[function(require,module,exports){
 'use strict';
 
 
@@ -19150,7 +17988,7 @@ module.exports = function block(state) {
   }
 };
 
-},{}],73:[function(require,module,exports){
+},{}],69:[function(require,module,exports){
 'use strict';
 
 module.exports = function inline(state) {
@@ -19165,7 +18003,7 @@ module.exports = function inline(state) {
   }
 };
 
-},{}],74:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
 // Replace link-like texts with link nodes.
 //
 // Currently restricted by `md.validateLink()` to http/https/ftp
@@ -19300,7 +18138,7 @@ module.exports = function linkify(state) {
   }
 };
 
-},{"../common/utils":46}],75:[function(require,module,exports){
+},{"../common/utils":42}],71:[function(require,module,exports){
 // Normalize input string
 
 'use strict';
@@ -19322,7 +18160,7 @@ module.exports = function inline(state) {
   state.src = str;
 };
 
-},{}],76:[function(require,module,exports){
+},{}],72:[function(require,module,exports){
 // Simple typographyc replacements
 //
 // (c) (C) → ©
@@ -19359,22 +18197,32 @@ function replaceFn(match, name) {
 }
 
 function replace_scoped(inlineTokens) {
-  var i, token;
+  var i, token, inside_autolink = 0;
 
   for (i = inlineTokens.length - 1; i >= 0; i--) {
     token = inlineTokens[i];
-    if (token.type === 'text') {
+
+    if (token.type === 'text' && !inside_autolink) {
       token.content = token.content.replace(SCOPED_ABBR_RE, replaceFn);
+    }
+
+    if (token.type === 'link_open' && token.info === 'auto') {
+      inside_autolink--;
+    }
+
+    if (token.type === 'link_close' && token.info === 'auto') {
+      inside_autolink++;
     }
   }
 }
 
 function replace_rare(inlineTokens) {
-  var i, token;
+  var i, token, inside_autolink = 0;
 
   for (i = inlineTokens.length - 1; i >= 0; i--) {
     token = inlineTokens[i];
-    if (token.type === 'text') {
+
+    if (token.type === 'text' && !inside_autolink) {
       if (RARE_RE.test(token.content)) {
         token.content = token.content
                     .replace(/\+-/g, '±')
@@ -19388,6 +18236,14 @@ function replace_rare(inlineTokens) {
                     .replace(/(^|\s)--(\s|$)/mg, '$1\u2013$2')
                     .replace(/(^|[^-\s])--([^-\s]|$)/mg, '$1\u2013$2');
       }
+    }
+
+    if (token.type === 'link_open' && token.info === 'auto') {
+      inside_autolink--;
+    }
+
+    if (token.type === 'link_close' && token.info === 'auto') {
+      inside_autolink++;
     }
   }
 }
@@ -19413,7 +18269,7 @@ module.exports = function replace(state) {
   }
 };
 
-},{}],77:[function(require,module,exports){
+},{}],73:[function(require,module,exports){
 // Convert straight quotation marks to typographic ones
 //
 'use strict';
@@ -19608,7 +18464,7 @@ module.exports = function smartquotes(state) {
   }
 };
 
-},{"../common/utils":46}],78:[function(require,module,exports){
+},{"../common/utils":42}],74:[function(require,module,exports){
 // Core state object
 //
 'use strict';
@@ -19630,7 +18486,7 @@ StateCore.prototype.Token = Token;
 
 module.exports = StateCore;
 
-},{"../token":93}],79:[function(require,module,exports){
+},{"../token":89}],75:[function(require,module,exports){
 // Process autolinks '<protocol:...>'
 
 'use strict';
@@ -19704,7 +18560,7 @@ module.exports = function autolink(state, silent) {
   return false;
 };
 
-},{}],80:[function(require,module,exports){
+},{}],76:[function(require,module,exports){
 // Parse backticks
 
 'use strict';
@@ -19749,7 +18605,7 @@ module.exports = function backtick(state, silent) {
   return true;
 };
 
-},{}],81:[function(require,module,exports){
+},{}],77:[function(require,module,exports){
 // For each opening emphasis-like marker find a matching closing one
 //
 'use strict';
@@ -19775,11 +18631,19 @@ module.exports = function link_pairs(state) {
           currDelim.end < 0 &&
           currDelim.level === lastDelim.level) {
 
-        lastDelim.jump = i - j;
-        lastDelim.open = false;
-        currDelim.end  = i;
-        currDelim.jump = 0;
-        break;
+        // typeofs are for backward compatibility with plugins
+        var odd_match = (currDelim.close || lastDelim.open) &&
+                        typeof currDelim.length !== 'undefined' &&
+                        typeof lastDelim.length !== 'undefined' &&
+                        (currDelim.length + lastDelim.length) % 3 === 0;
+
+        if (!odd_match) {
+          lastDelim.jump = i - j;
+          lastDelim.open = false;
+          currDelim.end  = i;
+          currDelim.jump = 0;
+          break;
+        }
       }
 
       j -= currDelim.jump + 1;
@@ -19787,7 +18651,7 @@ module.exports = function link_pairs(state) {
   }
 };
 
-},{}],82:[function(require,module,exports){
+},{}],78:[function(require,module,exports){
 // Process *this* and _that_
 //
 'use strict';
@@ -19814,6 +18678,10 @@ module.exports.tokenize = function emphasis(state, silent) {
       // Char code of the starting marker (number).
       //
       marker: marker,
+
+      // Total length of these series of delimiters.
+      //
+      length: scanned.length,
 
       // An amount of characters before this one that's equivalent to
       // current one. In plain English: if this delimiter does not open
@@ -19912,7 +18780,7 @@ module.exports.postProcess = function emphasis(state) {
   }
 };
 
-},{}],83:[function(require,module,exports){
+},{}],79:[function(require,module,exports){
 // Process html entity - &#123;, &#xAF;, &quot;, ...
 
 'use strict';
@@ -19962,7 +18830,7 @@ module.exports = function entity(state, silent) {
   return true;
 };
 
-},{"../common/entities":43,"../common/utils":46}],84:[function(require,module,exports){
+},{"../common/entities":39,"../common/utils":42}],80:[function(require,module,exports){
 // Proceess escaped chars and hardbreaks
 
 'use strict';
@@ -20016,7 +18884,7 @@ module.exports = function escape(state, silent) {
   return true;
 };
 
-},{"../common/utils":46}],85:[function(require,module,exports){
+},{"../common/utils":42}],81:[function(require,module,exports){
 // Process html tags
 
 'use strict';
@@ -20065,7 +18933,7 @@ module.exports = function html_inline(state, silent) {
   return true;
 };
 
-},{"../common/html_re":45}],86:[function(require,module,exports){
+},{"../common/html_re":41}],82:[function(require,module,exports){
 // Process ![image](<src> "title")
 
 'use strict';
@@ -20222,7 +19090,7 @@ module.exports = function image(state, silent) {
   return true;
 };
 
-},{"../common/utils":46,"../helpers/parse_link_destination":48,"../helpers/parse_link_label":49,"../helpers/parse_link_title":50}],87:[function(require,module,exports){
+},{"../common/utils":42,"../helpers/parse_link_destination":44,"../helpers/parse_link_label":45,"../helpers/parse_link_title":46}],83:[function(require,module,exports){
 // Process [link](<to> "stuff")
 
 'use strict';
@@ -20371,7 +19239,7 @@ module.exports = function link(state, silent) {
   return true;
 };
 
-},{"../common/utils":46,"../helpers/parse_link_destination":48,"../helpers/parse_link_label":49,"../helpers/parse_link_title":50}],88:[function(require,module,exports){
+},{"../common/utils":42,"../helpers/parse_link_destination":44,"../helpers/parse_link_label":45,"../helpers/parse_link_title":46}],84:[function(require,module,exports){
 // Proceess '\n'
 
 'use strict';
@@ -20412,7 +19280,7 @@ module.exports = function newline(state, silent) {
   return true;
 };
 
-},{}],89:[function(require,module,exports){
+},{}],85:[function(require,module,exports){
 // Inline parser state
 
 'use strict';
@@ -20544,7 +19412,7 @@ StateInline.prototype.Token = Token;
 
 module.exports = StateInline;
 
-},{"../common/utils":46,"../token":93}],90:[function(require,module,exports){
+},{"../common/utils":42,"../token":89}],86:[function(require,module,exports){
 // ~~strike through~~
 //
 'use strict';
@@ -20663,7 +19531,7 @@ module.exports.postProcess = function strikethrough(state) {
   }
 };
 
-},{}],91:[function(require,module,exports){
+},{}],87:[function(require,module,exports){
 // Skip text characters for text token, place those to pending buffer
 // and increment current pos
 
@@ -20754,7 +19622,7 @@ module.exports = function text(state, silent) {
   return true;
 };*/
 
-},{}],92:[function(require,module,exports){
+},{}],88:[function(require,module,exports){
 // Merge adjacent text nodes into one, and re-calculate all token levels
 //
 'use strict';
@@ -20789,7 +19657,7 @@ module.exports = function text_collapse(state) {
   }
 };
 
-},{}],93:[function(require,module,exports){
+},{}],89:[function(require,module,exports){
 // Token class
 
 'use strict';
@@ -20988,7 +19856,7 @@ Token.prototype.attrJoin = function attrJoin(name, value) {
 
 module.exports = Token;
 
-},{}],94:[function(require,module,exports){
+},{}],90:[function(require,module,exports){
 /** @flow */
 
 "use strict";
@@ -21031,7 +19899,7 @@ function matchAt(re, str, pos) {
 }
 
 module.exports = matchAt;
-},{}],95:[function(require,module,exports){
+},{}],91:[function(require,module,exports){
 
 'use strict';
 
@@ -21155,7 +20023,7 @@ decode.componentChars = '';
 
 module.exports = decode;
 
-},{}],96:[function(require,module,exports){
+},{}],92:[function(require,module,exports){
 
 'use strict';
 
@@ -21255,7 +20123,7 @@ encode.componentChars = "-_.!~*'()";
 
 module.exports = encode;
 
-},{}],97:[function(require,module,exports){
+},{}],93:[function(require,module,exports){
 
 'use strict';
 
@@ -21282,7 +20150,7 @@ module.exports = function format(url) {
   return result;
 };
 
-},{}],98:[function(require,module,exports){
+},{}],94:[function(require,module,exports){
 'use strict';
 
 
@@ -21291,7 +20159,7 @@ module.exports.decode = require('./decode');
 module.exports.format = require('./format');
 module.exports.parse  = require('./parse');
 
-},{"./decode":95,"./encode":96,"./format":97,"./parse":99}],99:[function(require,module,exports){
+},{"./decode":91,"./encode":92,"./format":93,"./parse":95}],95:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -21605,7 +20473,7 @@ Url.prototype.parseHost = function(host) {
 
 module.exports = urlParse;
 
-},{}],100:[function(require,module,exports){
+},{}],96:[function(require,module,exports){
 ;(function (global, factory) { // eslint-disable-line
 	"use strict"
 	/* eslint-disable no-undef */
@@ -23840,7 +22708,7 @@ module.exports = urlParse;
 	return m
 }); // eslint-disable-line
 
-},{}],101:[function(require,module,exports){
+},{}],97:[function(require,module,exports){
 'use strict';
 /* eslint-disable no-unused-vars */
 var hasOwnProperty = Object.prototype.hasOwnProperty;
@@ -23925,9 +22793,8 @@ module.exports = shouldUseNative() ? Object.assign : function (target, source) {
 	return to;
 };
 
-},{}],102:[function(require,module,exports){
+},{}],98:[function(require,module,exports){
 // shim for using process in browser
-
 var process = module.exports = {};
 
 // cached from whatever global is present so that test runners that stub it
@@ -23939,21 +22806,63 @@ var cachedSetTimeout;
 var cachedClearTimeout;
 
 (function () {
-  try {
-    cachedSetTimeout = setTimeout;
-  } catch (e) {
-    cachedSetTimeout = function () {
-      throw new Error('setTimeout is not defined');
+    try {
+        cachedSetTimeout = setTimeout;
+    } catch (e) {
+        cachedSetTimeout = function () {
+            throw new Error('setTimeout is not defined');
+        }
     }
-  }
-  try {
-    cachedClearTimeout = clearTimeout;
-  } catch (e) {
-    cachedClearTimeout = function () {
-      throw new Error('clearTimeout is not defined');
+    try {
+        cachedClearTimeout = clearTimeout;
+    } catch (e) {
+        cachedClearTimeout = function () {
+            throw new Error('clearTimeout is not defined');
+        }
     }
-  }
 } ())
+function runTimeout(fun) {
+    if (cachedSetTimeout === setTimeout) {
+        //normal enviroments in sane situations
+        return setTimeout(fun, 0);
+    }
+    try {
+        // when when somebody has screwed with setTimeout but no I.E. maddness
+        return cachedSetTimeout(fun, 0);
+    } catch(e){
+        try {
+            // When we are in I.E. but the script has been evaled so I.E. doesn't trust the global object when called normally
+            return cachedSetTimeout.call(null, fun, 0);
+        } catch(e){
+            // same as above but when it's a version of I.E. that must have the global object for 'this', hopfully our context correct otherwise it will throw a global error
+            return cachedSetTimeout.call(this, fun, 0);
+        }
+    }
+
+
+}
+function runClearTimeout(marker) {
+    if (cachedClearTimeout === clearTimeout) {
+        //normal enviroments in sane situations
+        return clearTimeout(marker);
+    }
+    try {
+        // when when somebody has screwed with setTimeout but no I.E. maddness
+        return cachedClearTimeout(marker);
+    } catch (e){
+        try {
+            // When we are in I.E. but the script has been evaled so I.E. doesn't  trust the global object when called normally
+            return cachedClearTimeout.call(null, marker);
+        } catch (e){
+            // same as above but when it's a version of I.E. that must have the global object for 'this', hopfully our context correct otherwise it will throw a global error.
+            // Some versions of I.E. have different rules for clearTimeout vs setTimeout
+            return cachedClearTimeout.call(this, marker);
+        }
+    }
+
+
+
+}
 var queue = [];
 var draining = false;
 var currentQueue;
@@ -23978,7 +22887,7 @@ function drainQueue() {
     if (draining) {
         return;
     }
-    var timeout = cachedSetTimeout(cleanUpNextTick);
+    var timeout = runTimeout(cleanUpNextTick);
     draining = true;
 
     var len = queue.length;
@@ -23995,7 +22904,7 @@ function drainQueue() {
     }
     currentQueue = null;
     draining = false;
-    cachedClearTimeout(timeout);
+    runClearTimeout(timeout);
 }
 
 process.nextTick = function (fun) {
@@ -24007,7 +22916,7 @@ process.nextTick = function (fun) {
     }
     queue.push(new Item(fun, args));
     if (queue.length === 1 && !draining) {
-        cachedSetTimeout(drainQueue, 0);
+        runTimeout(drainQueue);
     }
 };
 
@@ -24046,7 +22955,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],103:[function(require,module,exports){
+},{}],99:[function(require,module,exports){
 (function (global){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -24583,7 +23492,7 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],104:[function(require,module,exports){
+},{}],100:[function(require,module,exports){
 'use strict';
 var strictUriEncode = require('strict-uri-encode');
 var objectAssign = require('object-assign');
@@ -24683,7 +23592,7 @@ exports.stringify = function (obj, opts) {
 	}).join('&') : '';
 };
 
-},{"object-assign":101,"strict-uri-encode":106}],105:[function(require,module,exports){
+},{"object-assign":97,"strict-uri-encode":102}],101:[function(require,module,exports){
 
 /**
  * Reduce `arr` with `fn`.
@@ -24708,7 +23617,7 @@ module.exports = function(arr, fn, initial){
   
   return curr;
 };
-},{}],106:[function(require,module,exports){
+},{}],102:[function(require,module,exports){
 'use strict';
 module.exports = function (str) {
 	return encodeURIComponent(str).replace(/[!'()*]/g, function (c) {
@@ -24716,21 +23625,1318 @@ module.exports = function (str) {
 	});
 };
 
+},{}],103:[function(require,module,exports){
+/**
+ * Module dependencies.
+ */
+
+var Emitter = require('emitter');
+var reduce = require('reduce');
+var requestBase = require('./request-base');
+var isObject = require('./is-object');
+
+/**
+ * Root reference for iframes.
+ */
+
+var root;
+if (typeof window !== 'undefined') { // Browser window
+  root = window;
+} else if (typeof self !== 'undefined') { // Web Worker
+  root = self;
+} else { // Other environments
+  root = this;
+}
+
+/**
+ * Noop.
+ */
+
+function noop(){};
+
+/**
+ * Check if `obj` is a host object,
+ * we don't want to serialize these :)
+ *
+ * TODO: future proof, move to compoent land
+ *
+ * @param {Object} obj
+ * @return {Boolean}
+ * @api private
+ */
+
+function isHost(obj) {
+  var str = {}.toString.call(obj);
+
+  switch (str) {
+    case '[object File]':
+    case '[object Blob]':
+    case '[object FormData]':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Expose `request`.
+ */
+
+var request = module.exports = require('./request').bind(null, Request);
+
+/**
+ * Determine XHR.
+ */
+
+request.getXHR = function () {
+  if (root.XMLHttpRequest
+      && (!root.location || 'file:' != root.location.protocol
+          || !root.ActiveXObject)) {
+    return new XMLHttpRequest;
+  } else {
+    try { return new ActiveXObject('Microsoft.XMLHTTP'); } catch(e) {}
+    try { return new ActiveXObject('Msxml2.XMLHTTP.6.0'); } catch(e) {}
+    try { return new ActiveXObject('Msxml2.XMLHTTP.3.0'); } catch(e) {}
+    try { return new ActiveXObject('Msxml2.XMLHTTP'); } catch(e) {}
+  }
+  return false;
+};
+
+/**
+ * Removes leading and trailing whitespace, added to support IE.
+ *
+ * @param {String} s
+ * @return {String}
+ * @api private
+ */
+
+var trim = ''.trim
+  ? function(s) { return s.trim(); }
+  : function(s) { return s.replace(/(^\s*|\s*$)/g, ''); };
+
+/**
+ * Serialize the given `obj`.
+ *
+ * @param {Object} obj
+ * @return {String}
+ * @api private
+ */
+
+function serialize(obj) {
+  if (!isObject(obj)) return obj;
+  var pairs = [];
+  for (var key in obj) {
+    if (null != obj[key]) {
+      pushEncodedKeyValuePair(pairs, key, obj[key]);
+        }
+      }
+  return pairs.join('&');
+}
+
+/**
+ * Helps 'serialize' with serializing arrays.
+ * Mutates the pairs array.
+ *
+ * @param {Array} pairs
+ * @param {String} key
+ * @param {Mixed} val
+ */
+
+function pushEncodedKeyValuePair(pairs, key, val) {
+  if (Array.isArray(val)) {
+    return val.forEach(function(v) {
+      pushEncodedKeyValuePair(pairs, key, v);
+    });
+  }
+  pairs.push(encodeURIComponent(key)
+    + '=' + encodeURIComponent(val));
+}
+
+/**
+ * Expose serialization method.
+ */
+
+ request.serializeObject = serialize;
+
+ /**
+  * Parse the given x-www-form-urlencoded `str`.
+  *
+  * @param {String} str
+  * @return {Object}
+  * @api private
+  */
+
+function parseString(str) {
+  var obj = {};
+  var pairs = str.split('&');
+  var parts;
+  var pair;
+
+  for (var i = 0, len = pairs.length; i < len; ++i) {
+    pair = pairs[i];
+    parts = pair.split('=');
+    obj[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1]);
+  }
+
+  return obj;
+}
+
+/**
+ * Expose parser.
+ */
+
+request.parseString = parseString;
+
+/**
+ * Default MIME type map.
+ *
+ *     superagent.types.xml = 'application/xml';
+ *
+ */
+
+request.types = {
+  html: 'text/html',
+  json: 'application/json',
+  xml: 'application/xml',
+  urlencoded: 'application/x-www-form-urlencoded',
+  'form': 'application/x-www-form-urlencoded',
+  'form-data': 'application/x-www-form-urlencoded'
+};
+
+/**
+ * Default serialization map.
+ *
+ *     superagent.serialize['application/xml'] = function(obj){
+ *       return 'generated xml here';
+ *     };
+ *
+ */
+
+ request.serialize = {
+   'application/x-www-form-urlencoded': serialize,
+   'application/json': JSON.stringify
+ };
+
+ /**
+  * Default parsers.
+  *
+  *     superagent.parse['application/xml'] = function(str){
+  *       return { object parsed from str };
+  *     };
+  *
+  */
+
+request.parse = {
+  'application/x-www-form-urlencoded': parseString,
+  'application/json': JSON.parse
+};
+
+/**
+ * Parse the given header `str` into
+ * an object containing the mapped fields.
+ *
+ * @param {String} str
+ * @return {Object}
+ * @api private
+ */
+
+function parseHeader(str) {
+  var lines = str.split(/\r?\n/);
+  var fields = {};
+  var index;
+  var line;
+  var field;
+  var val;
+
+  lines.pop(); // trailing CRLF
+
+  for (var i = 0, len = lines.length; i < len; ++i) {
+    line = lines[i];
+    index = line.indexOf(':');
+    field = line.slice(0, index).toLowerCase();
+    val = trim(line.slice(index + 1));
+    fields[field] = val;
+  }
+
+  return fields;
+}
+
+/**
+ * Check if `mime` is json or has +json structured syntax suffix.
+ *
+ * @param {String} mime
+ * @return {Boolean}
+ * @api private
+ */
+
+function isJSON(mime) {
+  return /[\/+]json\b/.test(mime);
+}
+
+/**
+ * Return the mime type for the given `str`.
+ *
+ * @param {String} str
+ * @return {String}
+ * @api private
+ */
+
+function type(str){
+  return str.split(/ *; */).shift();
+};
+
+/**
+ * Return header field parameters.
+ *
+ * @param {String} str
+ * @return {Object}
+ * @api private
+ */
+
+function params(str){
+  return reduce(str.split(/ *; */), function(obj, str){
+    var parts = str.split(/ *= */)
+      , key = parts.shift()
+      , val = parts.shift();
+
+    if (key && val) obj[key] = val;
+    return obj;
+  }, {});
+};
+
+/**
+ * Initialize a new `Response` with the given `xhr`.
+ *
+ *  - set flags (.ok, .error, etc)
+ *  - parse header
+ *
+ * Examples:
+ *
+ *  Aliasing `superagent` as `request` is nice:
+ *
+ *      request = superagent;
+ *
+ *  We can use the promise-like API, or pass callbacks:
+ *
+ *      request.get('/').end(function(res){});
+ *      request.get('/', function(res){});
+ *
+ *  Sending data can be chained:
+ *
+ *      request
+ *        .post('/user')
+ *        .send({ name: 'tj' })
+ *        .end(function(res){});
+ *
+ *  Or passed to `.send()`:
+ *
+ *      request
+ *        .post('/user')
+ *        .send({ name: 'tj' }, function(res){});
+ *
+ *  Or passed to `.post()`:
+ *
+ *      request
+ *        .post('/user', { name: 'tj' })
+ *        .end(function(res){});
+ *
+ * Or further reduced to a single call for simple cases:
+ *
+ *      request
+ *        .post('/user', { name: 'tj' }, function(res){});
+ *
+ * @param {XMLHTTPRequest} xhr
+ * @param {Object} options
+ * @api private
+ */
+
+function Response(req, options) {
+  options = options || {};
+  this.req = req;
+  this.xhr = this.req.xhr;
+  // responseText is accessible only if responseType is '' or 'text' and on older browsers
+  this.text = ((this.req.method !='HEAD' && (this.xhr.responseType === '' || this.xhr.responseType === 'text')) || typeof this.xhr.responseType === 'undefined')
+     ? this.xhr.responseText
+     : null;
+  this.statusText = this.req.xhr.statusText;
+  this.setStatusProperties(this.xhr.status);
+  this.header = this.headers = parseHeader(this.xhr.getAllResponseHeaders());
+  // getAllResponseHeaders sometimes falsely returns "" for CORS requests, but
+  // getResponseHeader still works. so we get content-type even if getting
+  // other headers fails.
+  this.header['content-type'] = this.xhr.getResponseHeader('content-type');
+  this.setHeaderProperties(this.header);
+  this.body = this.req.method != 'HEAD'
+    ? this.parseBody(this.text ? this.text : this.xhr.response)
+    : null;
+}
+
+/**
+ * Get case-insensitive `field` value.
+ *
+ * @param {String} field
+ * @return {String}
+ * @api public
+ */
+
+Response.prototype.get = function(field){
+  return this.header[field.toLowerCase()];
+};
+
+/**
+ * Set header related properties:
+ *
+ *   - `.type` the content type without params
+ *
+ * A response of "Content-Type: text/plain; charset=utf-8"
+ * will provide you with a `.type` of "text/plain".
+ *
+ * @param {Object} header
+ * @api private
+ */
+
+Response.prototype.setHeaderProperties = function(header){
+  // content-type
+  var ct = this.header['content-type'] || '';
+  this.type = type(ct);
+
+  // params
+  var obj = params(ct);
+  for (var key in obj) this[key] = obj[key];
+};
+
+/**
+ * Parse the given body `str`.
+ *
+ * Used for auto-parsing of bodies. Parsers
+ * are defined on the `superagent.parse` object.
+ *
+ * @param {String} str
+ * @return {Mixed}
+ * @api private
+ */
+
+Response.prototype.parseBody = function(str){
+  var parse = request.parse[this.type];
+  if (!parse && isJSON(this.type)) {
+    parse = request.parse['application/json'];
+  }
+  return parse && str && (str.length || str instanceof Object)
+    ? parse(str)
+    : null;
+};
+
+/**
+ * Set flags such as `.ok` based on `status`.
+ *
+ * For example a 2xx response will give you a `.ok` of __true__
+ * whereas 5xx will be __false__ and `.error` will be __true__. The
+ * `.clientError` and `.serverError` are also available to be more
+ * specific, and `.statusType` is the class of error ranging from 1..5
+ * sometimes useful for mapping respond colors etc.
+ *
+ * "sugar" properties are also defined for common cases. Currently providing:
+ *
+ *   - .noContent
+ *   - .badRequest
+ *   - .unauthorized
+ *   - .notAcceptable
+ *   - .notFound
+ *
+ * @param {Number} status
+ * @api private
+ */
+
+Response.prototype.setStatusProperties = function(status){
+  // handle IE9 bug: http://stackoverflow.com/questions/10046972/msie-returns-status-code-of-1223-for-ajax-request
+  if (status === 1223) {
+    status = 204;
+  }
+
+  var type = status / 100 | 0;
+
+  // status / class
+  this.status = this.statusCode = status;
+  this.statusType = type;
+
+  // basics
+  this.info = 1 == type;
+  this.ok = 2 == type;
+  this.clientError = 4 == type;
+  this.serverError = 5 == type;
+  this.error = (4 == type || 5 == type)
+    ? this.toError()
+    : false;
+
+  // sugar
+  this.accepted = 202 == status;
+  this.noContent = 204 == status;
+  this.badRequest = 400 == status;
+  this.unauthorized = 401 == status;
+  this.notAcceptable = 406 == status;
+  this.notFound = 404 == status;
+  this.forbidden = 403 == status;
+};
+
+/**
+ * Return an `Error` representative of this response.
+ *
+ * @return {Error}
+ * @api public
+ */
+
+Response.prototype.toError = function(){
+  var req = this.req;
+  var method = req.method;
+  var url = req.url;
+
+  var msg = 'cannot ' + method + ' ' + url + ' (' + this.status + ')';
+  var err = new Error(msg);
+  err.status = this.status;
+  err.method = method;
+  err.url = url;
+
+  return err;
+};
+
+/**
+ * Expose `Response`.
+ */
+
+request.Response = Response;
+
+/**
+ * Initialize a new `Request` with the given `method` and `url`.
+ *
+ * @param {String} method
+ * @param {String} url
+ * @api public
+ */
+
+function Request(method, url) {
+  var self = this;
+  this._query = this._query || [];
+  this.method = method;
+  this.url = url;
+  this.header = {}; // preserves header name case
+  this._header = {}; // coerces header names to lowercase
+  this.on('end', function(){
+    var err = null;
+    var res = null;
+
+    try {
+      res = new Response(self);
+    } catch(e) {
+      err = new Error('Parser is unable to parse the response');
+      err.parse = true;
+      err.original = e;
+      // issue #675: return the raw response if the response parsing fails
+      err.rawResponse = self.xhr && self.xhr.responseText ? self.xhr.responseText : null;
+      // issue #876: return the http status code if the response parsing fails
+      err.statusCode = self.xhr && self.xhr.status ? self.xhr.status : null;
+      return self.callback(err);
+    }
+
+    self.emit('response', res);
+
+    if (err) {
+      return self.callback(err, res);
+    }
+
+    if (res.status >= 200 && res.status < 300) {
+      return self.callback(err, res);
+    }
+
+    var new_err = new Error(res.statusText || 'Unsuccessful HTTP response');
+    new_err.original = err;
+    new_err.response = res;
+    new_err.status = res.status;
+
+    self.callback(new_err, res);
+  });
+}
+
+/**
+ * Mixin `Emitter` and `requestBase`.
+ */
+
+Emitter(Request.prototype);
+for (var key in requestBase) {
+  Request.prototype[key] = requestBase[key];
+}
+
+/**
+ * Abort the request, and clear potential timeout.
+ *
+ * @return {Request}
+ * @api public
+ */
+
+Request.prototype.abort = function(){
+  if (this.aborted) return;
+  this.aborted = true;
+  this.xhr && this.xhr.abort();
+  this.clearTimeout();
+  this.emit('abort');
+  return this;
+};
+
+/**
+ * Set Content-Type to `type`, mapping values from `request.types`.
+ *
+ * Examples:
+ *
+ *      superagent.types.xml = 'application/xml';
+ *
+ *      request.post('/')
+ *        .type('xml')
+ *        .send(xmlstring)
+ *        .end(callback);
+ *
+ *      request.post('/')
+ *        .type('application/xml')
+ *        .send(xmlstring)
+ *        .end(callback);
+ *
+ * @param {String} type
+ * @return {Request} for chaining
+ * @api public
+ */
+
+Request.prototype.type = function(type){
+  this.set('Content-Type', request.types[type] || type);
+  return this;
+};
+
+/**
+ * Set responseType to `val`. Presently valid responseTypes are 'blob' and 
+ * 'arraybuffer'.
+ *
+ * Examples:
+ *
+ *      req.get('/')
+ *        .responseType('blob')
+ *        .end(callback);
+ *
+ * @param {String} val
+ * @return {Request} for chaining
+ * @api public
+ */
+
+Request.prototype.responseType = function(val){
+  this._responseType = val;
+  return this;
+};
+
+/**
+ * Set Accept to `type`, mapping values from `request.types`.
+ *
+ * Examples:
+ *
+ *      superagent.types.json = 'application/json';
+ *
+ *      request.get('/agent')
+ *        .accept('json')
+ *        .end(callback);
+ *
+ *      request.get('/agent')
+ *        .accept('application/json')
+ *        .end(callback);
+ *
+ * @param {String} accept
+ * @return {Request} for chaining
+ * @api public
+ */
+
+Request.prototype.accept = function(type){
+  this.set('Accept', request.types[type] || type);
+  return this;
+};
+
+/**
+ * Set Authorization field value with `user` and `pass`.
+ *
+ * @param {String} user
+ * @param {String} pass
+ * @param {Object} options with 'type' property 'auto' or 'basic' (default 'basic')
+ * @return {Request} for chaining
+ * @api public
+ */
+
+Request.prototype.auth = function(user, pass, options){
+  if (!options) {
+    options = {
+      type: 'basic'
+    }
+  }
+
+  switch (options.type) {
+    case 'basic':
+      var str = btoa(user + ':' + pass);
+      this.set('Authorization', 'Basic ' + str);
+    break;
+
+    case 'auto':
+      this.username = user;
+      this.password = pass;
+    break;
+  }
+  return this;
+};
+
+/**
+* Add query-string `val`.
+*
+* Examples:
+*
+*   request.get('/shoes')
+*     .query('size=10')
+*     .query({ color: 'blue' })
+*
+* @param {Object|String} val
+* @return {Request} for chaining
+* @api public
+*/
+
+Request.prototype.query = function(val){
+  if ('string' != typeof val) val = serialize(val);
+  if (val) this._query.push(val);
+  return this;
+};
+
+/**
+ * Queue the given `file` as an attachment to the specified `field`,
+ * with optional `filename`.
+ *
+ * ``` js
+ * request.post('/upload')
+ *   .attach(new Blob(['<a id="a"><b id="b">hey!</b></a>'], { type: "text/html"}))
+ *   .end(callback);
+ * ```
+ *
+ * @param {String} field
+ * @param {Blob|File} file
+ * @param {String} filename
+ * @return {Request} for chaining
+ * @api public
+ */
+
+Request.prototype.attach = function(field, file, filename){
+  this._getFormData().append(field, file, filename || file.name);
+  return this;
+};
+
+Request.prototype._getFormData = function(){
+  if (!this._formData) {
+    this._formData = new root.FormData();
+  }
+  return this._formData;
+};
+
+/**
+ * Send `data` as the request body, defaulting the `.type()` to "json" when
+ * an object is given.
+ *
+ * Examples:
+ *
+ *       // manual json
+ *       request.post('/user')
+ *         .type('json')
+ *         .send('{"name":"tj"}')
+ *         .end(callback)
+ *
+ *       // auto json
+ *       request.post('/user')
+ *         .send({ name: 'tj' })
+ *         .end(callback)
+ *
+ *       // manual x-www-form-urlencoded
+ *       request.post('/user')
+ *         .type('form')
+ *         .send('name=tj')
+ *         .end(callback)
+ *
+ *       // auto x-www-form-urlencoded
+ *       request.post('/user')
+ *         .type('form')
+ *         .send({ name: 'tj' })
+ *         .end(callback)
+ *
+ *       // defaults to x-www-form-urlencoded
+  *      request.post('/user')
+  *        .send('name=tobi')
+  *        .send('species=ferret')
+  *        .end(callback)
+ *
+ * @param {String|Object} data
+ * @return {Request} for chaining
+ * @api public
+ */
+
+Request.prototype.send = function(data){
+  var obj = isObject(data);
+  var type = this._header['content-type'];
+
+  // merge
+  if (obj && isObject(this._data)) {
+    for (var key in data) {
+      this._data[key] = data[key];
+    }
+  } else if ('string' == typeof data) {
+    if (!type) this.type('form');
+    type = this._header['content-type'];
+    if ('application/x-www-form-urlencoded' == type) {
+      this._data = this._data
+        ? this._data + '&' + data
+        : data;
+    } else {
+      this._data = (this._data || '') + data;
+    }
+  } else {
+    this._data = data;
+  }
+
+  if (!obj || isHost(data)) return this;
+  if (!type) this.type('json');
+  return this;
+};
+
+/**
+ * @deprecated
+ */
+Response.prototype.parse = function serialize(fn){
+  if (root.console) {
+    console.warn("Client-side parse() method has been renamed to serialize(). This method is not compatible with superagent v2.0");
+  }
+  this.serialize(fn);
+  return this;
+};
+
+Response.prototype.serialize = function serialize(fn){
+  this._parser = fn;
+  return this;
+};
+
+/**
+ * Invoke the callback with `err` and `res`
+ * and handle arity check.
+ *
+ * @param {Error} err
+ * @param {Response} res
+ * @api private
+ */
+
+Request.prototype.callback = function(err, res){
+  var fn = this._callback;
+  this.clearTimeout();
+  fn(err, res);
+};
+
+/**
+ * Invoke callback with x-domain error.
+ *
+ * @api private
+ */
+
+Request.prototype.crossDomainError = function(){
+  var err = new Error('Request has been terminated\nPossible causes: the network is offline, Origin is not allowed by Access-Control-Allow-Origin, the page is being unloaded, etc.');
+  err.crossDomain = true;
+
+  err.status = this.status;
+  err.method = this.method;
+  err.url = this.url;
+
+  this.callback(err);
+};
+
+/**
+ * Invoke callback with timeout error.
+ *
+ * @api private
+ */
+
+Request.prototype.timeoutError = function(){
+  var timeout = this._timeout;
+  var err = new Error('timeout of ' + timeout + 'ms exceeded');
+  err.timeout = timeout;
+  this.callback(err);
+};
+
+/**
+ * Enable transmission of cookies with x-domain requests.
+ *
+ * Note that for this to work the origin must not be
+ * using "Access-Control-Allow-Origin" with a wildcard,
+ * and also must set "Access-Control-Allow-Credentials"
+ * to "true".
+ *
+ * @api public
+ */
+
+Request.prototype.withCredentials = function(){
+  this._withCredentials = true;
+  return this;
+};
+
+/**
+ * Initiate request, invoking callback `fn(res)`
+ * with an instanceof `Response`.
+ *
+ * @param {Function} fn
+ * @return {Request} for chaining
+ * @api public
+ */
+
+Request.prototype.end = function(fn){
+  var self = this;
+  var xhr = this.xhr = request.getXHR();
+  var query = this._query.join('&');
+  var timeout = this._timeout;
+  var data = this._formData || this._data;
+
+  // store callback
+  this._callback = fn || noop;
+
+  // state change
+  xhr.onreadystatechange = function(){
+    if (4 != xhr.readyState) return;
+
+    // In IE9, reads to any property (e.g. status) off of an aborted XHR will
+    // result in the error "Could not complete the operation due to error c00c023f"
+    var status;
+    try { status = xhr.status } catch(e) { status = 0; }
+
+    if (0 == status) {
+      if (self.timedout) return self.timeoutError();
+      if (self.aborted) return;
+      return self.crossDomainError();
+    }
+    self.emit('end');
+  };
+
+  // progress
+  var handleProgress = function(e){
+    if (e.total > 0) {
+      e.percent = e.loaded / e.total * 100;
+    }
+    e.direction = 'download';
+    self.emit('progress', e);
+  };
+  if (this.hasListeners('progress')) {
+    xhr.onprogress = handleProgress;
+  }
+  try {
+    if (xhr.upload && this.hasListeners('progress')) {
+      xhr.upload.onprogress = handleProgress;
+    }
+  } catch(e) {
+    // Accessing xhr.upload fails in IE from a web worker, so just pretend it doesn't exist.
+    // Reported here:
+    // https://connect.microsoft.com/IE/feedback/details/837245/xmlhttprequest-upload-throws-invalid-argument-when-used-from-web-worker-context
+  }
+
+  // timeout
+  if (timeout && !this._timer) {
+    this._timer = setTimeout(function(){
+      self.timedout = true;
+      self.abort();
+    }, timeout);
+  }
+
+  // querystring
+  if (query) {
+    query = request.serializeObject(query);
+    this.url += ~this.url.indexOf('?')
+      ? '&' + query
+      : '?' + query;
+  }
+
+  // initiate request
+  if (this.username && this.password) {
+    xhr.open(this.method, this.url, true, this.username, this.password);
+  } else {
+    xhr.open(this.method, this.url, true);
+  }
+
+  // CORS
+  if (this._withCredentials) xhr.withCredentials = true;
+
+  // body
+  if ('GET' != this.method && 'HEAD' != this.method && 'string' != typeof data && !isHost(data)) {
+    // serialize stuff
+    var contentType = this._header['content-type'];
+    var serialize = this._parser || request.serialize[contentType ? contentType.split(';')[0] : ''];
+    if (!serialize && isJSON(contentType)) serialize = request.serialize['application/json'];
+    if (serialize) data = serialize(data);
+  }
+
+  // set header fields
+  for (var field in this.header) {
+    if (null == this.header[field]) continue;
+    xhr.setRequestHeader(field, this.header[field]);
+  }
+
+  if (this._responseType) {
+    xhr.responseType = this._responseType;
+  }
+
+  // send stuff
+  this.emit('request', this);
+
+  // IE11 xhr.send(undefined) sends 'undefined' string as POST payload (instead of nothing)
+  // We need null here if data is undefined
+  xhr.send(typeof data !== 'undefined' ? data : null);
+  return this;
+};
+
+
+/**
+ * Expose `Request`.
+ */
+
+request.Request = Request;
+
+/**
+ * GET `url` with optional callback `fn(res)`.
+ *
+ * @param {String} url
+ * @param {Mixed|Function} data or fn
+ * @param {Function} fn
+ * @return {Request}
+ * @api public
+ */
+
+request.get = function(url, data, fn){
+  var req = request('GET', url);
+  if ('function' == typeof data) fn = data, data = null;
+  if (data) req.query(data);
+  if (fn) req.end(fn);
+  return req;
+};
+
+/**
+ * HEAD `url` with optional callback `fn(res)`.
+ *
+ * @param {String} url
+ * @param {Mixed|Function} data or fn
+ * @param {Function} fn
+ * @return {Request}
+ * @api public
+ */
+
+request.head = function(url, data, fn){
+  var req = request('HEAD', url);
+  if ('function' == typeof data) fn = data, data = null;
+  if (data) req.send(data);
+  if (fn) req.end(fn);
+  return req;
+};
+
+/**
+ * DELETE `url` with optional callback `fn(res)`.
+ *
+ * @param {String} url
+ * @param {Function} fn
+ * @return {Request}
+ * @api public
+ */
+
+function del(url, fn){
+  var req = request('DELETE', url);
+  if (fn) req.end(fn);
+  return req;
+};
+
+request['del'] = del;
+request['delete'] = del;
+
+/**
+ * PATCH `url` with optional `data` and callback `fn(res)`.
+ *
+ * @param {String} url
+ * @param {Mixed} data
+ * @param {Function} fn
+ * @return {Request}
+ * @api public
+ */
+
+request.patch = function(url, data, fn){
+  var req = request('PATCH', url);
+  if ('function' == typeof data) fn = data, data = null;
+  if (data) req.send(data);
+  if (fn) req.end(fn);
+  return req;
+};
+
+/**
+ * POST `url` with optional `data` and callback `fn(res)`.
+ *
+ * @param {String} url
+ * @param {Mixed} data
+ * @param {Function} fn
+ * @return {Request}
+ * @api public
+ */
+
+request.post = function(url, data, fn){
+  var req = request('POST', url);
+  if ('function' == typeof data) fn = data, data = null;
+  if (data) req.send(data);
+  if (fn) req.end(fn);
+  return req;
+};
+
+/**
+ * PUT `url` with optional `data` and callback `fn(res)`.
+ *
+ * @param {String} url
+ * @param {Mixed|Function} data or fn
+ * @param {Function} fn
+ * @return {Request}
+ * @api public
+ */
+
+request.put = function(url, data, fn){
+  var req = request('PUT', url);
+  if ('function' == typeof data) fn = data, data = null;
+  if (data) req.send(data);
+  if (fn) req.end(fn);
+  return req;
+};
+
+},{"./is-object":104,"./request":106,"./request-base":105,"emitter":1,"reduce":101}],104:[function(require,module,exports){
+/**
+ * Check if `obj` is an object.
+ *
+ * @param {Object} obj
+ * @return {Boolean}
+ * @api private
+ */
+
+function isObject(obj) {
+  return null != obj && 'object' == typeof obj;
+}
+
+module.exports = isObject;
+
+},{}],105:[function(require,module,exports){
+/**
+ * Module of mixed-in functions shared between node and client code
+ */
+var isObject = require('./is-object');
+
+/**
+ * Clear previous timeout.
+ *
+ * @return {Request} for chaining
+ * @api public
+ */
+
+exports.clearTimeout = function _clearTimeout(){
+  this._timeout = 0;
+  clearTimeout(this._timer);
+  return this;
+};
+
+/**
+ * Force given parser
+ *
+ * Sets the body parser no matter type.
+ *
+ * @param {Function}
+ * @api public
+ */
+
+exports.parse = function parse(fn){
+  this._parser = fn;
+  return this;
+};
+
+/**
+ * Set timeout to `ms`.
+ *
+ * @param {Number} ms
+ * @return {Request} for chaining
+ * @api public
+ */
+
+exports.timeout = function timeout(ms){
+  this._timeout = ms;
+  return this;
+};
+
+/**
+ * Faux promise support
+ *
+ * @param {Function} fulfill
+ * @param {Function} reject
+ * @return {Request}
+ */
+
+exports.then = function then(fulfill, reject) {
+  return this.end(function(err, res) {
+    err ? reject(err) : fulfill(res);
+  });
+}
+
+/**
+ * Allow for extension
+ */
+
+exports.use = function use(fn) {
+  fn(this);
+  return this;
+}
+
+
+/**
+ * Get request header `field`.
+ * Case-insensitive.
+ *
+ * @param {String} field
+ * @return {String}
+ * @api public
+ */
+
+exports.get = function(field){
+  return this._header[field.toLowerCase()];
+};
+
+/**
+ * Get case-insensitive header `field` value.
+ * This is a deprecated internal API. Use `.get(field)` instead.
+ *
+ * (getHeader is no longer used internally by the superagent code base)
+ *
+ * @param {String} field
+ * @return {String}
+ * @api private
+ * @deprecated
+ */
+
+exports.getHeader = exports.get;
+
+/**
+ * Set header `field` to `val`, or multiple fields with one object.
+ * Case-insensitive.
+ *
+ * Examples:
+ *
+ *      req.get('/')
+ *        .set('Accept', 'application/json')
+ *        .set('X-API-Key', 'foobar')
+ *        .end(callback);
+ *
+ *      req.get('/')
+ *        .set({ Accept: 'application/json', 'X-API-Key': 'foobar' })
+ *        .end(callback);
+ *
+ * @param {String|Object} field
+ * @param {String} val
+ * @return {Request} for chaining
+ * @api public
+ */
+
+exports.set = function(field, val){
+  if (isObject(field)) {
+    for (var key in field) {
+      this.set(key, field[key]);
+    }
+    return this;
+  }
+  this._header[field.toLowerCase()] = val;
+  this.header[field] = val;
+  return this;
+};
+
+/**
+ * Remove header `field`.
+ * Case-insensitive.
+ *
+ * Example:
+ *
+ *      req.get('/')
+ *        .unset('User-Agent')
+ *        .end(callback);
+ *
+ * @param {String} field
+ */
+exports.unset = function(field){
+  delete this._header[field.toLowerCase()];
+  delete this.header[field];
+  return this;
+};
+
+/**
+ * Write the field `name` and `val` for "multipart/form-data"
+ * request bodies.
+ *
+ * ``` js
+ * request.post('/upload')
+ *   .field('foo', 'bar')
+ *   .end(callback);
+ * ```
+ *
+ * @param {String} name
+ * @param {String|Blob|File|Buffer|fs.ReadStream} val
+ * @return {Request} for chaining
+ * @api public
+ */
+exports.field = function(name, val) {
+  this._getFormData().append(name, val);
+  return this;
+};
+
+},{"./is-object":104}],106:[function(require,module,exports){
+// The node and browser modules expose versions of this with the
+// appropriate constructor function bound as first argument
+/**
+ * Issue a request:
+ *
+ * Examples:
+ *
+ *    request('GET', '/users').end(callback)
+ *    request('/users').end(callback)
+ *    request('/users', callback)
+ *
+ * @param {String} method
+ * @param {String|Function} url or callback
+ * @return {Request}
+ * @api public
+ */
+
+function request(RequestConstructor, method, url) {
+  // callback
+  if ('function' == typeof url) {
+    return new RequestConstructor('GET', method).end(url);
+  }
+
+  // url first
+  if (2 == arguments.length) {
+    return new RequestConstructor('GET', method);
+  }
+
+  return new RequestConstructor(method, url);
+}
+
+module.exports = request;
+
 },{}],107:[function(require,module,exports){
 module.exports=/[\0-\x1F\x7F-\x9F]/
 },{}],108:[function(require,module,exports){
-module.exports=/[\xAD\u0600-\u0605\u061C\u06DD\u070F\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uD804\uDCBD|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|\uDB40[\uDC01\uDC20-\uDC7F]/
+module.exports=/[\xAD\u0600-\u0605\u061C\u06DD\u070F\u08E2\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uD804\uDCBD|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|\uDB40[\uDC01\uDC20-\uDC7F]/
 },{}],109:[function(require,module,exports){
-module.exports=/[!-#%-\*,-/:;\?@\[-\]_\{\}\xA1\xA7\xAB\xB6\xB7\xBB\xBF\u037E\u0387\u055A-\u055F\u0589\u058A\u05BE\u05C0\u05C3\u05C6\u05F3\u05F4\u0609\u060A\u060C\u060D\u061B\u061E\u061F\u066A-\u066D\u06D4\u0700-\u070D\u07F7-\u07F9\u0830-\u083E\u085E\u0964\u0965\u0970\u0AF0\u0DF4\u0E4F\u0E5A\u0E5B\u0F04-\u0F12\u0F14\u0F3A-\u0F3D\u0F85\u0FD0-\u0FD4\u0FD9\u0FDA\u104A-\u104F\u10FB\u1360-\u1368\u1400\u166D\u166E\u169B\u169C\u16EB-\u16ED\u1735\u1736\u17D4-\u17D6\u17D8-\u17DA\u1800-\u180A\u1944\u1945\u1A1E\u1A1F\u1AA0-\u1AA6\u1AA8-\u1AAD\u1B5A-\u1B60\u1BFC-\u1BFF\u1C3B-\u1C3F\u1C7E\u1C7F\u1CC0-\u1CC7\u1CD3\u2010-\u2027\u2030-\u2043\u2045-\u2051\u2053-\u205E\u207D\u207E\u208D\u208E\u2308-\u230B\u2329\u232A\u2768-\u2775\u27C5\u27C6\u27E6-\u27EF\u2983-\u2998\u29D8-\u29DB\u29FC\u29FD\u2CF9-\u2CFC\u2CFE\u2CFF\u2D70\u2E00-\u2E2E\u2E30-\u2E42\u3001-\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\u30A0\u30FB\uA4FE\uA4FF\uA60D-\uA60F\uA673\uA67E\uA6F2-\uA6F7\uA874-\uA877\uA8CE\uA8CF\uA8F8-\uA8FA\uA8FC\uA92E\uA92F\uA95F\uA9C1-\uA9CD\uA9DE\uA9DF\uAA5C-\uAA5F\uAADE\uAADF\uAAF0\uAAF1\uABEB\uFD3E\uFD3F\uFE10-\uFE19\uFE30-\uFE52\uFE54-\uFE61\uFE63\uFE68\uFE6A\uFE6B\uFF01-\uFF03\uFF05-\uFF0A\uFF0C-\uFF0F\uFF1A\uFF1B\uFF1F\uFF20\uFF3B-\uFF3D\uFF3F\uFF5B\uFF5D\uFF5F-\uFF65]|\uD800[\uDD00-\uDD02\uDF9F\uDFD0]|\uD801\uDD6F|\uD802[\uDC57\uDD1F\uDD3F\uDE50-\uDE58\uDE7F\uDEF0-\uDEF6\uDF39-\uDF3F\uDF99-\uDF9C]|\uD804[\uDC47-\uDC4D\uDCBB\uDCBC\uDCBE-\uDCC1\uDD40-\uDD43\uDD74\uDD75\uDDC5-\uDDC9\uDDCD\uDDDB\uDDDD-\uDDDF\uDE38-\uDE3D\uDEA9]|\uD805[\uDCC6\uDDC1-\uDDD7\uDE41-\uDE43\uDF3C-\uDF3E]|\uD809[\uDC70-\uDC74]|\uD81A[\uDE6E\uDE6F\uDEF5\uDF37-\uDF3B\uDF44]|\uD82F\uDC9F|\uD836[\uDE87-\uDE8B]/
+module.exports=/[!-#%-\*,-/:;\?@\[-\]_\{\}\xA1\xA7\xAB\xB6\xB7\xBB\xBF\u037E\u0387\u055A-\u055F\u0589\u058A\u05BE\u05C0\u05C3\u05C6\u05F3\u05F4\u0609\u060A\u060C\u060D\u061B\u061E\u061F\u066A-\u066D\u06D4\u0700-\u070D\u07F7-\u07F9\u0830-\u083E\u085E\u0964\u0965\u0970\u0AF0\u0DF4\u0E4F\u0E5A\u0E5B\u0F04-\u0F12\u0F14\u0F3A-\u0F3D\u0F85\u0FD0-\u0FD4\u0FD9\u0FDA\u104A-\u104F\u10FB\u1360-\u1368\u1400\u166D\u166E\u169B\u169C\u16EB-\u16ED\u1735\u1736\u17D4-\u17D6\u17D8-\u17DA\u1800-\u180A\u1944\u1945\u1A1E\u1A1F\u1AA0-\u1AA6\u1AA8-\u1AAD\u1B5A-\u1B60\u1BFC-\u1BFF\u1C3B-\u1C3F\u1C7E\u1C7F\u1CC0-\u1CC7\u1CD3\u2010-\u2027\u2030-\u2043\u2045-\u2051\u2053-\u205E\u207D\u207E\u208D\u208E\u2308-\u230B\u2329\u232A\u2768-\u2775\u27C5\u27C6\u27E6-\u27EF\u2983-\u2998\u29D8-\u29DB\u29FC\u29FD\u2CF9-\u2CFC\u2CFE\u2CFF\u2D70\u2E00-\u2E2E\u2E30-\u2E44\u3001-\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\u30A0\u30FB\uA4FE\uA4FF\uA60D-\uA60F\uA673\uA67E\uA6F2-\uA6F7\uA874-\uA877\uA8CE\uA8CF\uA8F8-\uA8FA\uA8FC\uA92E\uA92F\uA95F\uA9C1-\uA9CD\uA9DE\uA9DF\uAA5C-\uAA5F\uAADE\uAADF\uAAF0\uAAF1\uABEB\uFD3E\uFD3F\uFE10-\uFE19\uFE30-\uFE52\uFE54-\uFE61\uFE63\uFE68\uFE6A\uFE6B\uFF01-\uFF03\uFF05-\uFF0A\uFF0C-\uFF0F\uFF1A\uFF1B\uFF1F\uFF20\uFF3B-\uFF3D\uFF3F\uFF5B\uFF5D\uFF5F-\uFF65]|\uD800[\uDD00-\uDD02\uDF9F\uDFD0]|\uD801\uDD6F|\uD802[\uDC57\uDD1F\uDD3F\uDE50-\uDE58\uDE7F\uDEF0-\uDEF6\uDF39-\uDF3F\uDF99-\uDF9C]|\uD804[\uDC47-\uDC4D\uDCBB\uDCBC\uDCBE-\uDCC1\uDD40-\uDD43\uDD74\uDD75\uDDC5-\uDDC9\uDDCD\uDDDB\uDDDD-\uDDDF\uDE38-\uDE3D\uDEA9]|\uD805[\uDC4B-\uDC4F\uDC5B\uDC5D\uDCC6\uDDC1-\uDDD7\uDE41-\uDE43\uDE60-\uDE6C\uDF3C-\uDF3E]|\uD807[\uDC41-\uDC45\uDC70\uDC71]|\uD809[\uDC70-\uDC74]|\uD81A[\uDE6E\uDE6F\uDEF5\uDF37-\uDF3B\uDF44]|\uD82F\uDC9F|\uD836[\uDE87-\uDE8B]|\uD83A[\uDD5E\uDD5F]/
 },{}],110:[function(require,module,exports){
 module.exports=/[ \xA0\u1680\u2000-\u200A\u202F\u205F\u3000]/
 },{}],111:[function(require,module,exports){
+'use strict';
 
-module.exports.Any = require('./properties/Any/regex');
-module.exports.Cc  = require('./categories/Cc/regex');
-module.exports.Cf  = require('./categories/Cf/regex');
-module.exports.P   = require('./categories/P/regex');
-module.exports.Z   = require('./categories/Z/regex');
+exports.Any = require('./properties/Any/regex');
+exports.Cc  = require('./categories/Cc/regex');
+exports.Cf  = require('./categories/Cf/regex');
+exports.P   = require('./categories/P/regex');
+exports.Z   = require('./categories/Z/regex');
 
 },{"./categories/Cc/regex":107,"./categories/Cf/regex":108,"./categories/P/regex":109,"./categories/Z/regex":110,"./properties/Any/regex":112}],112:[function(require,module,exports){
 module.exports=/[\0-\uD7FF\uE000-\uFFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/
@@ -24796,7 +25002,7 @@ auth.view = function(ctrl) {
 
 module.exports = auth
 
-},{"dropbox":9,"mithril":100}],114:[function(require,module,exports){
+},{"dropbox":6,"mithril":96}],114:[function(require,module,exports){
 'use strict'
 
 var Dropbox = require('dropbox')
@@ -24983,7 +25189,7 @@ app.view = function() {
   ]
 }
 
-},{"./auth":113,"./markdown-it-pathmod":115,"./starter":116,"dropbox":9,"markdown-it":42,"markdown-it-katex":41,"mithril":100,"query-string":104}],115:[function(require,module,exports){
+},{"./auth":113,"./markdown-it-pathmod":115,"./starter":116,"dropbox":6,"markdown-it":38,"markdown-it-katex":37,"mithril":96,"query-string":100}],115:[function(require,module,exports){
 /*! markdown-it-linkscheme v1.0.2 | MIT License | github.com/adam-p/markdown-it-linkscheme */
 
 var Dropbox = require('dropbox');
@@ -25043,7 +25249,7 @@ module.exports = function pathMod(md) {
   };
 };
 
-},{"dropbox":9}],116:[function(require,module,exports){
+},{"dropbox":6}],116:[function(require,module,exports){
 'use strict'
 
 var files = [
