@@ -3,6 +3,7 @@
 var Dropbox = require('dropbox')
 var md = require('markdown-it')()
          .use(require('./markdown-it-pathmod'))
+         .use(require('markdown-it-deflist'))
          .use(require('markdown-it-katex'))
 var queryString = require('query-string')
 
