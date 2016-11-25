@@ -11,7 +11,7 @@
 <script src="index.js"></script>
 <script>
 var CLIENT_ID = "pp9j3viewgqkjj0";
-var REDIRECT_URI = "https://makiwiki.github.io/";
+var REDIRECT_URI = location.hostname == "localhost" ? location.origin : "https://makiwiki.github.io/";
 Maki(CLIENT_ID, REDIRECT_URI);
 </script>
 </body>
