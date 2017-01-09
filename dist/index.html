@@ -11,8 +11,9 @@
 <script src="index.js"></script>
 <script>
 var CLIENT_ID = "pp9j3viewgqkjj0";
-var REDIRECT_URI = location.hostname == "localhost" ? location.origin : "https://makiwiki.github.io/";
-Maki(CLIENT_ID, REDIRECT_URI);
+var REDIRECT_URI = location.hostname == "localhost" ? location.origin : "https://makiwiki.github.io";
+var options = { "DEREFERRER_URI": "http://nolze.github.io/d/?" };
+Maki(CLIENT_ID, REDIRECT_URI, options);
 </script>
 </body>
 </html>

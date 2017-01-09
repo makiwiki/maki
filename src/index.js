@@ -1,10 +1,7 @@
 'use strict'
 
 var Dropbox = require('dropbox')
-var md = require('markdown-it')()
-         .use(require('./markdown-it-pathmod'))
-         .use(require('markdown-it-deflist'))
-         .use(require('markdown-it-katex'))
+var md = null
 var queryString = require('query-string')
 
 var starter = require('./starter')
@@ -15,7 +12,11 @@ m.route.mode = 'search'
 var app = {}
 var auth = require('./auth')
 
-window.Maki = function (CLIENT_ID, REDIRECT_URI) {
+window.Maki = function (CLIENT_ID, REDIRECT_URI, options) {
+  md = require('markdown-it')()
+           .use(require('./markdown-it-pathmod')(options.DEREFERRER_URI||""))
+           .use(require('markdown-it-deflist'))
+           .use(require('markdown-it-katex'))
   auth.config.CLIENT_ID = CLIENT_ID
   auth.config.REDIRECT_URI = REDIRECT_URI
   document.addEventListener("DOMContentLoaded", function(event) {
