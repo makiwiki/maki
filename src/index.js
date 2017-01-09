@@ -14,7 +14,7 @@ var auth = require('./auth')
 
 window.Maki = function (CLIENT_ID, REDIRECT_URI, options) {
   md = require('markdown-it')()
-           .use(require('./markdown-it-pathmod')(options.DEREFERRER_URI||""))
+           .use(require('./markdown-it-pathmod')(options.DEREFERRER_URI || ""))
            .use(require('markdown-it-deflist'))
            .use(require('markdown-it-katex'))
   auth.config.CLIENT_ID = CLIENT_ID
