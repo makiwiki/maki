@@ -7,7 +7,9 @@ var queryString = require('query-string')
 var starter = require('./starter')
 
 var m = require('mithril')
-m.route.mode = 'search'
+m.route.prefix("?")
+
+var prop = require("mithril/stream")
 
 var app = {}
 var auth = require('./auth')
@@ -20,6 +22,18 @@ window.Maki = function (CLIENT_ID, REDIRECT_URI, options) {
   auth.config.CLIENT_ID = CLIENT_ID
   auth.config.REDIRECT_URI = REDIRECT_URI
   document.addEventListener("DOMContentLoaded", function(event) {
+    if (location.pathname === '/') {
+      var a = document.createElement("a")
+      a.href = document.referrer
+      var ref = a.protocol + "//" + a.host + "/"
+      if ((ref === 'https://www.dropbox.com/' || ref === auth.config.REDIRECT_URI) &&
+          location.hash !== "") {
+        var token = queryString.parse(location.hash).access_token
+        setToken(token)
+        app.config = new app.Config({ 'token': getToken() })
+        starter.init(app.config)
+      }
+    }
     m.route(document.body, '/', {
       '/': app,
       '/:name...': app
@@ -32,8 +46,8 @@ app.Config = function(data) {
 }
 
 app.Page = function(data) {
-  this.name = m.prop("")
-  this.content = m.prop("")
+  this.name = prop("")
+  this.content = prop("")
 }
 
 app.vm = (function() {
@@ -63,7 +77,7 @@ app.renderPage = function(name) {
   })
   .catch(function(err) {
     console.log(err)
-    m.route("/HomePage?do=auth")
+    location.href = "/?/HomePage?do=auth"
   })
 }
 
@@ -98,7 +112,7 @@ app.listPages = function(base) {
   })
   .catch(function(err) {
     console.log(err)
-    m.route("/HomePage?do=auth")
+    location.href = "/?/HomePage?do=auth"
   })
 }
 
@@ -114,20 +128,9 @@ function removeToken() {
   localStorage.removeItem('token')
 }
 
-app.controller = function () {
-  if (m.route() === '/') {
-    var a = document.createElement("a")
-    a.href = document.referrer
-    var ref = a.protocol + "//" + a.host + "/"
-    // console.log(m.route(), document.referrer, location.hash, ref)
-    if ((ref === 'https://www.dropbox.com/' || ref === auth.config.REDIRECT_URI) &&
-        location.hash !== "") {
-      var token = queryString.parse(location.hash).access_token
-      setToken(token)
-      app.config = new app.Config({ 'token': getToken() })
-      starter.init(app.config)
-    }
-    m.route('/HomePage')
+app.oninit = function (vnode) {
+  if (m.route.get() === "/") {
+    location.href = "/?/HomePage"
   }
   var doArg = m.route.param("do")
   if (doArg === "auth") {
@@ -140,7 +143,7 @@ app.controller = function () {
     }
     removeToken()
     app.config = null
-    m.route('/HomePage')
+    location.href = "/?/HomePage"
   }
   else if (doArg === "index") {
     app.config = app.config || new app.Config({ 'token': getToken() })
@@ -152,7 +155,7 @@ app.controller = function () {
   else {
     app.config = app.config || new app.Config({ 'token': getToken() })
     app.vm.init()
-    var name = m.route().substr(1).replace(/\?.*$/, '')
+    var name = m.route.get().substr(1).replace(/\?.*$/, '')
     app.vm.page.name(name)
     document.title = name
     app.renderPage(name)
@@ -160,12 +163,15 @@ app.controller = function () {
 }
 
 app.view = function() {
-  var cur = m.route()
+  var cur = m.route.get()
   if (cur.indexOf("?") !== -1) {
     cur = "/?" + cur.substr(0, cur.indexOf("?"))
   }
   else {
     cur = "/?" + cur
+  }
+  if (app.vm.page === undefined) {
+    return []
   }
   return [
     m('div', { 'id': "main", 'class': "container grid-960" }, [

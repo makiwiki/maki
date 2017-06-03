@@ -1320,14 +1320,15 @@ return Promise;
 })));
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"_process":99}],3:[function(require,module,exports){
+},{"_process":103}],3:[function(require,module,exports){
 var request = require('superagent');
 var Promise = require('es6-promise').Promise;
+var getBaseURL = require('./get-base-url');
+var httpHeaderSafeJson = require('./http-header-safe-json');
 
 var buildCustomError;
 var downloadRequest;
 var nodeBinaryParser;
-var BASE_URL = 'https://content.dropboxapi.com/2/';
 
 // Register a handler that will instruct superagent how to parse the response
 request.parse['application/octect-stream'] = function (obj) {
@@ -1352,7 +1353,11 @@ nodeBinaryParser = function (res, done) {
   });
 };
 
-downloadRequest = function (path, args, accessToken, selectUser) {
+downloadRequest = function (path, args, auth, host, accessToken, selectUser) {
+  if (auth !== 'user') {
+    throw new Error('Unexpected auth type: ' + auth);
+  }
+
   var promiseFunction = function (resolve, reject) {
     var apiRequest;
 
@@ -1385,9 +1390,9 @@ downloadRequest = function (path, args, accessToken, selectUser) {
       }
     }
 
-    apiRequest = request.post(BASE_URL + path)
+    apiRequest = request.post(getBaseURL(host) + path)
       .set('Authorization', 'Bearer ' + accessToken)
-      .set('Dropbox-API-Arg', JSON.stringify(args))
+      .set('Dropbox-API-Arg', httpHeaderSafeJson(args))
       .on('request', function () {
         if (this.xhr) {
           this.xhr.responseType = 'blob';
@@ -1414,7 +1419,7 @@ downloadRequest = function (path, args, accessToken, selectUser) {
 
 module.exports = downloadRequest;
 
-},{"es6-promise":2,"superagent":104}],4:[function(require,module,exports){
+},{"./get-base-url":6,"./http-header-safe-json":7,"es6-promise":2,"superagent":108}],4:[function(require,module,exports){
 var REQUEST_CONSTANTS = require('./request-constants');
 var DropboxBase;
 
@@ -1505,15 +1510,90 @@ DropboxBase.prototype.getAuthenticationUrl = function (redirectUri, state) {
   return authUrl;
 };
 
-DropboxBase.prototype.request = function (path, args, host, style) {
-  if (style === REQUEST_CONSTANTS.RPC) {
-    return this.getRpcRequest()(path, args, this.getAccessToken(), this.selectUser);
-  } else if (style === REQUEST_CONSTANTS.DOWNLOAD) {
-    return this.getDownloadRequest()(path, args, this.getAccessToken(), this.selectUser);
-  } else if (style === REQUEST_CONSTANTS.UPLOAD) {
-    return this.getUploadRequest()(path, args, this.getAccessToken(), this.selectUser);
+/**
+ * Called when the authentication succeed
+ * @callback successCallback
+ * @param {string} access_token The application's access token
+ */
+
+/**
+ * Called when the authentication failed.
+ * @callback errorCallback
+ */
+
+/**
+ * An authentication process that works with cordova applications.
+ * @param {successCallback} successCallback
+ * @param {errorCallback} errorCallback 
+ */
+DropboxBase.prototype.authenticateWithCordova = function (successCallback, errorCallback)
+{
+  var redirect_url = 'https://www.dropbox.com/1/oauth2/redirect_receiver';
+  var url = this.getAuthenticationUrl(redirect_url);
+  var browser = window.open(url, '_blank');
+  var removed = false;
+
+  var onLoadError = function(event) {
+    // Try to avoid a browser crash on browser.close().
+    window.setTimeout(function() { browser.close() }, 10);
+    errorCallback();
   }
-  throw new Error('Invalid request type');
+
+  var onLoadStop = function(event) {
+    var error_label = '&error=';
+    var error_index = event.url.indexOf(error_label);
+
+    if (error_index > -1) {
+      // Try to avoid a browser crash on browser.close().
+      window.setTimeout(function() { browser.close() }, 10);
+      errorCallback();
+    } else { 
+      var access_token_label = '#access_token=';
+      var access_token_index = event.url.indexOf(access_token_label);
+      var token_type_index = event.url.indexOf('&token_type=');
+      if (access_token_index > -1) {
+        access_token_index += access_token_label.length;
+        // Try to avoid a browser crash on browser.close().
+        window.setTimeout(function() { browser.close() }, 10);
+
+        var access_token = event.url.substring(access_token_index, token_type_index);
+        successCallback(access_token);
+      }
+    }
+  };
+
+  var onExit = function(event) {
+    if(removed) {
+      return 
+    }
+    browser.removeEventListener('loaderror', onLoadError);
+    browser.removeEventListener('loadstop', onLoadStop);
+    browser.removeEventListener('exit', onExit);
+    removed = true
+  };
+  
+  browser.addEventListener('loaderror', onLoadError);
+  browser.addEventListener('loadstop', onLoadStop);
+  browser.addEventListener('exit', onExit)
+}
+
+DropboxBase.prototype.request = function (path, args, auth, host, style) {
+  var request = null;
+  switch (style) {
+    case REQUEST_CONSTANTS.RPC:
+      request = this.getRpcRequest();
+      break;
+    case REQUEST_CONSTANTS.DOWNLOAD:
+      request = this.getDownloadRequest();
+      break;
+    case REQUEST_CONSTANTS.UPLOAD:
+      request = this.getUploadRequest();
+      break;
+    default:
+      throw new Error('Invalid request style: ' + style);
+  }
+
+  return request(path, args, auth, host, this.getAccessToken(), this.selectUser);
 };
 
 DropboxBase.prototype.setRpcRequest = function (newRpcRequest) {
@@ -1554,7 +1634,7 @@ DropboxBase.prototype.getUploadRequest = function () {
 
 module.exports = DropboxBase;
 
-},{"./download-request":3,"./object-assign-polyfill":7,"./request-constants":8,"./rpc-request":10,"./upload-request":11}],5:[function(require,module,exports){
+},{"./download-request":3,"./object-assign-polyfill":9,"./request-constants":10,"./rpc-request":12,"./upload-request":13}],5:[function(require,module,exports){
 var DropboxBase = require('./dropbox-base');
 var routes = require('./routes');
 var Dropbox;
@@ -1589,12 +1669,31 @@ Dropbox.prototype.filesGetSharedLinkFile = function (arg) {
 
 module.exports = Dropbox;
 
-},{"./dropbox-base":4,"./routes":9}],6:[function(require,module,exports){
+},{"./dropbox-base":4,"./routes":11}],6:[function(require,module,exports){
+function getBaseURL(host) {
+  return 'https://' + host + '.dropboxapi.com/2/';
+}
+
+module.exports = getBaseURL;
+
+},{}],7:[function(require,module,exports){
+// source https://www.dropboxforum.com/t5/API-support/HTTP-header-quot-Dropbox-API-Arg-quot-could-not-decode-input-as/m-p/173823/highlight/true#M6786
+var charsToEncode = /[\u007f-\uffff]/g;
+
+function httpHeaderSafeJson(args) {
+  return JSON.stringify(args).replace(charsToEncode, function (c) {
+    return '\\u' + ('000' + c.charCodeAt(0).toString(16)).slice(-4);
+  });
+}
+
+module.exports = httpHeaderSafeJson;
+
+},{}],8:[function(require,module,exports){
 var Dropbox = require('./dropbox');
 
 module.exports = Dropbox;
 
-},{"./dropbox":5}],7:[function(require,module,exports){
+},{"./dropbox":5}],9:[function(require,module,exports){
 // Polyfill object.assign for legacy browsers
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/assign
 if (typeof Object.assign !== 'function') {
@@ -1625,7 +1724,7 @@ if (typeof Object.assign !== 'function') {
   }());
 }
 
-},{}],8:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 var REQUEST_CONSTANTS = {
   RPC: 'rpc',
   DOWNLOAD: 'download',
@@ -1634,9 +1733,19 @@ var REQUEST_CONSTANTS = {
 
 module.exports = REQUEST_CONSTANTS;
 
-},{}],9:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 // Auto-generated by Stone, do not modify.
 var routes = {};
+
+/**
+ * Creates an OAuth 2.0 access token from the supplied OAuth 1.0 access token.
+ * @function Dropbox#authTokenFromOauth1
+ * @arg {AuthTokenFromOAuth1Arg} arg - The request parameters.
+ * @returns {Promise.<AuthTokenFromOAuth1Result, Error.<AuthTokenFromOAuth1Error>>}
+ */
+routes.authTokenFromOauth1 = function (arg) {
+  return this.request('auth/token/from_oauth1', arg, 'app', 'api', 'rpc');
+};
 
 /**
  * Disables the access token used to authenticate the call.
@@ -1645,7 +1754,7 @@ var routes = {};
  * @returns {Promise.<void, Error.<void>>}
  */
 routes.authTokenRevoke = function (arg) {
-  return this.request('auth/token/revoke', arg, 'api', 'rpc');
+  return this.request('auth/token/revoke', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1657,7 +1766,7 @@ routes.authTokenRevoke = function (arg) {
  * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesAlphaGetMetadataError>>}
  */
 routes.filesAlphaGetMetadata = function (arg) {
-  return this.request('files/alpha/get_metadata', arg, 'api', 'rpc');
+  return this.request('files/alpha/get_metadata', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1670,7 +1779,7 @@ routes.filesAlphaGetMetadata = function (arg) {
  * @returns {Promise.<FilesFileMetadata, Error.<FilesUploadErrorWithProperties>>}
  */
 routes.filesAlphaUpload = function (arg) {
-  return this.request('files/alpha/upload', arg, 'content', 'upload');
+  return this.request('files/alpha/upload', arg, 'user', 'content', 'upload');
 };
 
 /**
@@ -1681,7 +1790,7 @@ routes.filesAlphaUpload = function (arg) {
  * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesRelocationError>>}
  */
 routes.filesCopy = function (arg) {
-  return this.request('files/copy', arg, 'api', 'rpc');
+  return this.request('files/copy', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1694,10 +1803,10 @@ routes.filesCopy = function (arg) {
  * background. Please use copy_batch/check to check the job status.
  * @function Dropbox#filesCopyBatch
  * @arg {FilesRelocationBatchArg} arg - The request parameters.
- * @returns {Promise.<AsyncLaunchEmptyResult, Error.<void>>}
+ * @returns {Promise.<FilesRelocationBatchLaunch, Error.<void>>}
  */
 routes.filesCopyBatch = function (arg) {
-  return this.request('files/copy_batch', arg, 'api', 'rpc');
+  return this.request('files/copy_batch', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1708,7 +1817,7 @@ routes.filesCopyBatch = function (arg) {
  * @returns {Promise.<FilesRelocationBatchJobStatus, Error.<AsyncPollError>>}
  */
 routes.filesCopyBatchCheck = function (arg) {
-  return this.request('files/copy_batch/check', arg, 'api', 'rpc');
+  return this.request('files/copy_batch/check', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1720,7 +1829,7 @@ routes.filesCopyBatchCheck = function (arg) {
  * @returns {Promise.<FilesGetCopyReferenceResult, Error.<FilesGetCopyReferenceError>>}
  */
 routes.filesCopyReferenceGet = function (arg) {
-  return this.request('files/copy_reference/get', arg, 'api', 'rpc');
+  return this.request('files/copy_reference/get', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1730,7 +1839,7 @@ routes.filesCopyReferenceGet = function (arg) {
  * @returns {Promise.<FilesSaveCopyReferenceResult, Error.<FilesSaveCopyReferenceError>>}
  */
 routes.filesCopyReferenceSave = function (arg) {
-  return this.request('files/copy_reference/save', arg, 'api', 'rpc');
+  return this.request('files/copy_reference/save', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1740,7 +1849,7 @@ routes.filesCopyReferenceSave = function (arg) {
  * @returns {Promise.<FilesFolderMetadata, Error.<FilesCreateFolderError>>}
  */
 routes.filesCreateFolder = function (arg) {
-  return this.request('files/create_folder', arg, 'api', 'rpc');
+  return this.request('files/create_folder', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1754,7 +1863,7 @@ routes.filesCreateFolder = function (arg) {
  * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesDeleteError>>}
  */
 routes.filesDelete = function (arg) {
-  return this.request('files/delete', arg, 'api', 'rpc');
+  return this.request('files/delete', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1763,10 +1872,10 @@ routes.filesDelete = function (arg) {
  * delete_batch/check to check the job status.
  * @function Dropbox#filesDeleteBatch
  * @arg {FilesDeleteBatchArg} arg - The request parameters.
- * @returns {Promise.<AsyncLaunchEmptyResult, Error.<void>>}
+ * @returns {Promise.<FilesDeleteBatchLaunch, Error.<void>>}
  */
 routes.filesDeleteBatch = function (arg) {
-  return this.request('files/delete_batch', arg, 'api', 'rpc');
+  return this.request('files/delete_batch', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1777,7 +1886,7 @@ routes.filesDeleteBatch = function (arg) {
  * @returns {Promise.<FilesDeleteBatchJobStatus, Error.<AsyncPollError>>}
  */
 routes.filesDeleteBatchCheck = function (arg) {
-  return this.request('files/delete_batch/check', arg, 'api', 'rpc');
+  return this.request('files/delete_batch/check', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1787,7 +1896,7 @@ routes.filesDeleteBatchCheck = function (arg) {
  * @returns {Promise.<FilesFileMetadata, Error.<FilesDownloadError>>}
  */
 routes.filesDownload = function (arg) {
-  return this.request('files/download', arg, 'content', 'download');
+  return this.request('files/download', arg, 'user', 'content', 'download');
 };
 
 /**
@@ -1798,19 +1907,21 @@ routes.filesDownload = function (arg) {
  * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesGetMetadataError>>}
  */
 routes.filesGetMetadata = function (arg) {
-  return this.request('files/get_metadata', arg, 'api', 'rpc');
+  return this.request('files/get_metadata', arg, 'user', 'api', 'rpc');
 };
 
 /**
- * Get a preview for a file. Currently previews are only generated for the files
- * with  the following extensions: .doc, .docx, .docm, .ppt, .pps, .ppsx, .ppsm,
- * .pptx, .pptm,  .xls, .xlsx, .xlsm, .rtf.
+ * Get a preview for a file. Currently, PDF previews are generated for files
+ * with the following extensions: .ai, .doc, .docm, .docx, .eps, .odp, .odt,
+ * .pps, .ppsm, .ppsx, .ppt, .pptm, .pptx, .rtf. HTML previews are generated for
+ * files with the following extensions: .csv, .ods, .xls, .xlsm, .xlsx. Other
+ * formats will return an unsupported extension error.
  * @function Dropbox#filesGetPreview
  * @arg {FilesPreviewArg} arg - The request parameters.
  * @returns {Promise.<FilesFileMetadata, Error.<FilesPreviewError>>}
  */
 routes.filesGetPreview = function (arg) {
-  return this.request('files/get_preview', arg, 'content', 'download');
+  return this.request('files/get_preview', arg, 'user', 'content', 'download');
 };
 
 /**
@@ -1822,7 +1933,7 @@ routes.filesGetPreview = function (arg) {
  * @returns {Promise.<FilesGetTemporaryLinkResult, Error.<FilesGetTemporaryLinkError>>}
  */
 routes.filesGetTemporaryLink = function (arg) {
-  return this.request('files/get_temporary_link', arg, 'api', 'rpc');
+  return this.request('files/get_temporary_link', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1834,7 +1945,7 @@ routes.filesGetTemporaryLink = function (arg) {
  * @returns {Promise.<FilesFileMetadata, Error.<FilesThumbnailError>>}
  */
 routes.filesGetThumbnail = function (arg) {
-  return this.request('files/get_thumbnail', arg, 'content', 'download');
+  return this.request('files/get_thumbnail', arg, 'user', 'content', 'download');
 };
 
 /**
@@ -1853,13 +1964,17 @@ routes.filesGetThumbnail = function (arg) {
  * are. Check the new entry's FolderSharingInfo.read_only and set all its
  * children's read-only statuses to match. For each DeletedMetadata, if your
  * local state has something at the given path, remove it and all its children.
- * If there's nothing at the given path, ignore this entry.
+ * If there's nothing at the given path, ignore this entry. Note:
+ * auth.RateLimitError may be returned if multiple list_folder or
+ * list_folder/continue calls with same parameters are made simultaneously by
+ * same API app for same user. If your app implements retry logic, please hold
+ * off the retry until the previous request finishes.
  * @function Dropbox#filesListFolder
  * @arg {FilesListFolderArg} arg - The request parameters.
  * @returns {Promise.<FilesListFolderResult, Error.<FilesListFolderError>>}
  */
 routes.filesListFolder = function (arg) {
-  return this.request('files/list_folder', arg, 'api', 'rpc');
+  return this.request('files/list_folder', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1871,7 +1986,7 @@ routes.filesListFolder = function (arg) {
  * @returns {Promise.<FilesListFolderResult, Error.<FilesListFolderContinueError>>}
  */
 routes.filesListFolderContinue = function (arg) {
-  return this.request('files/list_folder/continue', arg, 'api', 'rpc');
+  return this.request('files/list_folder/continue', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1884,7 +1999,7 @@ routes.filesListFolderContinue = function (arg) {
  * @returns {Promise.<FilesListFolderGetLatestCursorResult, Error.<FilesListFolderError>>}
  */
 routes.filesListFolderGetLatestCursor = function (arg) {
-  return this.request('files/list_folder/get_latest_cursor', arg, 'api', 'rpc');
+  return this.request('files/list_folder/get_latest_cursor', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1899,7 +2014,7 @@ routes.filesListFolderGetLatestCursor = function (arg) {
  * @returns {Promise.<FilesListFolderLongpollResult, Error.<FilesListFolderLongpollError>>}
  */
 routes.filesListFolderLongpoll = function (arg) {
-  return this.request('files/list_folder/longpoll', arg, 'notify', 'rpc');
+  return this.request('files/list_folder/longpoll', arg, 'noauth', 'notify', 'rpc');
 };
 
 /**
@@ -1909,7 +2024,7 @@ routes.filesListFolderLongpoll = function (arg) {
  * @returns {Promise.<FilesListRevisionsResult, Error.<FilesListRevisionsError>>}
  */
 routes.filesListRevisions = function (arg) {
-  return this.request('files/list_revisions', arg, 'api', 'rpc');
+  return this.request('files/list_revisions', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1920,7 +2035,7 @@ routes.filesListRevisions = function (arg) {
  * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesRelocationError>>}
  */
 routes.filesMove = function (arg) {
-  return this.request('files/move', arg, 'api', 'rpc');
+  return this.request('files/move', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1931,10 +2046,10 @@ routes.filesMove = function (arg) {
  * the job status.
  * @function Dropbox#filesMoveBatch
  * @arg {FilesRelocationBatchArg} arg - The request parameters.
- * @returns {Promise.<AsyncLaunchEmptyResult, Error.<void>>}
+ * @returns {Promise.<FilesRelocationBatchLaunch, Error.<void>>}
  */
 routes.filesMoveBatch = function (arg) {
-  return this.request('files/move_batch', arg, 'api', 'rpc');
+  return this.request('files/move_batch', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1945,7 +2060,7 @@ routes.filesMoveBatch = function (arg) {
  * @returns {Promise.<FilesRelocationBatchJobStatus, Error.<AsyncPollError>>}
  */
 routes.filesMoveBatchCheck = function (arg) {
-  return this.request('files/move_batch/check', arg, 'api', 'rpc');
+  return this.request('files/move_batch/check', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1957,7 +2072,7 @@ routes.filesMoveBatchCheck = function (arg) {
  * @returns {Promise.<void, Error.<FilesDeleteError>>}
  */
 routes.filesPermanentlyDelete = function (arg) {
-  return this.request('files/permanently_delete', arg, 'api', 'rpc');
+  return this.request('files/permanently_delete', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1968,7 +2083,7 @@ routes.filesPermanentlyDelete = function (arg) {
  * @returns {Promise.<void, Error.<FilesAddPropertiesError>>}
  */
 routes.filesPropertiesAdd = function (arg) {
-  return this.request('files/properties/add', arg, 'api', 'rpc');
+  return this.request('files/properties/add', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1978,7 +2093,7 @@ routes.filesPropertiesAdd = function (arg) {
  * @returns {Promise.<void, Error.<FilesInvalidPropertyGroupError>>}
  */
 routes.filesPropertiesOverwrite = function (arg) {
-  return this.request('files/properties/overwrite', arg, 'api', 'rpc');
+  return this.request('files/properties/overwrite', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -1991,7 +2106,7 @@ routes.filesPropertiesOverwrite = function (arg) {
  * @returns {Promise.<void, Error.<FilesRemovePropertiesError>>}
  */
 routes.filesPropertiesRemove = function (arg) {
-  return this.request('files/properties/remove', arg, 'api', 'rpc');
+  return this.request('files/properties/remove', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2001,7 +2116,7 @@ routes.filesPropertiesRemove = function (arg) {
  * @returns {Promise.<PropertiesGetPropertyTemplateResult, Error.<PropertiesPropertyTemplateError>>}
  */
 routes.filesPropertiesTemplateGet = function (arg) {
-  return this.request('files/properties/template/get', arg, 'api', 'rpc');
+  return this.request('files/properties/template/get', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2012,7 +2127,7 @@ routes.filesPropertiesTemplateGet = function (arg) {
  * @returns {Promise.<PropertiesListPropertyTemplateIds, Error.<PropertiesPropertyTemplateError>>}
  */
 routes.filesPropertiesTemplateList = function (arg) {
-  return this.request('files/properties/template/list', arg, 'api', 'rpc');
+  return this.request('files/properties/template/list', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2024,7 +2139,7 @@ routes.filesPropertiesTemplateList = function (arg) {
  * @returns {Promise.<void, Error.<FilesUpdatePropertiesError>>}
  */
 routes.filesPropertiesUpdate = function (arg) {
-  return this.request('files/properties/update', arg, 'api', 'rpc');
+  return this.request('files/properties/update', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2034,7 +2149,7 @@ routes.filesPropertiesUpdate = function (arg) {
  * @returns {Promise.<FilesFileMetadata, Error.<FilesRestoreError>>}
  */
 routes.filesRestore = function (arg) {
-  return this.request('files/restore', arg, 'api', 'rpc');
+  return this.request('files/restore', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2045,7 +2160,7 @@ routes.filesRestore = function (arg) {
  * @returns {Promise.<FilesSaveUrlResult, Error.<FilesSaveUrlError>>}
  */
 routes.filesSaveUrl = function (arg) {
-  return this.request('files/save_url', arg, 'api', 'rpc');
+  return this.request('files/save_url', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2055,7 +2170,7 @@ routes.filesSaveUrl = function (arg) {
  * @returns {Promise.<FilesSaveUrlJobStatus, Error.<AsyncPollError>>}
  */
 routes.filesSaveUrlCheckJobStatus = function (arg) {
-  return this.request('files/save_url/check_job_status', arg, 'api', 'rpc');
+  return this.request('files/save_url/check_job_status', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2066,7 +2181,7 @@ routes.filesSaveUrlCheckJobStatus = function (arg) {
  * @returns {Promise.<FilesSearchResult, Error.<FilesSearchError>>}
  */
 routes.filesSearch = function (arg) {
-  return this.request('files/search', arg, 'api', 'rpc');
+  return this.request('files/search', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2078,42 +2193,42 @@ routes.filesSearch = function (arg) {
  * @returns {Promise.<FilesFileMetadata, Error.<FilesUploadError>>}
  */
 routes.filesUpload = function (arg) {
-  return this.request('files/upload', arg, 'content', 'upload');
+  return this.request('files/upload', arg, 'user', 'content', 'upload');
 };
 
 /**
  * Append more data to an upload session. A single request should not upload
- * more than 150 MB of file contents.
+ * more than 150 MB.
  * @function Dropbox#filesUploadSessionAppend
  * @deprecated
  * @arg {FilesUploadSessionCursor} arg - The request parameters.
  * @returns {Promise.<void, Error.<FilesUploadSessionLookupError>>}
  */
 routes.filesUploadSessionAppend = function (arg) {
-  return this.request('files/upload_session/append', arg, 'content', 'upload');
+  return this.request('files/upload_session/append', arg, 'user', 'content', 'upload');
 };
 
 /**
  * Append more data to an upload session. When the parameter close is set, this
  * call will close the session. A single request should not upload more than 150
- * MB of file contents.
+ * MB.
  * @function Dropbox#filesUploadSessionAppendV2
  * @arg {FilesUploadSessionAppendArg} arg - The request parameters.
  * @returns {Promise.<void, Error.<FilesUploadSessionLookupError>>}
  */
 routes.filesUploadSessionAppendV2 = function (arg) {
-  return this.request('files/upload_session/append_v2', arg, 'content', 'upload');
+  return this.request('files/upload_session/append_v2', arg, 'user', 'content', 'upload');
 };
 
 /**
  * Finish an upload session and save the uploaded data to the given file path. A
- * single request should not upload more than 150 MB of file contents.
+ * single request should not upload more than 150 MB.
  * @function Dropbox#filesUploadSessionFinish
  * @arg {FilesUploadSessionFinishArg} arg - The request parameters.
  * @returns {Promise.<FilesFileMetadata, Error.<FilesUploadSessionFinishError>>}
  */
 routes.filesUploadSessionFinish = function (arg) {
-  return this.request('files/upload_session/finish', arg, 'content', 'upload');
+  return this.request('files/upload_session/finish', arg, 'user', 'content', 'upload');
 };
 
 /**
@@ -2131,10 +2246,10 @@ routes.filesUploadSessionFinish = function (arg) {
  * 1000 entries in a single request.
  * @function Dropbox#filesUploadSessionFinishBatch
  * @arg {FilesUploadSessionFinishBatchArg} arg - The request parameters.
- * @returns {Promise.<AsyncLaunchEmptyResult, Error.<void>>}
+ * @returns {Promise.<FilesUploadSessionFinishBatchLaunch, Error.<void>>}
  */
 routes.filesUploadSessionFinishBatch = function (arg) {
-  return this.request('files/upload_session/finish_batch', arg, 'api', 'rpc');
+  return this.request('files/upload_session/finish_batch', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2145,7 +2260,7 @@ routes.filesUploadSessionFinishBatch = function (arg) {
  * @returns {Promise.<FilesUploadSessionFinishBatchJobStatus, Error.<AsyncPollError>>}
  */
 routes.filesUploadSessionFinishBatchCheck = function (arg) {
-  return this.request('files/upload_session/finish_batch/check', arg, 'api', 'rpc');
+  return this.request('files/upload_session/finish_batch/check', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2154,13 +2269,182 @@ routes.filesUploadSessionFinishBatchCheck = function (arg) {
  * starts a new upload session with the given data. You can then use
  * upload_session/append_v2 to add more data and upload_session/finish to save
  * all the data to a file in Dropbox. A single request should not upload more
- * than 150 MB of file contents.
+ * than 150 MB. An upload session can be used for a maximum of 48 hours.
+ * Attempting to use an UploadSessionStartResult.session_id with
+ * upload_session/append_v2 or upload_session/finish more than 48 hours after
+ * its creation will return a UploadSessionLookupError.not_found.
  * @function Dropbox#filesUploadSessionStart
  * @arg {FilesUploadSessionStartArg} arg - The request parameters.
  * @returns {Promise.<FilesUploadSessionStartResult, Error.<void>>}
  */
 routes.filesUploadSessionStart = function (arg) {
-  return this.request('files/upload_session/start', arg, 'content', 'upload');
+  return this.request('files/upload_session/start', arg, 'user', 'content', 'upload');
+};
+
+/**
+ * Marks the given Paper doc as archived. Note: This action can be performed or
+ * undone by anyone with edit permissions to the doc.
+ * @function Dropbox#paperDocsArchive
+ * @arg {PaperRefPaperDoc} arg - The request parameters.
+ * @returns {Promise.<void, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsArchive = function (arg) {
+  return this.request('paper/docs/archive', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Exports and downloads Paper doc either as HTML or markdown.
+ * @function Dropbox#paperDocsDownload
+ * @arg {PaperPaperDocExport} arg - The request parameters.
+ * @returns {Promise.<PaperPaperDocExportResult, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsDownload = function (arg) {
+  return this.request('paper/docs/download', arg, 'user', 'api', 'download');
+};
+
+/**
+ * Lists the users who are explicitly invited to the Paper folder in which the
+ * Paper doc is contained. For private folders all users (including owner)
+ * shared on the folder are listed and for team folders all non-team users
+ * shared on the folder are returned.
+ * @function Dropbox#paperDocsFolderUsersList
+ * @arg {PaperListUsersOnFolderArgs} arg - The request parameters.
+ * @returns {Promise.<PaperListUsersOnFolderResponse, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsFolderUsersList = function (arg) {
+  return this.request('paper/docs/folder_users/list', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Once a cursor has been retrieved from docs/folder_users/list, use this to
+ * paginate through all users on the Paper folder.
+ * @function Dropbox#paperDocsFolderUsersListContinue
+ * @arg {PaperListUsersOnFolderContinueArgs} arg - The request parameters.
+ * @returns {Promise.<PaperListUsersOnFolderResponse, Error.<PaperListUsersCursorError>>}
+ */
+routes.paperDocsFolderUsersListContinue = function (arg) {
+  return this.request('paper/docs/folder_users/list/continue', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Retrieves folder information for the given Paper doc. This includes:   -
+ * folder sharing policy; permissions for subfolders are set by the top-level
+ * folder.   - full 'filepath', i.e. the list of folders (both folderId and
+ * folderName) from the root folder to the folder directly containing the Paper
+ * doc.  Note: If the Paper doc is not in any folder (aka unfiled) the response
+ * will be empty.
+ * @function Dropbox#paperDocsGetFolderInfo
+ * @arg {PaperRefPaperDoc} arg - The request parameters.
+ * @returns {Promise.<PaperFoldersContainingPaperDoc, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsGetFolderInfo = function (arg) {
+  return this.request('paper/docs/get_folder_info', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Return the list of all Paper docs according to the argument specifications.
+ * To iterate over through the full pagination, pass the cursor to
+ * docs/list/continue.
+ * @function Dropbox#paperDocsList
+ * @arg {PaperListPaperDocsArgs} arg - The request parameters.
+ * @returns {Promise.<PaperListPaperDocsResponse, Error.<void>>}
+ */
+routes.paperDocsList = function (arg) {
+  return this.request('paper/docs/list', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Once a cursor has been retrieved from docs/list, use this to paginate through
+ * all Paper doc.
+ * @function Dropbox#paperDocsListContinue
+ * @arg {PaperListPaperDocsContinueArgs} arg - The request parameters.
+ * @returns {Promise.<PaperListPaperDocsResponse, Error.<PaperListDocsCursorError>>}
+ */
+routes.paperDocsListContinue = function (arg) {
+  return this.request('paper/docs/list/continue', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Permanently deletes the given Paper doc. This operation is final as the doc
+ * cannot be recovered.  Note: This action can be performed only by the doc
+ * owner.
+ * @function Dropbox#paperDocsPermanentlyDelete
+ * @arg {PaperRefPaperDoc} arg - The request parameters.
+ * @returns {Promise.<void, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsPermanentlyDelete = function (arg) {
+  return this.request('paper/docs/permanently_delete', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Gets the default sharing policy for the given Paper doc.
+ * @function Dropbox#paperDocsSharingPolicyGet
+ * @arg {PaperRefPaperDoc} arg - The request parameters.
+ * @returns {Promise.<PaperSharingPolicy, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsSharingPolicyGet = function (arg) {
+  return this.request('paper/docs/sharing_policy/get', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Sets the default sharing policy for the given Paper doc. The default
+ * 'team_sharing_policy' can be changed only by teams, omit this field for
+ * personal accounts.  Note: 'public_sharing_policy' cannot be set to the value
+ * 'disabled' because this setting can be changed only via the team admin
+ * console.
+ * @function Dropbox#paperDocsSharingPolicySet
+ * @arg {PaperPaperDocSharingPolicy} arg - The request parameters.
+ * @returns {Promise.<void, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsSharingPolicySet = function (arg) {
+  return this.request('paper/docs/sharing_policy/set', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Allows an owner or editor to add users to a Paper doc or change their
+ * permissions using their email address or Dropbox account ID.  Note: The Doc
+ * owner's permissions cannot be changed.
+ * @function Dropbox#paperDocsUsersAdd
+ * @arg {PaperAddPaperDocUser} arg - The request parameters.
+ * @returns {Promise.<Array.<PaperAddPaperDocUserMemberResult>, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsUsersAdd = function (arg) {
+  return this.request('paper/docs/users/add', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Lists all users who visited the Paper doc or users with explicit access. This
+ * call excludes users who have been removed. The list is sorted by the date of
+ * the visit or the share date. The list will include both users, the explicitly
+ * shared ones as well as those who came in using the Paper url link.
+ * @function Dropbox#paperDocsUsersList
+ * @arg {PaperListUsersOnPaperDocArgs} arg - The request parameters.
+ * @returns {Promise.<PaperListUsersOnPaperDocResponse, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsUsersList = function (arg) {
+  return this.request('paper/docs/users/list', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Once a cursor has been retrieved from docs/users/list, use this to paginate
+ * through all users on the Paper doc.
+ * @function Dropbox#paperDocsUsersListContinue
+ * @arg {PaperListUsersOnPaperDocContinueArgs} arg - The request parameters.
+ * @returns {Promise.<PaperListUsersOnPaperDocResponse, Error.<PaperListUsersCursorError>>}
+ */
+routes.paperDocsUsersListContinue = function (arg) {
+  return this.request('paper/docs/users/list/continue', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Allows an owner or editor to remove users from a Paper doc using their email
+ * address or Dropbox account ID.  Note: Doc owner cannot be removed.
+ * @function Dropbox#paperDocsUsersRemove
+ * @arg {PaperRemovePaperDocUser} arg - The request parameters.
+ * @returns {Promise.<void, Error.<PaperDocLookupError>>}
+ */
+routes.paperDocsUsersRemove = function (arg) {
+  return this.request('paper/docs/users/remove', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2170,7 +2454,7 @@ routes.filesUploadSessionStart = function (arg) {
  * @returns {Promise.<Array.<SharingFileMemberActionResult>, Error.<SharingAddFileMemberError>>}
  */
 routes.sharingAddFileMember = function (arg) {
-  return this.request('sharing/add_file_member', arg, 'api', 'rpc');
+  return this.request('sharing/add_file_member', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2183,17 +2467,18 @@ routes.sharingAddFileMember = function (arg) {
  * @returns {Promise.<void, Error.<SharingAddFolderMemberError>>}
  */
 routes.sharingAddFolderMember = function (arg) {
-  return this.request('sharing/add_folder_member', arg, 'api', 'rpc');
+  return this.request('sharing/add_folder_member', arg, 'user', 'api', 'rpc');
 };
 
 /**
- * Changes a member's access on a shared file.
+ * Identical to update_file_member but with less information returned.
  * @function Dropbox#sharingChangeFileMemberAccess
+ * @deprecated
  * @arg {SharingChangeFileMemberAccessArgs} arg - The request parameters.
  * @returns {Promise.<SharingFileMemberActionResult, Error.<SharingFileMemberActionError>>}
  */
 routes.sharingChangeFileMemberAccess = function (arg) {
-  return this.request('sharing/change_file_member_access', arg, 'api', 'rpc');
+  return this.request('sharing/change_file_member_access', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2204,7 +2489,7 @@ routes.sharingChangeFileMemberAccess = function (arg) {
  * @returns {Promise.<SharingJobStatus, Error.<AsyncPollError>>}
  */
 routes.sharingCheckJobStatus = function (arg) {
-  return this.request('sharing/check_job_status', arg, 'api', 'rpc');
+  return this.request('sharing/check_job_status', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2215,7 +2500,7 @@ routes.sharingCheckJobStatus = function (arg) {
  * @returns {Promise.<SharingRemoveMemberJobStatus, Error.<AsyncPollError>>}
  */
 routes.sharingCheckRemoveMemberJobStatus = function (arg) {
-  return this.request('sharing/check_remove_member_job_status', arg, 'api', 'rpc');
+  return this.request('sharing/check_remove_member_job_status', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2226,7 +2511,7 @@ routes.sharingCheckRemoveMemberJobStatus = function (arg) {
  * @returns {Promise.<SharingShareFolderJobStatus, Error.<AsyncPollError>>}
  */
 routes.sharingCheckShareJobStatus = function (arg) {
-  return this.request('sharing/check_share_job_status', arg, 'api', 'rpc');
+  return this.request('sharing/check_share_job_status', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2244,7 +2529,7 @@ routes.sharingCheckShareJobStatus = function (arg) {
  * @returns {Promise.<SharingPathLinkMetadata, Error.<SharingCreateSharedLinkError>>}
  */
 routes.sharingCreateSharedLink = function (arg) {
-  return this.request('sharing/create_shared_link', arg, 'api', 'rpc');
+  return this.request('sharing/create_shared_link', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2256,7 +2541,7 @@ routes.sharingCreateSharedLink = function (arg) {
  * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingCreateSharedLinkWithSettingsError>>}
  */
 routes.sharingCreateSharedLinkWithSettings = function (arg) {
-  return this.request('sharing/create_shared_link_with_settings', arg, 'api', 'rpc');
+  return this.request('sharing/create_shared_link_with_settings', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2266,7 +2551,7 @@ routes.sharingCreateSharedLinkWithSettings = function (arg) {
  * @returns {Promise.<SharingSharedFileMetadata, Error.<SharingGetFileMetadataError>>}
  */
 routes.sharingGetFileMetadata = function (arg) {
-  return this.request('sharing/get_file_metadata', arg, 'api', 'rpc');
+  return this.request('sharing/get_file_metadata', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2276,7 +2561,7 @@ routes.sharingGetFileMetadata = function (arg) {
  * @returns {Promise.<Array.<SharingGetFileMetadataBatchResult>, Error.<SharingSharingUserError>>}
  */
 routes.sharingGetFileMetadataBatch = function (arg) {
-  return this.request('sharing/get_file_metadata/batch', arg, 'api', 'rpc');
+  return this.request('sharing/get_file_metadata/batch', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2287,7 +2572,7 @@ routes.sharingGetFileMetadataBatch = function (arg) {
  * @returns {Promise.<SharingSharedFolderMetadata, Error.<SharingSharedFolderAccessError>>}
  */
 routes.sharingGetFolderMetadata = function (arg) {
-  return this.request('sharing/get_folder_metadata', arg, 'api', 'rpc');
+  return this.request('sharing/get_folder_metadata', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2297,7 +2582,7 @@ routes.sharingGetFolderMetadata = function (arg) {
  * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingGetSharedLinkFileError>>}
  */
 routes.sharingGetSharedLinkFile = function (arg) {
-  return this.request('sharing/get_shared_link_file', arg, 'content', 'download');
+  return this.request('sharing/get_shared_link_file', arg, 'user', 'content', 'download');
 };
 
 /**
@@ -2307,7 +2592,7 @@ routes.sharingGetSharedLinkFile = function (arg) {
  * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingSharedLinkError>>}
  */
 routes.sharingGetSharedLinkMetadata = function (arg) {
-  return this.request('sharing/get_shared_link_metadata', arg, 'api', 'rpc');
+  return this.request('sharing/get_shared_link_metadata', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2323,7 +2608,7 @@ routes.sharingGetSharedLinkMetadata = function (arg) {
  * @returns {Promise.<SharingGetSharedLinksResult, Error.<SharingGetSharedLinksError>>}
  */
 routes.sharingGetSharedLinks = function (arg) {
-  return this.request('sharing/get_shared_links', arg, 'api', 'rpc');
+  return this.request('sharing/get_shared_links', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2334,21 +2619,21 @@ routes.sharingGetSharedLinks = function (arg) {
  * @returns {Promise.<SharingSharedFileMembers, Error.<SharingListFileMembersError>>}
  */
 routes.sharingListFileMembers = function (arg) {
-  return this.request('sharing/list_file_members', arg, 'api', 'rpc');
+  return this.request('sharing/list_file_members', arg, 'user', 'api', 'rpc');
 };
 
 /**
  * Get members of multiple files at once. The arguments to this route are more
  * limited, and the limit on query result size per file is more strict. To
  * customize the results more, use the individual file endpoint. Inherited users
- * are not included in the result, and permissions are not returned for this
- * endpoint.
+ * and groups are not included in the result, and permissions are not returned
+ * for this endpoint.
  * @function Dropbox#sharingListFileMembersBatch
  * @arg {SharingListFileMembersBatchArg} arg - The request parameters.
  * @returns {Promise.<Array.<SharingListFileMembersBatchResult>, Error.<SharingSharingUserError>>}
  */
 routes.sharingListFileMembersBatch = function (arg) {
-  return this.request('sharing/list_file_members/batch', arg, 'api', 'rpc');
+  return this.request('sharing/list_file_members/batch', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2360,7 +2645,7 @@ routes.sharingListFileMembersBatch = function (arg) {
  * @returns {Promise.<SharingSharedFileMembers, Error.<SharingListFileMembersContinueError>>}
  */
 routes.sharingListFileMembersContinue = function (arg) {
-  return this.request('sharing/list_file_members/continue', arg, 'api', 'rpc');
+  return this.request('sharing/list_file_members/continue', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2371,7 +2656,7 @@ routes.sharingListFileMembersContinue = function (arg) {
  * @returns {Promise.<SharingSharedFolderMembers, Error.<SharingSharedFolderAccessError>>}
  */
 routes.sharingListFolderMembers = function (arg) {
-  return this.request('sharing/list_folder_members', arg, 'api', 'rpc');
+  return this.request('sharing/list_folder_members', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2383,7 +2668,7 @@ routes.sharingListFolderMembers = function (arg) {
  * @returns {Promise.<SharingSharedFolderMembers, Error.<SharingListFolderMembersContinueError>>}
  */
 routes.sharingListFolderMembersContinue = function (arg) {
-  return this.request('sharing/list_folder_members/continue', arg, 'api', 'rpc');
+  return this.request('sharing/list_folder_members/continue', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2394,7 +2679,7 @@ routes.sharingListFolderMembersContinue = function (arg) {
  * @returns {Promise.<SharingListFoldersResult, Error.<void>>}
  */
 routes.sharingListFolders = function (arg) {
-  return this.request('sharing/list_folders', arg, 'api', 'rpc');
+  return this.request('sharing/list_folders', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2407,7 +2692,7 @@ routes.sharingListFolders = function (arg) {
  * @returns {Promise.<SharingListFoldersResult, Error.<SharingListFoldersContinueError>>}
  */
 routes.sharingListFoldersContinue = function (arg) {
-  return this.request('sharing/list_folders/continue', arg, 'api', 'rpc');
+  return this.request('sharing/list_folders/continue', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2418,7 +2703,7 @@ routes.sharingListFoldersContinue = function (arg) {
  * @returns {Promise.<SharingListFoldersResult, Error.<void>>}
  */
 routes.sharingListMountableFolders = function (arg) {
-  return this.request('sharing/list_mountable_folders', arg, 'api', 'rpc');
+  return this.request('sharing/list_mountable_folders', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2431,7 +2716,7 @@ routes.sharingListMountableFolders = function (arg) {
  * @returns {Promise.<SharingListFoldersResult, Error.<SharingListFoldersContinueError>>}
  */
 routes.sharingListMountableFoldersContinue = function (arg) {
-  return this.request('sharing/list_mountable_folders/continue', arg, 'api', 'rpc');
+  return this.request('sharing/list_mountable_folders/continue', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2443,7 +2728,7 @@ routes.sharingListMountableFoldersContinue = function (arg) {
  * @returns {Promise.<SharingListFilesResult, Error.<SharingSharingUserError>>}
  */
 routes.sharingListReceivedFiles = function (arg) {
-  return this.request('sharing/list_received_files', arg, 'api', 'rpc');
+  return this.request('sharing/list_received_files', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2453,7 +2738,7 @@ routes.sharingListReceivedFiles = function (arg) {
  * @returns {Promise.<SharingListFilesResult, Error.<SharingListFilesContinueError>>}
  */
 routes.sharingListReceivedFilesContinue = function (arg) {
-  return this.request('sharing/list_received_files/continue', arg, 'api', 'rpc');
+  return this.request('sharing/list_received_files/continue', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2467,7 +2752,7 @@ routes.sharingListReceivedFilesContinue = function (arg) {
  * @returns {Promise.<SharingListSharedLinksResult, Error.<SharingListSharedLinksError>>}
  */
 routes.sharingListSharedLinks = function (arg) {
-  return this.request('sharing/list_shared_links', arg, 'api', 'rpc');
+  return this.request('sharing/list_shared_links', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2482,7 +2767,7 @@ routes.sharingListSharedLinks = function (arg) {
  * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingModifySharedLinkSettingsError>>}
  */
 routes.sharingModifySharedLinkSettings = function (arg) {
-  return this.request('sharing/modify_shared_link_settings', arg, 'api', 'rpc');
+  return this.request('sharing/modify_shared_link_settings', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2495,7 +2780,7 @@ routes.sharingModifySharedLinkSettings = function (arg) {
  * @returns {Promise.<SharingSharedFolderMetadata, Error.<SharingMountFolderError>>}
  */
 routes.sharingMountFolder = function (arg) {
-  return this.request('sharing/mount_folder', arg, 'api', 'rpc');
+  return this.request('sharing/mount_folder', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2507,7 +2792,7 @@ routes.sharingMountFolder = function (arg) {
  * @returns {Promise.<void, Error.<SharingRelinquishFileMembershipError>>}
  */
 routes.sharingRelinquishFileMembership = function (arg) {
-  return this.request('sharing/relinquish_file_membership', arg, 'api', 'rpc');
+  return this.request('sharing/relinquish_file_membership', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2521,7 +2806,7 @@ routes.sharingRelinquishFileMembership = function (arg) {
  * @returns {Promise.<AsyncLaunchEmptyResult, Error.<SharingRelinquishFolderMembershipError>>}
  */
 routes.sharingRelinquishFolderMembership = function (arg) {
-  return this.request('sharing/relinquish_folder_membership', arg, 'api', 'rpc');
+  return this.request('sharing/relinquish_folder_membership', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2532,7 +2817,7 @@ routes.sharingRelinquishFolderMembership = function (arg) {
  * @returns {Promise.<SharingFileMemberActionIndividualResult, Error.<SharingRemoveFileMemberError>>}
  */
 routes.sharingRemoveFileMember = function (arg) {
-  return this.request('sharing/remove_file_member', arg, 'api', 'rpc');
+  return this.request('sharing/remove_file_member', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2542,7 +2827,7 @@ routes.sharingRemoveFileMember = function (arg) {
  * @returns {Promise.<SharingFileMemberRemoveActionResult, Error.<SharingRemoveFileMemberError>>}
  */
 routes.sharingRemoveFileMember2 = function (arg) {
-  return this.request('sharing/remove_file_member_2', arg, 'api', 'rpc');
+  return this.request('sharing/remove_file_member_2', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2554,7 +2839,7 @@ routes.sharingRemoveFileMember2 = function (arg) {
  * @returns {Promise.<AsyncLaunchResultBase, Error.<SharingRemoveFolderMemberError>>}
  */
 routes.sharingRemoveFolderMember = function (arg) {
-  return this.request('sharing/remove_folder_member', arg, 'api', 'rpc');
+  return this.request('sharing/remove_folder_member', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2568,7 +2853,7 @@ routes.sharingRemoveFolderMember = function (arg) {
  * @returns {Promise.<void, Error.<SharingRevokeSharedLinkError>>}
  */
 routes.sharingRevokeSharedLink = function (arg) {
-  return this.request('sharing/revoke_shared_link', arg, 'api', 'rpc');
+  return this.request('sharing/revoke_shared_link', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2583,7 +2868,7 @@ routes.sharingRevokeSharedLink = function (arg) {
  * @returns {Promise.<SharingShareFolderLaunch, Error.<SharingShareFolderError>>}
  */
 routes.sharingShareFolder = function (arg) {
-  return this.request('sharing/share_folder', arg, 'api', 'rpc');
+  return this.request('sharing/share_folder', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2595,7 +2880,7 @@ routes.sharingShareFolder = function (arg) {
  * @returns {Promise.<void, Error.<SharingTransferFolderError>>}
  */
 routes.sharingTransferFolder = function (arg) {
-  return this.request('sharing/transfer_folder', arg, 'api', 'rpc');
+  return this.request('sharing/transfer_folder', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2607,7 +2892,7 @@ routes.sharingTransferFolder = function (arg) {
  * @returns {Promise.<void, Error.<SharingUnmountFolderError>>}
  */
 routes.sharingUnmountFolder = function (arg) {
-  return this.request('sharing/unmount_folder', arg, 'api', 'rpc');
+  return this.request('sharing/unmount_folder', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2617,7 +2902,7 @@ routes.sharingUnmountFolder = function (arg) {
  * @returns {Promise.<void, Error.<SharingUnshareFileError>>}
  */
 routes.sharingUnshareFile = function (arg) {
-  return this.request('sharing/unshare_file', arg, 'api', 'rpc');
+  return this.request('sharing/unshare_file', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2629,7 +2914,17 @@ routes.sharingUnshareFile = function (arg) {
  * @returns {Promise.<AsyncLaunchEmptyResult, Error.<SharingUnshareFolderError>>}
  */
 routes.sharingUnshareFolder = function (arg) {
-  return this.request('sharing/unshare_folder', arg, 'api', 'rpc');
+  return this.request('sharing/unshare_folder', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Changes a member's access on a shared file.
+ * @function Dropbox#sharingUpdateFileMember
+ * @arg {SharingUpdateFileMemberArgs} arg - The request parameters.
+ * @returns {Promise.<SharingMemberAccessLevelResult, Error.<SharingFileMemberActionError>>}
+ */
+routes.sharingUpdateFileMember = function (arg) {
+  return this.request('sharing/update_file_member', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2640,7 +2935,7 @@ routes.sharingUnshareFolder = function (arg) {
  * @returns {Promise.<SharingMemberAccessLevelResult, Error.<SharingUpdateFolderMemberError>>}
  */
 routes.sharingUpdateFolderMember = function (arg) {
-  return this.request('sharing/update_folder_member', arg, 'api', 'rpc');
+  return this.request('sharing/update_folder_member', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2652,7 +2947,28 @@ routes.sharingUpdateFolderMember = function (arg) {
  * @returns {Promise.<SharingSharedFolderMetadata, Error.<SharingUpdateFolderPolicyError>>}
  */
 routes.sharingUpdateFolderPolicy = function (arg) {
-  return this.request('sharing/update_folder_policy', arg, 'api', 'rpc');
+  return this.request('sharing/update_folder_policy', arg, 'user', 'api', 'rpc');
+};
+
+/**
+ * Retrieves team events. Permission : Team Auditing.
+ * @function Dropbox#teamLogGetEvents
+ * @arg {TeamLogGetTeamEventsArg} arg - The request parameters.
+ * @returns {Promise.<TeamLogGetTeamEventsResult, Error.<TeamLogGetTeamEventsError>>}
+ */
+routes.teamLogGetEvents = function (arg) {
+  return this.request('team_log/get_events', arg, 'team', 'api', 'rpc');
+};
+
+/**
+ * Once a cursor has been retrieved from get_events, use this to paginate
+ * through all events. Permission : Team Auditing.
+ * @function Dropbox#teamLogGetEventsContinue
+ * @arg {TeamLogGetTeamEventsContinueArg} arg - The request parameters.
+ * @returns {Promise.<TeamLogGetTeamEventsResult, Error.<TeamLogGetTeamEventsContinueError>>}
+ */
+routes.teamLogGetEventsContinue = function (arg) {
+  return this.request('team_log/get_events/continue', arg, 'team', 'api', 'rpc');
 };
 
 /**
@@ -2662,7 +2978,7 @@ routes.sharingUpdateFolderPolicy = function (arg) {
  * @returns {Promise.<UsersBasicAccount, Error.<UsersGetAccountError>>}
  */
 routes.usersGetAccount = function (arg) {
-  return this.request('users/get_account', arg, 'api', 'rpc');
+  return this.request('users/get_account', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2673,7 +2989,7 @@ routes.usersGetAccount = function (arg) {
  * @returns {Promise.<Object, Error.<UsersGetAccountBatchError>>}
  */
 routes.usersGetAccountBatch = function (arg) {
-  return this.request('users/get_account_batch', arg, 'api', 'rpc');
+  return this.request('users/get_account_batch', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2683,7 +2999,7 @@ routes.usersGetAccountBatch = function (arg) {
  * @returns {Promise.<UsersFullAccount, Error.<void>>}
  */
 routes.usersGetCurrentAccount = function (arg) {
-  return this.request('users/get_current_account', arg, 'api', 'rpc');
+  return this.request('users/get_current_account', arg, 'user', 'api', 'rpc');
 };
 
 /**
@@ -2693,27 +3009,34 @@ routes.usersGetCurrentAccount = function (arg) {
  * @returns {Promise.<UsersSpaceUsage, Error.<void>>}
  */
 routes.usersGetSpaceUsage = function (arg) {
-  return this.request('users/get_space_usage', arg, 'api', 'rpc');
+  return this.request('users/get_space_usage', arg, 'user', 'api', 'rpc');
 };
 
 module.exports = routes;
 
-},{}],10:[function(require,module,exports){
+},{}],12:[function(require,module,exports){
 var request = require('superagent');
 var Promise = require('es6-promise').Promise;
-
-var BASE_URL = 'https://api.dropboxapi.com/2/';
+var getBaseURL = require('./get-base-url');
 
 // This doesn't match what was spec'd in paper doc yet
 var buildCustomError = function (error, response) {
+  var err;
+  if (response) {
+    try {
+      err = JSON.parse(response.text);
+    } catch (e) {
+      err = response.text;
+    }
+  }
   return {
     status: error.status,
-    error: (response ? response.text : null) || error.toString(),
+    error: err || error,
     response: response
   };
 };
 
-var rpcRequest = function (path, body, accessToken, selectUser) {
+var rpcRequest = function (path, body, auth, host, accessToken, selectUser) {
   var promiseFunction = function (resolve, reject) {
     var apiRequest;
 
@@ -2743,9 +3066,19 @@ var rpcRequest = function (path, body, accessToken, selectUser) {
       body = null;
     }
 
-    apiRequest = request.post(BASE_URL + path)
-      .type('application/json')
-      .set('Authorization', 'Bearer ' + accessToken);
+    apiRequest = request.post(getBaseURL(host) + path)
+      .type('application/json');
+
+    switch (auth) {
+      case 'team':
+      case 'user':
+        apiRequest.set('Authorization', 'Bearer ' + accessToken);
+        break;
+      case 'noauth':
+        break;
+      default:
+        throw new Error('Unhandled auth type: ' + auth);
+    }
 
     if (selectUser) {
       apiRequest = apiRequest.set('Dropbox-API-Select-User', selectUser);
@@ -2760,11 +3093,11 @@ var rpcRequest = function (path, body, accessToken, selectUser) {
 
 module.exports = rpcRequest;
 
-},{"es6-promise":2,"superagent":104}],11:[function(require,module,exports){
+},{"./get-base-url":6,"es6-promise":2,"superagent":108}],13:[function(require,module,exports){
 var request = require('superagent');
 var Promise = require('es6-promise').Promise;
-
-var BASE_URL = 'https://content.dropboxapi.com/2/';
+var getBaseURL = require('./get-base-url');
+var httpHeaderSafeJson = require('./http-header-safe-json');
 
 // This doesn't match what was spec'd in paper doc yet
 var buildCustomError = function (error, response) {
@@ -2775,7 +3108,11 @@ var buildCustomError = function (error, response) {
   };
 };
 
-var uploadRequest = function (path, args, accessToken, selectUser) {
+var uploadRequest = function (path, args, auth, host, accessToken, selectUser) {
+  if (auth !== 'user') {
+    throw new Error('Unexpected auth type: ' + auth);
+  }
+
   var promiseFunction = function (resolve, reject) {
     var apiRequest;
 
@@ -2804,10 +3141,10 @@ var uploadRequest = function (path, args, accessToken, selectUser) {
       }
     }
 
-    apiRequest = request.post(BASE_URL + path)
+    apiRequest = request.post(getBaseURL(host) + path)
       .type('application/octet-stream')
       .set('Authorization', 'Bearer ' + accessToken)
-      .set('Dropbox-API-Arg', JSON.stringify(args));
+      .set('Dropbox-API-Arg', httpHeaderSafeJson(args));
 
     if (selectUser) {
       apiRequest = apiRequest.set('Dropbox-API-Select-User', selectUser);
@@ -2823,9 +3160,10 @@ var uploadRequest = function (path, args, accessToken, selectUser) {
 
 module.exports = uploadRequest;
 
-},{"es6-promise":2,"superagent":104}],12:[function(require,module,exports){
+},{"./get-base-url":6,"./http-header-safe-json":7,"es6-promise":2,"superagent":108}],14:[function(require,module,exports){
 module.exports={"Aacute":"\u00C1","aacute":"\u00E1","Abreve":"\u0102","abreve":"\u0103","ac":"\u223E","acd":"\u223F","acE":"\u223E\u0333","Acirc":"\u00C2","acirc":"\u00E2","acute":"\u00B4","Acy":"\u0410","acy":"\u0430","AElig":"\u00C6","aelig":"\u00E6","af":"\u2061","Afr":"\uD835\uDD04","afr":"\uD835\uDD1E","Agrave":"\u00C0","agrave":"\u00E0","alefsym":"\u2135","aleph":"\u2135","Alpha":"\u0391","alpha":"\u03B1","Amacr":"\u0100","amacr":"\u0101","amalg":"\u2A3F","amp":"&","AMP":"&","andand":"\u2A55","And":"\u2A53","and":"\u2227","andd":"\u2A5C","andslope":"\u2A58","andv":"\u2A5A","ang":"\u2220","ange":"\u29A4","angle":"\u2220","angmsdaa":"\u29A8","angmsdab":"\u29A9","angmsdac":"\u29AA","angmsdad":"\u29AB","angmsdae":"\u29AC","angmsdaf":"\u29AD","angmsdag":"\u29AE","angmsdah":"\u29AF","angmsd":"\u2221","angrt":"\u221F","angrtvb":"\u22BE","angrtvbd":"\u299D","angsph":"\u2222","angst":"\u00C5","angzarr":"\u237C","Aogon":"\u0104","aogon":"\u0105","Aopf":"\uD835\uDD38","aopf":"\uD835\uDD52","apacir":"\u2A6F","ap":"\u2248","apE":"\u2A70","ape":"\u224A","apid":"\u224B","apos":"'","ApplyFunction":"\u2061","approx":"\u2248","approxeq":"\u224A","Aring":"\u00C5","aring":"\u00E5","Ascr":"\uD835\uDC9C","ascr":"\uD835\uDCB6","Assign":"\u2254","ast":"*","asymp":"\u2248","asympeq":"\u224D","Atilde":"\u00C3","atilde":"\u00E3","Auml":"\u00C4","auml":"\u00E4","awconint":"\u2233","awint":"\u2A11","backcong":"\u224C","backepsilon":"\u03F6","backprime":"\u2035","backsim":"\u223D","backsimeq":"\u22CD","Backslash":"\u2216","Barv":"\u2AE7","barvee":"\u22BD","barwed":"\u2305","Barwed":"\u2306","barwedge":"\u2305","bbrk":"\u23B5","bbrktbrk":"\u23B6","bcong":"\u224C","Bcy":"\u0411","bcy":"\u0431","bdquo":"\u201E","becaus":"\u2235","because":"\u2235","Because":"\u2235","bemptyv":"\u29B0","bepsi":"\u03F6","bernou":"\u212C","Bernoullis":"\u212C","Beta":"\u0392","beta":"\u03B2","beth":"\u2136","between":"\u226C","Bfr":"\uD835\uDD05","bfr":"\uD835\uDD1F","bigcap":"\u22C2","bigcirc":"\u25EF","bigcup":"\u22C3","bigodot":"\u2A00","bigoplus":"\u2A01","bigotimes":"\u2A02","bigsqcup":"\u2A06","bigstar":"\u2605","bigtriangledown":"\u25BD","bigtriangleup":"\u25B3","biguplus":"\u2A04","bigvee":"\u22C1","bigwedge":"\u22C0","bkarow":"\u290D","blacklozenge":"\u29EB","blacksquare":"\u25AA","blacktriangle":"\u25B4","blacktriangledown":"\u25BE","blacktriangleleft":"\u25C2","blacktriangleright":"\u25B8","blank":"\u2423","blk12":"\u2592","blk14":"\u2591","blk34":"\u2593","block":"\u2588","bne":"=\u20E5","bnequiv":"\u2261\u20E5","bNot":"\u2AED","bnot":"\u2310","Bopf":"\uD835\uDD39","bopf":"\uD835\uDD53","bot":"\u22A5","bottom":"\u22A5","bowtie":"\u22C8","boxbox":"\u29C9","boxdl":"\u2510","boxdL":"\u2555","boxDl":"\u2556","boxDL":"\u2557","boxdr":"\u250C","boxdR":"\u2552","boxDr":"\u2553","boxDR":"\u2554","boxh":"\u2500","boxH":"\u2550","boxhd":"\u252C","boxHd":"\u2564","boxhD":"\u2565","boxHD":"\u2566","boxhu":"\u2534","boxHu":"\u2567","boxhU":"\u2568","boxHU":"\u2569","boxminus":"\u229F","boxplus":"\u229E","boxtimes":"\u22A0","boxul":"\u2518","boxuL":"\u255B","boxUl":"\u255C","boxUL":"\u255D","boxur":"\u2514","boxuR":"\u2558","boxUr":"\u2559","boxUR":"\u255A","boxv":"\u2502","boxV":"\u2551","boxvh":"\u253C","boxvH":"\u256A","boxVh":"\u256B","boxVH":"\u256C","boxvl":"\u2524","boxvL":"\u2561","boxVl":"\u2562","boxVL":"\u2563","boxvr":"\u251C","boxvR":"\u255E","boxVr":"\u255F","boxVR":"\u2560","bprime":"\u2035","breve":"\u02D8","Breve":"\u02D8","brvbar":"\u00A6","bscr":"\uD835\uDCB7","Bscr":"\u212C","bsemi":"\u204F","bsim":"\u223D","bsime":"\u22CD","bsolb":"\u29C5","bsol":"\\","bsolhsub":"\u27C8","bull":"\u2022","bullet":"\u2022","bump":"\u224E","bumpE":"\u2AAE","bumpe":"\u224F","Bumpeq":"\u224E","bumpeq":"\u224F","Cacute":"\u0106","cacute":"\u0107","capand":"\u2A44","capbrcup":"\u2A49","capcap":"\u2A4B","cap":"\u2229","Cap":"\u22D2","capcup":"\u2A47","capdot":"\u2A40","CapitalDifferentialD":"\u2145","caps":"\u2229\uFE00","caret":"\u2041","caron":"\u02C7","Cayleys":"\u212D","ccaps":"\u2A4D","Ccaron":"\u010C","ccaron":"\u010D","Ccedil":"\u00C7","ccedil":"\u00E7","Ccirc":"\u0108","ccirc":"\u0109","Cconint":"\u2230","ccups":"\u2A4C","ccupssm":"\u2A50","Cdot":"\u010A","cdot":"\u010B","cedil":"\u00B8","Cedilla":"\u00B8","cemptyv":"\u29B2","cent":"\u00A2","centerdot":"\u00B7","CenterDot":"\u00B7","cfr":"\uD835\uDD20","Cfr":"\u212D","CHcy":"\u0427","chcy":"\u0447","check":"\u2713","checkmark":"\u2713","Chi":"\u03A7","chi":"\u03C7","circ":"\u02C6","circeq":"\u2257","circlearrowleft":"\u21BA","circlearrowright":"\u21BB","circledast":"\u229B","circledcirc":"\u229A","circleddash":"\u229D","CircleDot":"\u2299","circledR":"\u00AE","circledS":"\u24C8","CircleMinus":"\u2296","CirclePlus":"\u2295","CircleTimes":"\u2297","cir":"\u25CB","cirE":"\u29C3","cire":"\u2257","cirfnint":"\u2A10","cirmid":"\u2AEF","cirscir":"\u29C2","ClockwiseContourIntegral":"\u2232","CloseCurlyDoubleQuote":"\u201D","CloseCurlyQuote":"\u2019","clubs":"\u2663","clubsuit":"\u2663","colon":":","Colon":"\u2237","Colone":"\u2A74","colone":"\u2254","coloneq":"\u2254","comma":",","commat":"@","comp":"\u2201","compfn":"\u2218","complement":"\u2201","complexes":"\u2102","cong":"\u2245","congdot":"\u2A6D","Congruent":"\u2261","conint":"\u222E","Conint":"\u222F","ContourIntegral":"\u222E","copf":"\uD835\uDD54","Copf":"\u2102","coprod":"\u2210","Coproduct":"\u2210","copy":"\u00A9","COPY":"\u00A9","copysr":"\u2117","CounterClockwiseContourIntegral":"\u2233","crarr":"\u21B5","cross":"\u2717","Cross":"\u2A2F","Cscr":"\uD835\uDC9E","cscr":"\uD835\uDCB8","csub":"\u2ACF","csube":"\u2AD1","csup":"\u2AD0","csupe":"\u2AD2","ctdot":"\u22EF","cudarrl":"\u2938","cudarrr":"\u2935","cuepr":"\u22DE","cuesc":"\u22DF","cularr":"\u21B6","cularrp":"\u293D","cupbrcap":"\u2A48","cupcap":"\u2A46","CupCap":"\u224D","cup":"\u222A","Cup":"\u22D3","cupcup":"\u2A4A","cupdot":"\u228D","cupor":"\u2A45","cups":"\u222A\uFE00","curarr":"\u21B7","curarrm":"\u293C","curlyeqprec":"\u22DE","curlyeqsucc":"\u22DF","curlyvee":"\u22CE","curlywedge":"\u22CF","curren":"\u00A4","curvearrowleft":"\u21B6","curvearrowright":"\u21B7","cuvee":"\u22CE","cuwed":"\u22CF","cwconint":"\u2232","cwint":"\u2231","cylcty":"\u232D","dagger":"\u2020","Dagger":"\u2021","daleth":"\u2138","darr":"\u2193","Darr":"\u21A1","dArr":"\u21D3","dash":"\u2010","Dashv":"\u2AE4","dashv":"\u22A3","dbkarow":"\u290F","dblac":"\u02DD","Dcaron":"\u010E","dcaron":"\u010F","Dcy":"\u0414","dcy":"\u0434","ddagger":"\u2021","ddarr":"\u21CA","DD":"\u2145","dd":"\u2146","DDotrahd":"\u2911","ddotseq":"\u2A77","deg":"\u00B0","Del":"\u2207","Delta":"\u0394","delta":"\u03B4","demptyv":"\u29B1","dfisht":"\u297F","Dfr":"\uD835\uDD07","dfr":"\uD835\uDD21","dHar":"\u2965","dharl":"\u21C3","dharr":"\u21C2","DiacriticalAcute":"\u00B4","DiacriticalDot":"\u02D9","DiacriticalDoubleAcute":"\u02DD","DiacriticalGrave":"`","DiacriticalTilde":"\u02DC","diam":"\u22C4","diamond":"\u22C4","Diamond":"\u22C4","diamondsuit":"\u2666","diams":"\u2666","die":"\u00A8","DifferentialD":"\u2146","digamma":"\u03DD","disin":"\u22F2","div":"\u00F7","divide":"\u00F7","divideontimes":"\u22C7","divonx":"\u22C7","DJcy":"\u0402","djcy":"\u0452","dlcorn":"\u231E","dlcrop":"\u230D","dollar":"$","Dopf":"\uD835\uDD3B","dopf":"\uD835\uDD55","Dot":"\u00A8","dot":"\u02D9","DotDot":"\u20DC","doteq":"\u2250","doteqdot":"\u2251","DotEqual":"\u2250","dotminus":"\u2238","dotplus":"\u2214","dotsquare":"\u22A1","doublebarwedge":"\u2306","DoubleContourIntegral":"\u222F","DoubleDot":"\u00A8","DoubleDownArrow":"\u21D3","DoubleLeftArrow":"\u21D0","DoubleLeftRightArrow":"\u21D4","DoubleLeftTee":"\u2AE4","DoubleLongLeftArrow":"\u27F8","DoubleLongLeftRightArrow":"\u27FA","DoubleLongRightArrow":"\u27F9","DoubleRightArrow":"\u21D2","DoubleRightTee":"\u22A8","DoubleUpArrow":"\u21D1","DoubleUpDownArrow":"\u21D5","DoubleVerticalBar":"\u2225","DownArrowBar":"\u2913","downarrow":"\u2193","DownArrow":"\u2193","Downarrow":"\u21D3","DownArrowUpArrow":"\u21F5","DownBreve":"\u0311","downdownarrows":"\u21CA","downharpoonleft":"\u21C3","downharpoonright":"\u21C2","DownLeftRightVector":"\u2950","DownLeftTeeVector":"\u295E","DownLeftVectorBar":"\u2956","DownLeftVector":"\u21BD","DownRightTeeVector":"\u295F","DownRightVectorBar":"\u2957","DownRightVector":"\u21C1","DownTeeArrow":"\u21A7","DownTee":"\u22A4","drbkarow":"\u2910","drcorn":"\u231F","drcrop":"\u230C","Dscr":"\uD835\uDC9F","dscr":"\uD835\uDCB9","DScy":"\u0405","dscy":"\u0455","dsol":"\u29F6","Dstrok":"\u0110","dstrok":"\u0111","dtdot":"\u22F1","dtri":"\u25BF","dtrif":"\u25BE","duarr":"\u21F5","duhar":"\u296F","dwangle":"\u29A6","DZcy":"\u040F","dzcy":"\u045F","dzigrarr":"\u27FF","Eacute":"\u00C9","eacute":"\u00E9","easter":"\u2A6E","Ecaron":"\u011A","ecaron":"\u011B","Ecirc":"\u00CA","ecirc":"\u00EA","ecir":"\u2256","ecolon":"\u2255","Ecy":"\u042D","ecy":"\u044D","eDDot":"\u2A77","Edot":"\u0116","edot":"\u0117","eDot":"\u2251","ee":"\u2147","efDot":"\u2252","Efr":"\uD835\uDD08","efr":"\uD835\uDD22","eg":"\u2A9A","Egrave":"\u00C8","egrave":"\u00E8","egs":"\u2A96","egsdot":"\u2A98","el":"\u2A99","Element":"\u2208","elinters":"\u23E7","ell":"\u2113","els":"\u2A95","elsdot":"\u2A97","Emacr":"\u0112","emacr":"\u0113","empty":"\u2205","emptyset":"\u2205","EmptySmallSquare":"\u25FB","emptyv":"\u2205","EmptyVerySmallSquare":"\u25AB","emsp13":"\u2004","emsp14":"\u2005","emsp":"\u2003","ENG":"\u014A","eng":"\u014B","ensp":"\u2002","Eogon":"\u0118","eogon":"\u0119","Eopf":"\uD835\uDD3C","eopf":"\uD835\uDD56","epar":"\u22D5","eparsl":"\u29E3","eplus":"\u2A71","epsi":"\u03B5","Epsilon":"\u0395","epsilon":"\u03B5","epsiv":"\u03F5","eqcirc":"\u2256","eqcolon":"\u2255","eqsim":"\u2242","eqslantgtr":"\u2A96","eqslantless":"\u2A95","Equal":"\u2A75","equals":"=","EqualTilde":"\u2242","equest":"\u225F","Equilibrium":"\u21CC","equiv":"\u2261","equivDD":"\u2A78","eqvparsl":"\u29E5","erarr":"\u2971","erDot":"\u2253","escr":"\u212F","Escr":"\u2130","esdot":"\u2250","Esim":"\u2A73","esim":"\u2242","Eta":"\u0397","eta":"\u03B7","ETH":"\u00D0","eth":"\u00F0","Euml":"\u00CB","euml":"\u00EB","euro":"\u20AC","excl":"!","exist":"\u2203","Exists":"\u2203","expectation":"\u2130","exponentiale":"\u2147","ExponentialE":"\u2147","fallingdotseq":"\u2252","Fcy":"\u0424","fcy":"\u0444","female":"\u2640","ffilig":"\uFB03","fflig":"\uFB00","ffllig":"\uFB04","Ffr":"\uD835\uDD09","ffr":"\uD835\uDD23","filig":"\uFB01","FilledSmallSquare":"\u25FC","FilledVerySmallSquare":"\u25AA","fjlig":"fj","flat":"\u266D","fllig":"\uFB02","fltns":"\u25B1","fnof":"\u0192","Fopf":"\uD835\uDD3D","fopf":"\uD835\uDD57","forall":"\u2200","ForAll":"\u2200","fork":"\u22D4","forkv":"\u2AD9","Fouriertrf":"\u2131","fpartint":"\u2A0D","frac12":"\u00BD","frac13":"\u2153","frac14":"\u00BC","frac15":"\u2155","frac16":"\u2159","frac18":"\u215B","frac23":"\u2154","frac25":"\u2156","frac34":"\u00BE","frac35":"\u2157","frac38":"\u215C","frac45":"\u2158","frac56":"\u215A","frac58":"\u215D","frac78":"\u215E","frasl":"\u2044","frown":"\u2322","fscr":"\uD835\uDCBB","Fscr":"\u2131","gacute":"\u01F5","Gamma":"\u0393","gamma":"\u03B3","Gammad":"\u03DC","gammad":"\u03DD","gap":"\u2A86","Gbreve":"\u011E","gbreve":"\u011F","Gcedil":"\u0122","Gcirc":"\u011C","gcirc":"\u011D","Gcy":"\u0413","gcy":"\u0433","Gdot":"\u0120","gdot":"\u0121","ge":"\u2265","gE":"\u2267","gEl":"\u2A8C","gel":"\u22DB","geq":"\u2265","geqq":"\u2267","geqslant":"\u2A7E","gescc":"\u2AA9","ges":"\u2A7E","gesdot":"\u2A80","gesdoto":"\u2A82","gesdotol":"\u2A84","gesl":"\u22DB\uFE00","gesles":"\u2A94","Gfr":"\uD835\uDD0A","gfr":"\uD835\uDD24","gg":"\u226B","Gg":"\u22D9","ggg":"\u22D9","gimel":"\u2137","GJcy":"\u0403","gjcy":"\u0453","gla":"\u2AA5","gl":"\u2277","glE":"\u2A92","glj":"\u2AA4","gnap":"\u2A8A","gnapprox":"\u2A8A","gne":"\u2A88","gnE":"\u2269","gneq":"\u2A88","gneqq":"\u2269","gnsim":"\u22E7","Gopf":"\uD835\uDD3E","gopf":"\uD835\uDD58","grave":"`","GreaterEqual":"\u2265","GreaterEqualLess":"\u22DB","GreaterFullEqual":"\u2267","GreaterGreater":"\u2AA2","GreaterLess":"\u2277","GreaterSlantEqual":"\u2A7E","GreaterTilde":"\u2273","Gscr":"\uD835\uDCA2","gscr":"\u210A","gsim":"\u2273","gsime":"\u2A8E","gsiml":"\u2A90","gtcc":"\u2AA7","gtcir":"\u2A7A","gt":">","GT":">","Gt":"\u226B","gtdot":"\u22D7","gtlPar":"\u2995","gtquest":"\u2A7C","gtrapprox":"\u2A86","gtrarr":"\u2978","gtrdot":"\u22D7","gtreqless":"\u22DB","gtreqqless":"\u2A8C","gtrless":"\u2277","gtrsim":"\u2273","gvertneqq":"\u2269\uFE00","gvnE":"\u2269\uFE00","Hacek":"\u02C7","hairsp":"\u200A","half":"\u00BD","hamilt":"\u210B","HARDcy":"\u042A","hardcy":"\u044A","harrcir":"\u2948","harr":"\u2194","hArr":"\u21D4","harrw":"\u21AD","Hat":"^","hbar":"\u210F","Hcirc":"\u0124","hcirc":"\u0125","hearts":"\u2665","heartsuit":"\u2665","hellip":"\u2026","hercon":"\u22B9","hfr":"\uD835\uDD25","Hfr":"\u210C","HilbertSpace":"\u210B","hksearow":"\u2925","hkswarow":"\u2926","hoarr":"\u21FF","homtht":"\u223B","hookleftarrow":"\u21A9","hookrightarrow":"\u21AA","hopf":"\uD835\uDD59","Hopf":"\u210D","horbar":"\u2015","HorizontalLine":"\u2500","hscr":"\uD835\uDCBD","Hscr":"\u210B","hslash":"\u210F","Hstrok":"\u0126","hstrok":"\u0127","HumpDownHump":"\u224E","HumpEqual":"\u224F","hybull":"\u2043","hyphen":"\u2010","Iacute":"\u00CD","iacute":"\u00ED","ic":"\u2063","Icirc":"\u00CE","icirc":"\u00EE","Icy":"\u0418","icy":"\u0438","Idot":"\u0130","IEcy":"\u0415","iecy":"\u0435","iexcl":"\u00A1","iff":"\u21D4","ifr":"\uD835\uDD26","Ifr":"\u2111","Igrave":"\u00CC","igrave":"\u00EC","ii":"\u2148","iiiint":"\u2A0C","iiint":"\u222D","iinfin":"\u29DC","iiota":"\u2129","IJlig":"\u0132","ijlig":"\u0133","Imacr":"\u012A","imacr":"\u012B","image":"\u2111","ImaginaryI":"\u2148","imagline":"\u2110","imagpart":"\u2111","imath":"\u0131","Im":"\u2111","imof":"\u22B7","imped":"\u01B5","Implies":"\u21D2","incare":"\u2105","in":"\u2208","infin":"\u221E","infintie":"\u29DD","inodot":"\u0131","intcal":"\u22BA","int":"\u222B","Int":"\u222C","integers":"\u2124","Integral":"\u222B","intercal":"\u22BA","Intersection":"\u22C2","intlarhk":"\u2A17","intprod":"\u2A3C","InvisibleComma":"\u2063","InvisibleTimes":"\u2062","IOcy":"\u0401","iocy":"\u0451","Iogon":"\u012E","iogon":"\u012F","Iopf":"\uD835\uDD40","iopf":"\uD835\uDD5A","Iota":"\u0399","iota":"\u03B9","iprod":"\u2A3C","iquest":"\u00BF","iscr":"\uD835\uDCBE","Iscr":"\u2110","isin":"\u2208","isindot":"\u22F5","isinE":"\u22F9","isins":"\u22F4","isinsv":"\u22F3","isinv":"\u2208","it":"\u2062","Itilde":"\u0128","itilde":"\u0129","Iukcy":"\u0406","iukcy":"\u0456","Iuml":"\u00CF","iuml":"\u00EF","Jcirc":"\u0134","jcirc":"\u0135","Jcy":"\u0419","jcy":"\u0439","Jfr":"\uD835\uDD0D","jfr":"\uD835\uDD27","jmath":"\u0237","Jopf":"\uD835\uDD41","jopf":"\uD835\uDD5B","Jscr":"\uD835\uDCA5","jscr":"\uD835\uDCBF","Jsercy":"\u0408","jsercy":"\u0458","Jukcy":"\u0404","jukcy":"\u0454","Kappa":"\u039A","kappa":"\u03BA","kappav":"\u03F0","Kcedil":"\u0136","kcedil":"\u0137","Kcy":"\u041A","kcy":"\u043A","Kfr":"\uD835\uDD0E","kfr":"\uD835\uDD28","kgreen":"\u0138","KHcy":"\u0425","khcy":"\u0445","KJcy":"\u040C","kjcy":"\u045C","Kopf":"\uD835\uDD42","kopf":"\uD835\uDD5C","Kscr":"\uD835\uDCA6","kscr":"\uD835\uDCC0","lAarr":"\u21DA","Lacute":"\u0139","lacute":"\u013A","laemptyv":"\u29B4","lagran":"\u2112","Lambda":"\u039B","lambda":"\u03BB","lang":"\u27E8","Lang":"\u27EA","langd":"\u2991","langle":"\u27E8","lap":"\u2A85","Laplacetrf":"\u2112","laquo":"\u00AB","larrb":"\u21E4","larrbfs":"\u291F","larr":"\u2190","Larr":"\u219E","lArr":"\u21D0","larrfs":"\u291D","larrhk":"\u21A9","larrlp":"\u21AB","larrpl":"\u2939","larrsim":"\u2973","larrtl":"\u21A2","latail":"\u2919","lAtail":"\u291B","lat":"\u2AAB","late":"\u2AAD","lates":"\u2AAD\uFE00","lbarr":"\u290C","lBarr":"\u290E","lbbrk":"\u2772","lbrace":"{","lbrack":"[","lbrke":"\u298B","lbrksld":"\u298F","lbrkslu":"\u298D","Lcaron":"\u013D","lcaron":"\u013E","Lcedil":"\u013B","lcedil":"\u013C","lceil":"\u2308","lcub":"{","Lcy":"\u041B","lcy":"\u043B","ldca":"\u2936","ldquo":"\u201C","ldquor":"\u201E","ldrdhar":"\u2967","ldrushar":"\u294B","ldsh":"\u21B2","le":"\u2264","lE":"\u2266","LeftAngleBracket":"\u27E8","LeftArrowBar":"\u21E4","leftarrow":"\u2190","LeftArrow":"\u2190","Leftarrow":"\u21D0","LeftArrowRightArrow":"\u21C6","leftarrowtail":"\u21A2","LeftCeiling":"\u2308","LeftDoubleBracket":"\u27E6","LeftDownTeeVector":"\u2961","LeftDownVectorBar":"\u2959","LeftDownVector":"\u21C3","LeftFloor":"\u230A","leftharpoondown":"\u21BD","leftharpoonup":"\u21BC","leftleftarrows":"\u21C7","leftrightarrow":"\u2194","LeftRightArrow":"\u2194","Leftrightarrow":"\u21D4","leftrightarrows":"\u21C6","leftrightharpoons":"\u21CB","leftrightsquigarrow":"\u21AD","LeftRightVector":"\u294E","LeftTeeArrow":"\u21A4","LeftTee":"\u22A3","LeftTeeVector":"\u295A","leftthreetimes":"\u22CB","LeftTriangleBar":"\u29CF","LeftTriangle":"\u22B2","LeftTriangleEqual":"\u22B4","LeftUpDownVector":"\u2951","LeftUpTeeVector":"\u2960","LeftUpVectorBar":"\u2958","LeftUpVector":"\u21BF","LeftVectorBar":"\u2952","LeftVector":"\u21BC","lEg":"\u2A8B","leg":"\u22DA","leq":"\u2264","leqq":"\u2266","leqslant":"\u2A7D","lescc":"\u2AA8","les":"\u2A7D","lesdot":"\u2A7F","lesdoto":"\u2A81","lesdotor":"\u2A83","lesg":"\u22DA\uFE00","lesges":"\u2A93","lessapprox":"\u2A85","lessdot":"\u22D6","lesseqgtr":"\u22DA","lesseqqgtr":"\u2A8B","LessEqualGreater":"\u22DA","LessFullEqual":"\u2266","LessGreater":"\u2276","lessgtr":"\u2276","LessLess":"\u2AA1","lesssim":"\u2272","LessSlantEqual":"\u2A7D","LessTilde":"\u2272","lfisht":"\u297C","lfloor":"\u230A","Lfr":"\uD835\uDD0F","lfr":"\uD835\uDD29","lg":"\u2276","lgE":"\u2A91","lHar":"\u2962","lhard":"\u21BD","lharu":"\u21BC","lharul":"\u296A","lhblk":"\u2584","LJcy":"\u0409","ljcy":"\u0459","llarr":"\u21C7","ll":"\u226A","Ll":"\u22D8","llcorner":"\u231E","Lleftarrow":"\u21DA","llhard":"\u296B","lltri":"\u25FA","Lmidot":"\u013F","lmidot":"\u0140","lmoustache":"\u23B0","lmoust":"\u23B0","lnap":"\u2A89","lnapprox":"\u2A89","lne":"\u2A87","lnE":"\u2268","lneq":"\u2A87","lneqq":"\u2268","lnsim":"\u22E6","loang":"\u27EC","loarr":"\u21FD","lobrk":"\u27E6","longleftarrow":"\u27F5","LongLeftArrow":"\u27F5","Longleftarrow":"\u27F8","longleftrightarrow":"\u27F7","LongLeftRightArrow":"\u27F7","Longleftrightarrow":"\u27FA","longmapsto":"\u27FC","longrightarrow":"\u27F6","LongRightArrow":"\u27F6","Longrightarrow":"\u27F9","looparrowleft":"\u21AB","looparrowright":"\u21AC","lopar":"\u2985","Lopf":"\uD835\uDD43","lopf":"\uD835\uDD5D","loplus":"\u2A2D","lotimes":"\u2A34","lowast":"\u2217","lowbar":"_","LowerLeftArrow":"\u2199","LowerRightArrow":"\u2198","loz":"\u25CA","lozenge":"\u25CA","lozf":"\u29EB","lpar":"(","lparlt":"\u2993","lrarr":"\u21C6","lrcorner":"\u231F","lrhar":"\u21CB","lrhard":"\u296D","lrm":"\u200E","lrtri":"\u22BF","lsaquo":"\u2039","lscr":"\uD835\uDCC1","Lscr":"\u2112","lsh":"\u21B0","Lsh":"\u21B0","lsim":"\u2272","lsime":"\u2A8D","lsimg":"\u2A8F","lsqb":"[","lsquo":"\u2018","lsquor":"\u201A","Lstrok":"\u0141","lstrok":"\u0142","ltcc":"\u2AA6","ltcir":"\u2A79","lt":"<","LT":"<","Lt":"\u226A","ltdot":"\u22D6","lthree":"\u22CB","ltimes":"\u22C9","ltlarr":"\u2976","ltquest":"\u2A7B","ltri":"\u25C3","ltrie":"\u22B4","ltrif":"\u25C2","ltrPar":"\u2996","lurdshar":"\u294A","luruhar":"\u2966","lvertneqq":"\u2268\uFE00","lvnE":"\u2268\uFE00","macr":"\u00AF","male":"\u2642","malt":"\u2720","maltese":"\u2720","Map":"\u2905","map":"\u21A6","mapsto":"\u21A6","mapstodown":"\u21A7","mapstoleft":"\u21A4","mapstoup":"\u21A5","marker":"\u25AE","mcomma":"\u2A29","Mcy":"\u041C","mcy":"\u043C","mdash":"\u2014","mDDot":"\u223A","measuredangle":"\u2221","MediumSpace":"\u205F","Mellintrf":"\u2133","Mfr":"\uD835\uDD10","mfr":"\uD835\uDD2A","mho":"\u2127","micro":"\u00B5","midast":"*","midcir":"\u2AF0","mid":"\u2223","middot":"\u00B7","minusb":"\u229F","minus":"\u2212","minusd":"\u2238","minusdu":"\u2A2A","MinusPlus":"\u2213","mlcp":"\u2ADB","mldr":"\u2026","mnplus":"\u2213","models":"\u22A7","Mopf":"\uD835\uDD44","mopf":"\uD835\uDD5E","mp":"\u2213","mscr":"\uD835\uDCC2","Mscr":"\u2133","mstpos":"\u223E","Mu":"\u039C","mu":"\u03BC","multimap":"\u22B8","mumap":"\u22B8","nabla":"\u2207","Nacute":"\u0143","nacute":"\u0144","nang":"\u2220\u20D2","nap":"\u2249","napE":"\u2A70\u0338","napid":"\u224B\u0338","napos":"\u0149","napprox":"\u2249","natural":"\u266E","naturals":"\u2115","natur":"\u266E","nbsp":"\u00A0","nbump":"\u224E\u0338","nbumpe":"\u224F\u0338","ncap":"\u2A43","Ncaron":"\u0147","ncaron":"\u0148","Ncedil":"\u0145","ncedil":"\u0146","ncong":"\u2247","ncongdot":"\u2A6D\u0338","ncup":"\u2A42","Ncy":"\u041D","ncy":"\u043D","ndash":"\u2013","nearhk":"\u2924","nearr":"\u2197","neArr":"\u21D7","nearrow":"\u2197","ne":"\u2260","nedot":"\u2250\u0338","NegativeMediumSpace":"\u200B","NegativeThickSpace":"\u200B","NegativeThinSpace":"\u200B","NegativeVeryThinSpace":"\u200B","nequiv":"\u2262","nesear":"\u2928","nesim":"\u2242\u0338","NestedGreaterGreater":"\u226B","NestedLessLess":"\u226A","NewLine":"\n","nexist":"\u2204","nexists":"\u2204","Nfr":"\uD835\uDD11","nfr":"\uD835\uDD2B","ngE":"\u2267\u0338","nge":"\u2271","ngeq":"\u2271","ngeqq":"\u2267\u0338","ngeqslant":"\u2A7E\u0338","nges":"\u2A7E\u0338","nGg":"\u22D9\u0338","ngsim":"\u2275","nGt":"\u226B\u20D2","ngt":"\u226F","ngtr":"\u226F","nGtv":"\u226B\u0338","nharr":"\u21AE","nhArr":"\u21CE","nhpar":"\u2AF2","ni":"\u220B","nis":"\u22FC","nisd":"\u22FA","niv":"\u220B","NJcy":"\u040A","njcy":"\u045A","nlarr":"\u219A","nlArr":"\u21CD","nldr":"\u2025","nlE":"\u2266\u0338","nle":"\u2270","nleftarrow":"\u219A","nLeftarrow":"\u21CD","nleftrightarrow":"\u21AE","nLeftrightarrow":"\u21CE","nleq":"\u2270","nleqq":"\u2266\u0338","nleqslant":"\u2A7D\u0338","nles":"\u2A7D\u0338","nless":"\u226E","nLl":"\u22D8\u0338","nlsim":"\u2274","nLt":"\u226A\u20D2","nlt":"\u226E","nltri":"\u22EA","nltrie":"\u22EC","nLtv":"\u226A\u0338","nmid":"\u2224","NoBreak":"\u2060","NonBreakingSpace":"\u00A0","nopf":"\uD835\uDD5F","Nopf":"\u2115","Not":"\u2AEC","not":"\u00AC","NotCongruent":"\u2262","NotCupCap":"\u226D","NotDoubleVerticalBar":"\u2226","NotElement":"\u2209","NotEqual":"\u2260","NotEqualTilde":"\u2242\u0338","NotExists":"\u2204","NotGreater":"\u226F","NotGreaterEqual":"\u2271","NotGreaterFullEqual":"\u2267\u0338","NotGreaterGreater":"\u226B\u0338","NotGreaterLess":"\u2279","NotGreaterSlantEqual":"\u2A7E\u0338","NotGreaterTilde":"\u2275","NotHumpDownHump":"\u224E\u0338","NotHumpEqual":"\u224F\u0338","notin":"\u2209","notindot":"\u22F5\u0338","notinE":"\u22F9\u0338","notinva":"\u2209","notinvb":"\u22F7","notinvc":"\u22F6","NotLeftTriangleBar":"\u29CF\u0338","NotLeftTriangle":"\u22EA","NotLeftTriangleEqual":"\u22EC","NotLess":"\u226E","NotLessEqual":"\u2270","NotLessGreater":"\u2278","NotLessLess":"\u226A\u0338","NotLessSlantEqual":"\u2A7D\u0338","NotLessTilde":"\u2274","NotNestedGreaterGreater":"\u2AA2\u0338","NotNestedLessLess":"\u2AA1\u0338","notni":"\u220C","notniva":"\u220C","notnivb":"\u22FE","notnivc":"\u22FD","NotPrecedes":"\u2280","NotPrecedesEqual":"\u2AAF\u0338","NotPrecedesSlantEqual":"\u22E0","NotReverseElement":"\u220C","NotRightTriangleBar":"\u29D0\u0338","NotRightTriangle":"\u22EB","NotRightTriangleEqual":"\u22ED","NotSquareSubset":"\u228F\u0338","NotSquareSubsetEqual":"\u22E2","NotSquareSuperset":"\u2290\u0338","NotSquareSupersetEqual":"\u22E3","NotSubset":"\u2282\u20D2","NotSubsetEqual":"\u2288","NotSucceeds":"\u2281","NotSucceedsEqual":"\u2AB0\u0338","NotSucceedsSlantEqual":"\u22E1","NotSucceedsTilde":"\u227F\u0338","NotSuperset":"\u2283\u20D2","NotSupersetEqual":"\u2289","NotTilde":"\u2241","NotTildeEqual":"\u2244","NotTildeFullEqual":"\u2247","NotTildeTilde":"\u2249","NotVerticalBar":"\u2224","nparallel":"\u2226","npar":"\u2226","nparsl":"\u2AFD\u20E5","npart":"\u2202\u0338","npolint":"\u2A14","npr":"\u2280","nprcue":"\u22E0","nprec":"\u2280","npreceq":"\u2AAF\u0338","npre":"\u2AAF\u0338","nrarrc":"\u2933\u0338","nrarr":"\u219B","nrArr":"\u21CF","nrarrw":"\u219D\u0338","nrightarrow":"\u219B","nRightarrow":"\u21CF","nrtri":"\u22EB","nrtrie":"\u22ED","nsc":"\u2281","nsccue":"\u22E1","nsce":"\u2AB0\u0338","Nscr":"\uD835\uDCA9","nscr":"\uD835\uDCC3","nshortmid":"\u2224","nshortparallel":"\u2226","nsim":"\u2241","nsime":"\u2244","nsimeq":"\u2244","nsmid":"\u2224","nspar":"\u2226","nsqsube":"\u22E2","nsqsupe":"\u22E3","nsub":"\u2284","nsubE":"\u2AC5\u0338","nsube":"\u2288","nsubset":"\u2282\u20D2","nsubseteq":"\u2288","nsubseteqq":"\u2AC5\u0338","nsucc":"\u2281","nsucceq":"\u2AB0\u0338","nsup":"\u2285","nsupE":"\u2AC6\u0338","nsupe":"\u2289","nsupset":"\u2283\u20D2","nsupseteq":"\u2289","nsupseteqq":"\u2AC6\u0338","ntgl":"\u2279","Ntilde":"\u00D1","ntilde":"\u00F1","ntlg":"\u2278","ntriangleleft":"\u22EA","ntrianglelefteq":"\u22EC","ntriangleright":"\u22EB","ntrianglerighteq":"\u22ED","Nu":"\u039D","nu":"\u03BD","num":"#","numero":"\u2116","numsp":"\u2007","nvap":"\u224D\u20D2","nvdash":"\u22AC","nvDash":"\u22AD","nVdash":"\u22AE","nVDash":"\u22AF","nvge":"\u2265\u20D2","nvgt":">\u20D2","nvHarr":"\u2904","nvinfin":"\u29DE","nvlArr":"\u2902","nvle":"\u2264\u20D2","nvlt":"<\u20D2","nvltrie":"\u22B4\u20D2","nvrArr":"\u2903","nvrtrie":"\u22B5\u20D2","nvsim":"\u223C\u20D2","nwarhk":"\u2923","nwarr":"\u2196","nwArr":"\u21D6","nwarrow":"\u2196","nwnear":"\u2927","Oacute":"\u00D3","oacute":"\u00F3","oast":"\u229B","Ocirc":"\u00D4","ocirc":"\u00F4","ocir":"\u229A","Ocy":"\u041E","ocy":"\u043E","odash":"\u229D","Odblac":"\u0150","odblac":"\u0151","odiv":"\u2A38","odot":"\u2299","odsold":"\u29BC","OElig":"\u0152","oelig":"\u0153","ofcir":"\u29BF","Ofr":"\uD835\uDD12","ofr":"\uD835\uDD2C","ogon":"\u02DB","Ograve":"\u00D2","ograve":"\u00F2","ogt":"\u29C1","ohbar":"\u29B5","ohm":"\u03A9","oint":"\u222E","olarr":"\u21BA","olcir":"\u29BE","olcross":"\u29BB","oline":"\u203E","olt":"\u29C0","Omacr":"\u014C","omacr":"\u014D","Omega":"\u03A9","omega":"\u03C9","Omicron":"\u039F","omicron":"\u03BF","omid":"\u29B6","ominus":"\u2296","Oopf":"\uD835\uDD46","oopf":"\uD835\uDD60","opar":"\u29B7","OpenCurlyDoubleQuote":"\u201C","OpenCurlyQuote":"\u2018","operp":"\u29B9","oplus":"\u2295","orarr":"\u21BB","Or":"\u2A54","or":"\u2228","ord":"\u2A5D","order":"\u2134","orderof":"\u2134","ordf":"\u00AA","ordm":"\u00BA","origof":"\u22B6","oror":"\u2A56","orslope":"\u2A57","orv":"\u2A5B","oS":"\u24C8","Oscr":"\uD835\uDCAA","oscr":"\u2134","Oslash":"\u00D8","oslash":"\u00F8","osol":"\u2298","Otilde":"\u00D5","otilde":"\u00F5","otimesas":"\u2A36","Otimes":"\u2A37","otimes":"\u2297","Ouml":"\u00D6","ouml":"\u00F6","ovbar":"\u233D","OverBar":"\u203E","OverBrace":"\u23DE","OverBracket":"\u23B4","OverParenthesis":"\u23DC","para":"\u00B6","parallel":"\u2225","par":"\u2225","parsim":"\u2AF3","parsl":"\u2AFD","part":"\u2202","PartialD":"\u2202","Pcy":"\u041F","pcy":"\u043F","percnt":"%","period":".","permil":"\u2030","perp":"\u22A5","pertenk":"\u2031","Pfr":"\uD835\uDD13","pfr":"\uD835\uDD2D","Phi":"\u03A6","phi":"\u03C6","phiv":"\u03D5","phmmat":"\u2133","phone":"\u260E","Pi":"\u03A0","pi":"\u03C0","pitchfork":"\u22D4","piv":"\u03D6","planck":"\u210F","planckh":"\u210E","plankv":"\u210F","plusacir":"\u2A23","plusb":"\u229E","pluscir":"\u2A22","plus":"+","plusdo":"\u2214","plusdu":"\u2A25","pluse":"\u2A72","PlusMinus":"\u00B1","plusmn":"\u00B1","plussim":"\u2A26","plustwo":"\u2A27","pm":"\u00B1","Poincareplane":"\u210C","pointint":"\u2A15","popf":"\uD835\uDD61","Popf":"\u2119","pound":"\u00A3","prap":"\u2AB7","Pr":"\u2ABB","pr":"\u227A","prcue":"\u227C","precapprox":"\u2AB7","prec":"\u227A","preccurlyeq":"\u227C","Precedes":"\u227A","PrecedesEqual":"\u2AAF","PrecedesSlantEqual":"\u227C","PrecedesTilde":"\u227E","preceq":"\u2AAF","precnapprox":"\u2AB9","precneqq":"\u2AB5","precnsim":"\u22E8","pre":"\u2AAF","prE":"\u2AB3","precsim":"\u227E","prime":"\u2032","Prime":"\u2033","primes":"\u2119","prnap":"\u2AB9","prnE":"\u2AB5","prnsim":"\u22E8","prod":"\u220F","Product":"\u220F","profalar":"\u232E","profline":"\u2312","profsurf":"\u2313","prop":"\u221D","Proportional":"\u221D","Proportion":"\u2237","propto":"\u221D","prsim":"\u227E","prurel":"\u22B0","Pscr":"\uD835\uDCAB","pscr":"\uD835\uDCC5","Psi":"\u03A8","psi":"\u03C8","puncsp":"\u2008","Qfr":"\uD835\uDD14","qfr":"\uD835\uDD2E","qint":"\u2A0C","qopf":"\uD835\uDD62","Qopf":"\u211A","qprime":"\u2057","Qscr":"\uD835\uDCAC","qscr":"\uD835\uDCC6","quaternions":"\u210D","quatint":"\u2A16","quest":"?","questeq":"\u225F","quot":"\"","QUOT":"\"","rAarr":"\u21DB","race":"\u223D\u0331","Racute":"\u0154","racute":"\u0155","radic":"\u221A","raemptyv":"\u29B3","rang":"\u27E9","Rang":"\u27EB","rangd":"\u2992","range":"\u29A5","rangle":"\u27E9","raquo":"\u00BB","rarrap":"\u2975","rarrb":"\u21E5","rarrbfs":"\u2920","rarrc":"\u2933","rarr":"\u2192","Rarr":"\u21A0","rArr":"\u21D2","rarrfs":"\u291E","rarrhk":"\u21AA","rarrlp":"\u21AC","rarrpl":"\u2945","rarrsim":"\u2974","Rarrtl":"\u2916","rarrtl":"\u21A3","rarrw":"\u219D","ratail":"\u291A","rAtail":"\u291C","ratio":"\u2236","rationals":"\u211A","rbarr":"\u290D","rBarr":"\u290F","RBarr":"\u2910","rbbrk":"\u2773","rbrace":"}","rbrack":"]","rbrke":"\u298C","rbrksld":"\u298E","rbrkslu":"\u2990","Rcaron":"\u0158","rcaron":"\u0159","Rcedil":"\u0156","rcedil":"\u0157","rceil":"\u2309","rcub":"}","Rcy":"\u0420","rcy":"\u0440","rdca":"\u2937","rdldhar":"\u2969","rdquo":"\u201D","rdquor":"\u201D","rdsh":"\u21B3","real":"\u211C","realine":"\u211B","realpart":"\u211C","reals":"\u211D","Re":"\u211C","rect":"\u25AD","reg":"\u00AE","REG":"\u00AE","ReverseElement":"\u220B","ReverseEquilibrium":"\u21CB","ReverseUpEquilibrium":"\u296F","rfisht":"\u297D","rfloor":"\u230B","rfr":"\uD835\uDD2F","Rfr":"\u211C","rHar":"\u2964","rhard":"\u21C1","rharu":"\u21C0","rharul":"\u296C","Rho":"\u03A1","rho":"\u03C1","rhov":"\u03F1","RightAngleBracket":"\u27E9","RightArrowBar":"\u21E5","rightarrow":"\u2192","RightArrow":"\u2192","Rightarrow":"\u21D2","RightArrowLeftArrow":"\u21C4","rightarrowtail":"\u21A3","RightCeiling":"\u2309","RightDoubleBracket":"\u27E7","RightDownTeeVector":"\u295D","RightDownVectorBar":"\u2955","RightDownVector":"\u21C2","RightFloor":"\u230B","rightharpoondown":"\u21C1","rightharpoonup":"\u21C0","rightleftarrows":"\u21C4","rightleftharpoons":"\u21CC","rightrightarrows":"\u21C9","rightsquigarrow":"\u219D","RightTeeArrow":"\u21A6","RightTee":"\u22A2","RightTeeVector":"\u295B","rightthreetimes":"\u22CC","RightTriangleBar":"\u29D0","RightTriangle":"\u22B3","RightTriangleEqual":"\u22B5","RightUpDownVector":"\u294F","RightUpTeeVector":"\u295C","RightUpVectorBar":"\u2954","RightUpVector":"\u21BE","RightVectorBar":"\u2953","RightVector":"\u21C0","ring":"\u02DA","risingdotseq":"\u2253","rlarr":"\u21C4","rlhar":"\u21CC","rlm":"\u200F","rmoustache":"\u23B1","rmoust":"\u23B1","rnmid":"\u2AEE","roang":"\u27ED","roarr":"\u21FE","robrk":"\u27E7","ropar":"\u2986","ropf":"\uD835\uDD63","Ropf":"\u211D","roplus":"\u2A2E","rotimes":"\u2A35","RoundImplies":"\u2970","rpar":")","rpargt":"\u2994","rppolint":"\u2A12","rrarr":"\u21C9","Rrightarrow":"\u21DB","rsaquo":"\u203A","rscr":"\uD835\uDCC7","Rscr":"\u211B","rsh":"\u21B1","Rsh":"\u21B1","rsqb":"]","rsquo":"\u2019","rsquor":"\u2019","rthree":"\u22CC","rtimes":"\u22CA","rtri":"\u25B9","rtrie":"\u22B5","rtrif":"\u25B8","rtriltri":"\u29CE","RuleDelayed":"\u29F4","ruluhar":"\u2968","rx":"\u211E","Sacute":"\u015A","sacute":"\u015B","sbquo":"\u201A","scap":"\u2AB8","Scaron":"\u0160","scaron":"\u0161","Sc":"\u2ABC","sc":"\u227B","sccue":"\u227D","sce":"\u2AB0","scE":"\u2AB4","Scedil":"\u015E","scedil":"\u015F","Scirc":"\u015C","scirc":"\u015D","scnap":"\u2ABA","scnE":"\u2AB6","scnsim":"\u22E9","scpolint":"\u2A13","scsim":"\u227F","Scy":"\u0421","scy":"\u0441","sdotb":"\u22A1","sdot":"\u22C5","sdote":"\u2A66","searhk":"\u2925","searr":"\u2198","seArr":"\u21D8","searrow":"\u2198","sect":"\u00A7","semi":";","seswar":"\u2929","setminus":"\u2216","setmn":"\u2216","sext":"\u2736","Sfr":"\uD835\uDD16","sfr":"\uD835\uDD30","sfrown":"\u2322","sharp":"\u266F","SHCHcy":"\u0429","shchcy":"\u0449","SHcy":"\u0428","shcy":"\u0448","ShortDownArrow":"\u2193","ShortLeftArrow":"\u2190","shortmid":"\u2223","shortparallel":"\u2225","ShortRightArrow":"\u2192","ShortUpArrow":"\u2191","shy":"\u00AD","Sigma":"\u03A3","sigma":"\u03C3","sigmaf":"\u03C2","sigmav":"\u03C2","sim":"\u223C","simdot":"\u2A6A","sime":"\u2243","simeq":"\u2243","simg":"\u2A9E","simgE":"\u2AA0","siml":"\u2A9D","simlE":"\u2A9F","simne":"\u2246","simplus":"\u2A24","simrarr":"\u2972","slarr":"\u2190","SmallCircle":"\u2218","smallsetminus":"\u2216","smashp":"\u2A33","smeparsl":"\u29E4","smid":"\u2223","smile":"\u2323","smt":"\u2AAA","smte":"\u2AAC","smtes":"\u2AAC\uFE00","SOFTcy":"\u042C","softcy":"\u044C","solbar":"\u233F","solb":"\u29C4","sol":"/","Sopf":"\uD835\uDD4A","sopf":"\uD835\uDD64","spades":"\u2660","spadesuit":"\u2660","spar":"\u2225","sqcap":"\u2293","sqcaps":"\u2293\uFE00","sqcup":"\u2294","sqcups":"\u2294\uFE00","Sqrt":"\u221A","sqsub":"\u228F","sqsube":"\u2291","sqsubset":"\u228F","sqsubseteq":"\u2291","sqsup":"\u2290","sqsupe":"\u2292","sqsupset":"\u2290","sqsupseteq":"\u2292","square":"\u25A1","Square":"\u25A1","SquareIntersection":"\u2293","SquareSubset":"\u228F","SquareSubsetEqual":"\u2291","SquareSuperset":"\u2290","SquareSupersetEqual":"\u2292","SquareUnion":"\u2294","squarf":"\u25AA","squ":"\u25A1","squf":"\u25AA","srarr":"\u2192","Sscr":"\uD835\uDCAE","sscr":"\uD835\uDCC8","ssetmn":"\u2216","ssmile":"\u2323","sstarf":"\u22C6","Star":"\u22C6","star":"\u2606","starf":"\u2605","straightepsilon":"\u03F5","straightphi":"\u03D5","strns":"\u00AF","sub":"\u2282","Sub":"\u22D0","subdot":"\u2ABD","subE":"\u2AC5","sube":"\u2286","subedot":"\u2AC3","submult":"\u2AC1","subnE":"\u2ACB","subne":"\u228A","subplus":"\u2ABF","subrarr":"\u2979","subset":"\u2282","Subset":"\u22D0","subseteq":"\u2286","subseteqq":"\u2AC5","SubsetEqual":"\u2286","subsetneq":"\u228A","subsetneqq":"\u2ACB","subsim":"\u2AC7","subsub":"\u2AD5","subsup":"\u2AD3","succapprox":"\u2AB8","succ":"\u227B","succcurlyeq":"\u227D","Succeeds":"\u227B","SucceedsEqual":"\u2AB0","SucceedsSlantEqual":"\u227D","SucceedsTilde":"\u227F","succeq":"\u2AB0","succnapprox":"\u2ABA","succneqq":"\u2AB6","succnsim":"\u22E9","succsim":"\u227F","SuchThat":"\u220B","sum":"\u2211","Sum":"\u2211","sung":"\u266A","sup1":"\u00B9","sup2":"\u00B2","sup3":"\u00B3","sup":"\u2283","Sup":"\u22D1","supdot":"\u2ABE","supdsub":"\u2AD8","supE":"\u2AC6","supe":"\u2287","supedot":"\u2AC4","Superset":"\u2283","SupersetEqual":"\u2287","suphsol":"\u27C9","suphsub":"\u2AD7","suplarr":"\u297B","supmult":"\u2AC2","supnE":"\u2ACC","supne":"\u228B","supplus":"\u2AC0","supset":"\u2283","Supset":"\u22D1","supseteq":"\u2287","supseteqq":"\u2AC6","supsetneq":"\u228B","supsetneqq":"\u2ACC","supsim":"\u2AC8","supsub":"\u2AD4","supsup":"\u2AD6","swarhk":"\u2926","swarr":"\u2199","swArr":"\u21D9","swarrow":"\u2199","swnwar":"\u292A","szlig":"\u00DF","Tab":"\t","target":"\u2316","Tau":"\u03A4","tau":"\u03C4","tbrk":"\u23B4","Tcaron":"\u0164","tcaron":"\u0165","Tcedil":"\u0162","tcedil":"\u0163","Tcy":"\u0422","tcy":"\u0442","tdot":"\u20DB","telrec":"\u2315","Tfr":"\uD835\uDD17","tfr":"\uD835\uDD31","there4":"\u2234","therefore":"\u2234","Therefore":"\u2234","Theta":"\u0398","theta":"\u03B8","thetasym":"\u03D1","thetav":"\u03D1","thickapprox":"\u2248","thicksim":"\u223C","ThickSpace":"\u205F\u200A","ThinSpace":"\u2009","thinsp":"\u2009","thkap":"\u2248","thksim":"\u223C","THORN":"\u00DE","thorn":"\u00FE","tilde":"\u02DC","Tilde":"\u223C","TildeEqual":"\u2243","TildeFullEqual":"\u2245","TildeTilde":"\u2248","timesbar":"\u2A31","timesb":"\u22A0","times":"\u00D7","timesd":"\u2A30","tint":"\u222D","toea":"\u2928","topbot":"\u2336","topcir":"\u2AF1","top":"\u22A4","Topf":"\uD835\uDD4B","topf":"\uD835\uDD65","topfork":"\u2ADA","tosa":"\u2929","tprime":"\u2034","trade":"\u2122","TRADE":"\u2122","triangle":"\u25B5","triangledown":"\u25BF","triangleleft":"\u25C3","trianglelefteq":"\u22B4","triangleq":"\u225C","triangleright":"\u25B9","trianglerighteq":"\u22B5","tridot":"\u25EC","trie":"\u225C","triminus":"\u2A3A","TripleDot":"\u20DB","triplus":"\u2A39","trisb":"\u29CD","tritime":"\u2A3B","trpezium":"\u23E2","Tscr":"\uD835\uDCAF","tscr":"\uD835\uDCC9","TScy":"\u0426","tscy":"\u0446","TSHcy":"\u040B","tshcy":"\u045B","Tstrok":"\u0166","tstrok":"\u0167","twixt":"\u226C","twoheadleftarrow":"\u219E","twoheadrightarrow":"\u21A0","Uacute":"\u00DA","uacute":"\u00FA","uarr":"\u2191","Uarr":"\u219F","uArr":"\u21D1","Uarrocir":"\u2949","Ubrcy":"\u040E","ubrcy":"\u045E","Ubreve":"\u016C","ubreve":"\u016D","Ucirc":"\u00DB","ucirc":"\u00FB","Ucy":"\u0423","ucy":"\u0443","udarr":"\u21C5","Udblac":"\u0170","udblac":"\u0171","udhar":"\u296E","ufisht":"\u297E","Ufr":"\uD835\uDD18","ufr":"\uD835\uDD32","Ugrave":"\u00D9","ugrave":"\u00F9","uHar":"\u2963","uharl":"\u21BF","uharr":"\u21BE","uhblk":"\u2580","ulcorn":"\u231C","ulcorner":"\u231C","ulcrop":"\u230F","ultri":"\u25F8","Umacr":"\u016A","umacr":"\u016B","uml":"\u00A8","UnderBar":"_","UnderBrace":"\u23DF","UnderBracket":"\u23B5","UnderParenthesis":"\u23DD","Union":"\u22C3","UnionPlus":"\u228E","Uogon":"\u0172","uogon":"\u0173","Uopf":"\uD835\uDD4C","uopf":"\uD835\uDD66","UpArrowBar":"\u2912","uparrow":"\u2191","UpArrow":"\u2191","Uparrow":"\u21D1","UpArrowDownArrow":"\u21C5","updownarrow":"\u2195","UpDownArrow":"\u2195","Updownarrow":"\u21D5","UpEquilibrium":"\u296E","upharpoonleft":"\u21BF","upharpoonright":"\u21BE","uplus":"\u228E","UpperLeftArrow":"\u2196","UpperRightArrow":"\u2197","upsi":"\u03C5","Upsi":"\u03D2","upsih":"\u03D2","Upsilon":"\u03A5","upsilon":"\u03C5","UpTeeArrow":"\u21A5","UpTee":"\u22A5","upuparrows":"\u21C8","urcorn":"\u231D","urcorner":"\u231D","urcrop":"\u230E","Uring":"\u016E","uring":"\u016F","urtri":"\u25F9","Uscr":"\uD835\uDCB0","uscr":"\uD835\uDCCA","utdot":"\u22F0","Utilde":"\u0168","utilde":"\u0169","utri":"\u25B5","utrif":"\u25B4","uuarr":"\u21C8","Uuml":"\u00DC","uuml":"\u00FC","uwangle":"\u29A7","vangrt":"\u299C","varepsilon":"\u03F5","varkappa":"\u03F0","varnothing":"\u2205","varphi":"\u03D5","varpi":"\u03D6","varpropto":"\u221D","varr":"\u2195","vArr":"\u21D5","varrho":"\u03F1","varsigma":"\u03C2","varsubsetneq":"\u228A\uFE00","varsubsetneqq":"\u2ACB\uFE00","varsupsetneq":"\u228B\uFE00","varsupsetneqq":"\u2ACC\uFE00","vartheta":"\u03D1","vartriangleleft":"\u22B2","vartriangleright":"\u22B3","vBar":"\u2AE8","Vbar":"\u2AEB","vBarv":"\u2AE9","Vcy":"\u0412","vcy":"\u0432","vdash":"\u22A2","vDash":"\u22A8","Vdash":"\u22A9","VDash":"\u22AB","Vdashl":"\u2AE6","veebar":"\u22BB","vee":"\u2228","Vee":"\u22C1","veeeq":"\u225A","vellip":"\u22EE","verbar":"|","Verbar":"\u2016","vert":"|","Vert":"\u2016","VerticalBar":"\u2223","VerticalLine":"|","VerticalSeparator":"\u2758","VerticalTilde":"\u2240","VeryThinSpace":"\u200A","Vfr":"\uD835\uDD19","vfr":"\uD835\uDD33","vltri":"\u22B2","vnsub":"\u2282\u20D2","vnsup":"\u2283\u20D2","Vopf":"\uD835\uDD4D","vopf":"\uD835\uDD67","vprop":"\u221D","vrtri":"\u22B3","Vscr":"\uD835\uDCB1","vscr":"\uD835\uDCCB","vsubnE":"\u2ACB\uFE00","vsubne":"\u228A\uFE00","vsupnE":"\u2ACC\uFE00","vsupne":"\u228B\uFE00","Vvdash":"\u22AA","vzigzag":"\u299A","Wcirc":"\u0174","wcirc":"\u0175","wedbar":"\u2A5F","wedge":"\u2227","Wedge":"\u22C0","wedgeq":"\u2259","weierp":"\u2118","Wfr":"\uD835\uDD1A","wfr":"\uD835\uDD34","Wopf":"\uD835\uDD4E","wopf":"\uD835\uDD68","wp":"\u2118","wr":"\u2240","wreath":"\u2240","Wscr":"\uD835\uDCB2","wscr":"\uD835\uDCCC","xcap":"\u22C2","xcirc":"\u25EF","xcup":"\u22C3","xdtri":"\u25BD","Xfr":"\uD835\uDD1B","xfr":"\uD835\uDD35","xharr":"\u27F7","xhArr":"\u27FA","Xi":"\u039E","xi":"\u03BE","xlarr":"\u27F5","xlArr":"\u27F8","xmap":"\u27FC","xnis":"\u22FB","xodot":"\u2A00","Xopf":"\uD835\uDD4F","xopf":"\uD835\uDD69","xoplus":"\u2A01","xotime":"\u2A02","xrarr":"\u27F6","xrArr":"\u27F9","Xscr":"\uD835\uDCB3","xscr":"\uD835\uDCCD","xsqcup":"\u2A06","xuplus":"\u2A04","xutri":"\u25B3","xvee":"\u22C1","xwedge":"\u22C0","Yacute":"\u00DD","yacute":"\u00FD","YAcy":"\u042F","yacy":"\u044F","Ycirc":"\u0176","ycirc":"\u0177","Ycy":"\u042B","ycy":"\u044B","yen":"\u00A5","Yfr":"\uD835\uDD1C","yfr":"\uD835\uDD36","YIcy":"\u0407","yicy":"\u0457","Yopf":"\uD835\uDD50","yopf":"\uD835\uDD6A","Yscr":"\uD835\uDCB4","yscr":"\uD835\uDCCE","YUcy":"\u042E","yucy":"\u044E","yuml":"\u00FF","Yuml":"\u0178","Zacute":"\u0179","zacute":"\u017A","Zcaron":"\u017D","zcaron":"\u017E","Zcy":"\u0417","zcy":"\u0437","Zdot":"\u017B","zdot":"\u017C","zeetrf":"\u2128","ZeroWidthSpace":"\u200B","Zeta":"\u0396","zeta":"\u03B6","zfr":"\uD835\uDD37","Zfr":"\u2128","ZHcy":"\u0416","zhcy":"\u0436","zigrarr":"\u21DD","zopf":"\uD835\uDD6B","Zopf":"\u2124","Zscr":"\uD835\uDCB5","zscr":"\uD835\uDCCF","zwj":"\u200D","zwnj":"\u200C"}
-},{}],13:[function(require,module,exports){
+},{}],15:[function(require,module,exports){
+/* eslint no-console:0 */
 /**
  * This is the main entry point for KaTeX. Here, we expose functions for
  * rendering expressions either to DOM nodes or to markup strings.
@@ -2897,10 +3235,10 @@ module.exports = {
      * to change. Use at your own risk.
      */
     __parse: generateParseTree,
-    ParseError: ParseError
+    ParseError: ParseError,
 };
 
-},{"./src/ParseError":16,"./src/Settings":18,"./src/buildTree":23,"./src/parseTree":32,"./src/utils":34}],14:[function(require,module,exports){
+},{"./src/ParseError":18,"./src/Settings":20,"./src/buildTree":25,"./src/parseTree":34,"./src/utils":36}],16:[function(require,module,exports){
 /**
  * The Lexer class handles tokenizing the input in various ways. Since our
  * parser expects us to be able to backtrack, the lexer allows lexing from any
@@ -2930,86 +3268,54 @@ function Token(text, data, position) {
     this.position = position;
 }
 
-// "normal" types of tokens. These are tokens which can be matched by a simple
-// regex
-var mathNormals = [
-    /[/|@.""`0-9a-zA-Z]/, // ords
-    /[*+-]/, // bins
-    /[=<>:]/, // rels
-    /[,;]/, // punctuation
-    /['\^_{}]/, // misc
-    /[(\[]/, // opens
-    /[)\]?!]/, // closes
-    /~/, // spacing
-    /&/, // horizontal alignment
-    /\\\\/ // line break
-];
+/* The following tokenRegex
+ * - matches typical whitespace (but not NBSP etc.) using its first group
+ * - matches symbol combinations which result in a single output character
+ * - does not match any control character \x00-\x1f except whitespace
+ * - does not match a bare backslash
+ * - matches any ASCII character except those just mentioned
+ * - does not match the BMP private use area \uE000-\uF8FF
+ * - does not match bare surrogate code units
+ * - matches any BMP character except for those just described
+ * - matches any valid Unicode surrogate pair
+ * - matches a backslash followed by one or more letters
+ * - matches a backslash followed by any BMP character, including newline
+ * Just because the Lexer matches something doesn't mean it's valid input:
+ * If there is no matching function or symbol definition, the Parser will
+ * still reject the input.
+ */
+var tokenRegex = new RegExp(
+    "([ \r\n\t]+)|(" +                                // whitespace
+    "---?" +                                          // special combinations
+    "|[!-\\[\\]-\u2027\u202A-\uD7FF\uF900-\uFFFF]" +  // single codepoint
+    "|[\uD800-\uDBFF][\uDC00-\uDFFF]" +               // surrogate pair
+    "|\\\\(?:[a-zA-Z]+|[^\uD800-\uDFFF])" +           // function name
+    ")"
+);
 
-// These are "normal" tokens like above, but should instead be parsed in text
-// mode.
-var textNormals = [
-    /[a-zA-Z0-9`!@*()-=+\[\]'";:?\/.,]/, // ords
-    /[{}]/, // grouping
-    /~/, // spacing
-    /&/, // horizontal alignment
-    /\\\\/ // line break
-];
-
-// Regexes for matching whitespace
 var whitespaceRegex = /\s*/;
-var whitespaceConcatRegex = / +|\\  +/;
-
-// This regex matches any other TeX function, which is a backslash followed by a
-// word or a single symbol
-var anyFunc = /\\(?:[a-zA-Z]+|.)/;
 
 /**
- * This function lexes a single normal token. It takes a position, a list of
- * "normal" tokens to try, and whether it should completely ignore whitespace or
- * not.
+ * This function lexes a single normal token. It takes a position and
+ * whether it should completely ignore whitespace or not.
  */
-Lexer.prototype._innerLex = function(pos, normals, ignoreWhitespace) {
+Lexer.prototype._innerLex = function(pos, ignoreWhitespace) {
     var input = this._input;
-    var whitespace;
-
-    if (ignoreWhitespace) {
-        // Get rid of whitespace.
-        whitespace = matchAt(whitespaceRegex, input, pos)[0];
-        pos += whitespace.length;
-    } else {
-        // Do the funky concatenation of whitespace that happens in text mode.
-        whitespace = matchAt(whitespaceConcatRegex, input, pos);
-        if (whitespace !== null) {
-            return new Token(" ", null, pos + whitespace[0].length);
-        }
-    }
-
-    // If there's no more input to parse, return an EOF token
     if (pos === input.length) {
         return new Token("EOF", null, pos);
     }
-
-    var match;
-    if ((match = matchAt(anyFunc, input, pos))) {
-        // If we match a function token, return it
-        return new Token(match[0], null, pos + match[0].length);
-    } else {
-        // Otherwise, we look through the normal token regexes and see if it's
-        // one of them.
-        for (var i = 0; i < normals.length; i++) {
-            var normal = normals[i];
-
-            if ((match = matchAt(normal, input, pos))) {
-                // If it is, return it
-                return new Token(
-                    match[0], null, pos + match[0].length);
-            }
-        }
-    }
-
-    throw new ParseError(
+    var match = matchAt(tokenRegex, input, pos);
+    if (match === null) {
+        throw new ParseError(
             "Unexpected character: '" + input[pos] + "'",
             this, pos);
+    } else if (match[2]) { // matched non-whitespace
+        return new Token(match[2], null, pos + match[2].length);
+    } else if (ignoreWhitespace) {
+        return this._innerLex(pos + match[1].length, true);
+    } else { // concatenate whitespace to a single space
+        return new Token(" ", null, pos + match[1].length);
+    }
 };
 
 // A regex to match a CSS color (like #ffffff or BlueViolet)
@@ -3056,9 +3362,9 @@ Lexer.prototype._innerLexSize = function(pos) {
             throw new ParseError("Invalid unit: '" + unit + "'", this, pos);
         }
         return new Token(match[0], {
-                number: +(match[1] + match[2]),
-                unit: unit
-            }, pos + match[0].length);
+            number: +(match[1] + match[2]),
+            unit: unit,
+        }, pos + match[0].length);
     }
 
     throw new ParseError("Invalid size", this, pos);
@@ -3082,9 +3388,9 @@ Lexer.prototype._innerLexWhitespace = function(pos) {
  */
 Lexer.prototype.lex = function(pos, mode) {
     if (mode === "math") {
-        return this._innerLex(pos, mathNormals, true);
+        return this._innerLex(pos, true);
     } else if (mode === "text") {
-        return this._innerLex(pos, textNormals, false);
+        return this._innerLex(pos, false);
     } else if (mode === "color") {
         return this._innerLexColor(pos);
     } else if (mode === "size") {
@@ -3096,7 +3402,7 @@ Lexer.prototype.lex = function(pos, mode) {
 
 module.exports = Lexer;
 
-},{"./ParseError":16,"match-at":91}],15:[function(require,module,exports){
+},{"./ParseError":18,"match-at":93}],17:[function(require,module,exports){
 /**
  * This file contains information about the options that the Parser carries
  * around with it while parsing. Data is held in an `Options` object, and when
@@ -3145,7 +3451,7 @@ Options.prototype.extend = function(extension) {
         parentStyle: this.style,
         parentSize: this.size,
         phantom: this.phantom,
-        font: this.font
+        font: this.font,
     };
 
     for (var key in extension) {
@@ -3162,7 +3468,7 @@ Options.prototype.extend = function(extension) {
  */
 Options.prototype.withStyle = function(style) {
     return this.extend({
-        style: style
+        style: style,
     });
 };
 
@@ -3171,7 +3477,7 @@ Options.prototype.withStyle = function(style) {
  */
 Options.prototype.withSize = function(size) {
     return this.extend({
-        size: size
+        size: size,
     });
 };
 
@@ -3180,7 +3486,7 @@ Options.prototype.withSize = function(size) {
  */
 Options.prototype.withColor = function(color) {
     return this.extend({
-        color: color
+        color: color,
     });
 };
 
@@ -3189,7 +3495,7 @@ Options.prototype.withColor = function(color) {
  */
 Options.prototype.withPhantom = function() {
     return this.extend({
-        phantom: true
+        phantom: true,
     });
 };
 
@@ -3198,7 +3504,7 @@ Options.prototype.withPhantom = function() {
  */
 Options.prototype.withFont = function(font) {
     return this.extend({
-        font: font
+        font: font,
     });
 };
 
@@ -3270,7 +3576,7 @@ var colorMap = {
     "katex-grayH": "#555555",
     "katex-grayI": "#333333",
     "katex-kaBlue": "#314453",
-    "katex-kaGreen": "#639b24"
+    "katex-kaGreen": "#639b24",
 };
 
 /**
@@ -3287,7 +3593,7 @@ Options.prototype.getColor = function() {
 
 module.exports = Options;
 
-},{}],16:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 /**
  * This is the ParseError class, which is the main error thrown by KaTeX
  * functions when something has gone wrong. This is used to distinguish internal
@@ -3329,7 +3635,8 @@ ParseError.prototype.__proto__ = Error.prototype;
 
 module.exports = ParseError;
 
-},{}],17:[function(require,module,exports){
+},{}],19:[function(require,module,exports){
+/* eslint no-constant-condition:0 */
 var functions = require("./functions");
 var environments = require("./environments");
 var Lexer = require("./Lexer");
@@ -3352,10 +3659,11 @@ var ParseError = require("./ParseError");
  * individual tokens are needed at a position, the lexer is called to pull out a
  * token, which is then used.
  *
- * The main functions also take a mode that the parser is currently in
- * (currently "math" or "text"), which denotes whether the current environment
- * is a math-y one or a text-y one (e.g. inside \text). Currently, this serves
- * to limit the functions which can be used in text mode.
+ * The parser has a property called "mode" indicating the mode that
+ * the parser is currently in. Currently it has to be one of "math" or
+ * "text", which denotes whether the current environment is a math-y
+ * one or a text-y one (e.g. inside \text). Currently, this serves to
+ * limit the functions which can be used in text mode.
  *
  * The main functions then return an object which contains the useful data that
  * was parsed at its given point, and a new position at the end of the parsed
@@ -3365,11 +3673,9 @@ var ParseError = require("./ParseError");
  * There are also extra `.handle...` functions, which pull out some reused
  * functionality into self-contained functions.
  *
- * The earlier functions return `ParseResult`s, which contain a ParseNode and a
- * new position.
- *
+ * The earlier functions return ParseNodes.
  * The later functions (which are called deeper in the parse) sometimes return
- * ParseFuncOrArgument, which contain a ParseResult as well as some data about
+ * ParseFuncOrArgument, which contain a ParseNode as well as some data about
  * whether the parsed object is a function which is missing some arguments, or a
  * standalone object which can be used as an argument to another function.
  */
@@ -3385,11 +3691,10 @@ function Parser(input, settings) {
 }
 
 var ParseNode = parseData.ParseNode;
-var ParseResult = parseData.ParseResult;
 
 /**
  * An initial function (without its arguments), or an argument to a function.
- * The `result` argument should be a ParseResult.
+ * The `result` argument should be a ParseNode.
  */
 function ParseFuncOrArgument(result, isFunction) {
     this.result = result;
@@ -3400,14 +3705,29 @@ function ParseFuncOrArgument(result, isFunction) {
 /**
  * Checks a result to make sure it has the right type, and throws an
  * appropriate error otherwise.
+ *
+ * @param {boolean=} consume whether to consume the expected token,
+ *                           defaults to true
  */
-Parser.prototype.expect = function(result, text) {
-    if (result.text !== text) {
+Parser.prototype.expect = function(text, consume) {
+    if (this.nextToken.text !== text) {
         throw new ParseError(
-            "Expected '" + text + "', got '" + result.text + "'",
-            this.lexer, result.position
+            "Expected '" + text + "', got '" + this.nextToken.text + "'",
+            this.lexer, this.nextToken.position
         );
     }
+    if (consume !== false) {
+        this.consume();
+    }
+};
+
+/**
+ * Considers the current look ahead token as consumed,
+ * and fetches the one after that as the new look ahead.
+ */
+Parser.prototype.consume = function() {
+    this.pos = this.nextToken.position;
+    this.nextToken = this.lexer.lex(this.pos, this.mode);
 };
 
 /**
@@ -3415,20 +3735,23 @@ Parser.prototype.expect = function(result, text) {
  *
  * @return {?Array.<ParseNode>}
  */
-Parser.prototype.parse = function(input) {
+Parser.prototype.parse = function() {
     // Try to parse the input
-    var parse = this.parseInput(0, "math");
-    return parse.result;
+    this.mode = "math";
+    this.pos = 0;
+    this.nextToken = this.lexer.lex(this.pos, this.mode);
+    var parse = this.parseInput();
+    return parse;
 };
 
 /**
  * Parses an entire input tree.
  */
-Parser.prototype.parseInput = function(pos, mode) {
+Parser.prototype.parseInput = function() {
     // Parse an expression
-    var expression = this.parseExpression(pos, mode, false);
+    var expression = this.parseExpression(false);
     // If we succeeded, make sure there's an EOF at the end
-    this.expect(expression.peek, "EOF");
+    this.expect("EOF", false);
     return expression;
 };
 
@@ -3444,25 +3767,25 @@ var endOfExpression = ["}", "\\end", "\\right", "&", "\\\\", "\\cr"];
  * @param {?string} breakOnToken The token that the expression should end with,
  *                  or `null` if something else should end the expression.
  *
- * @return {ParseResult}
+ * @return {ParseNode}
  */
-Parser.prototype.parseExpression = function(pos, mode, breakOnInfix, breakOnToken) {
+Parser.prototype.parseExpression = function(breakOnInfix, breakOnToken) {
     var body = [];
-    var lex = null;
     // Keep adding atoms to the body until we can't parse any more atoms (either
     // we reached the end, a }, or a \right)
     while (true) {
-        lex = this.lexer.lex(pos, mode);
+        var lex = this.nextToken;
+        var pos = this.pos;
         if (endOfExpression.indexOf(lex.text) !== -1) {
             break;
         }
         if (breakOnToken && lex.text === breakOnToken) {
             break;
         }
-        var atom = this.parseAtom(pos, mode);
+        var atom = this.parseAtom();
         if (!atom) {
             if (!this.settings.throwOnError && lex.text[0] === "\\") {
-                var errorNode = this.handleUnsupportedCmd(lex.text, mode);
+                var errorNode = this.handleUnsupportedCmd();
                 body.push(errorNode);
 
                 pos = lex.position;
@@ -3471,15 +3794,15 @@ Parser.prototype.parseExpression = function(pos, mode, breakOnInfix, breakOnToke
 
             break;
         }
-        if (breakOnInfix && atom.result.type === "infix") {
+        if (breakOnInfix && atom.type === "infix") {
+            // rewind so we can parse the infix atom again
+            this.pos = pos;
+            this.nextToken = lex;
             break;
         }
-        body.push(atom.result);
-        pos = atom.position;
+        body.push(atom);
     }
-    var res = new ParseResult(this.handleInfixNodes(body, mode), pos);
-    res.peek = lex;
-    return res;
+    return this.handleInfixNodes(body);
 };
 
 /**
@@ -3491,9 +3814,8 @@ Parser.prototype.parseExpression = function(pos, mode, breakOnInfix, breakOnToke
  *
  * @returns {Array}
  */
-Parser.prototype.handleInfixNodes = function (body, mode) {
+Parser.prototype.handleInfixNodes = function(body) {
     var overIndex = -1;
-    var func;
     var funcName;
 
     for (var i = 0; i < body.length; i++) {
@@ -3505,12 +3827,12 @@ Parser.prototype.handleInfixNodes = function (body, mode) {
             }
             overIndex = i;
             funcName = node.value.replaceWith;
-            func = functions.funcs[funcName];
         }
     }
 
     if (overIndex !== -1) {
-        var numerNode, denomNode;
+        var numerNode;
+        var denomNode;
 
         var numerBody = body.slice(0, overIndex);
         var denomBody = body.slice(overIndex + 1);
@@ -3518,17 +3840,18 @@ Parser.prototype.handleInfixNodes = function (body, mode) {
         if (numerBody.length === 1 && numerBody[0].type === "ordgroup") {
             numerNode = numerBody[0];
         } else {
-            numerNode = new ParseNode("ordgroup", numerBody, mode);
+            numerNode = new ParseNode("ordgroup", numerBody, this.mode);
         }
 
         if (denomBody.length === 1 && denomBody[0].type === "ordgroup") {
             denomNode = denomBody[0];
         } else {
-            denomNode = new ParseNode("ordgroup", denomBody, mode);
+            denomNode = new ParseNode("ordgroup", denomBody, this.mode);
         }
 
-        var value = func.handler(funcName, numerNode, denomNode);
-        return [new ParseNode(value.type, value, mode)];
+        var value = this.callFunction(
+            funcName, [numerNode, denomNode], null);
+        return [new ParseNode(value.type, value, this.mode)];
     } else {
         return body;
     }
@@ -3540,31 +3863,33 @@ var SUPSUB_GREEDINESS = 1;
 /**
  * Handle a subscript or superscript with nice errors.
  */
-Parser.prototype.handleSupSubscript = function(pos, mode, symbol, name) {
-    var group = this.parseGroup(pos, mode);
+Parser.prototype.handleSupSubscript = function(name) {
+    var symbol = this.nextToken.text;
+    var symPos = this.pos;
+    this.consume();
+    var group = this.parseGroup();
 
     if (!group) {
-        var lex = this.lexer.lex(pos, mode);
-
-        if (!this.settings.throwOnError && lex.text[0] === "\\") {
-            return new ParseResult(
-                this.handleUnsupportedCmd(lex.text, mode),
-                lex.position);
+        if (!this.settings.throwOnError && this.nextToken.text[0] === "\\") {
+            return this.handleUnsupportedCmd();
         } else {
             throw new ParseError(
-                "Expected group after '" + symbol + "'", this.lexer, pos);
+                "Expected group after '" + symbol + "'",
+                this.lexer,
+                symPos + 1
+            );
         }
     } else if (group.isFunction) {
         // ^ and _ have a greediness, so handle interactions with functions'
         // greediness
-        var funcGreediness = functions.funcs[group.result.result].greediness;
+        var funcGreediness = functions[group.result].greediness;
         if (funcGreediness > SUPSUB_GREEDINESS) {
-            return this.parseFunction(pos, mode);
+            return this.parseFunction(group);
         } else {
             throw new ParseError(
-                "Got function '" + group.result.result + "' with no arguments " +
+                "Got function '" + group.result + "' with no arguments " +
                     "as " + name,
-                this.lexer, pos);
+                this.lexer, symPos + 1);
         }
     } else {
         return group.result;
@@ -3575,111 +3900,99 @@ Parser.prototype.handleSupSubscript = function(pos, mode, symbol, name) {
  * Converts the textual input of an unsupported command into a text node
  * contained within a color node whose color is determined by errorColor
  */
- Parser.prototype.handleUnsupportedCmd = function(text, mode) {
-     var textordArray = [];
+Parser.prototype.handleUnsupportedCmd = function() {
+    var text = this.nextToken.text;
+    var textordArray = [];
 
-     for (var i = 0; i < text.length; i++) {
+    for (var i = 0; i < text.length; i++) {
         textordArray.push(new ParseNode("textord", text[i], "text"));
-     }
+    }
 
-     var textNode = new ParseNode(
-         "text",
-         {
-             body: textordArray,
-             type: "text"
-         },
-         mode);
+    var textNode = new ParseNode(
+        "text",
+        {
+            body: textordArray,
+            type: "text",
+        },
+        this.mode);
 
-     var colorNode = new ParseNode(
+    var colorNode = new ParseNode(
         "color",
         {
             color: this.settings.errorColor,
             value: [textNode],
-            type: "color"
+            type: "color",
         },
-        mode);
+        this.mode);
 
-     return colorNode;
- };
+    this.consume();
+    return colorNode;
+};
 
 /**
  * Parses a group with optional super/subscripts.
  *
- * @return {?ParseResult}
+ * @return {?ParseNode}
  */
-Parser.prototype.parseAtom = function(pos, mode) {
+Parser.prototype.parseAtom = function() {
     // The body of an atom is an implicit group, so that things like
     // \left(x\right)^2 work correctly.
-    var base = this.parseImplicitGroup(pos, mode);
+    var base = this.parseImplicitGroup();
 
     // In text mode, we don't have superscripts or subscripts
-    if (mode === "text") {
+    if (this.mode === "text") {
         return base;
     }
 
-    // Handle an empty base
-    var currPos;
-    if (!base) {
-        currPos = pos;
-        base = undefined;
-    } else {
-        currPos = base.position;
-    }
+    // Note that base may be empty (i.e. null) at this point.
 
     var superscript;
     var subscript;
-    var result;
     while (true) {
         // Lex the first token
-        var lex = this.lexer.lex(currPos, mode);
+        var lex = this.nextToken;
 
         if (lex.text === "\\limits" || lex.text === "\\nolimits") {
             // We got a limit control
-            if (!base || base.result.type !== "op") {
-                throw new ParseError("Limit controls must follow a math operator",
-                    this.lexer, currPos);
-            }
-            else {
+            if (!base || base.type !== "op") {
+                throw new ParseError(
+                    "Limit controls must follow a math operator",
+                    this.lexer, this.pos);
+            } else {
                 var limits = lex.text === "\\limits";
-                base.result.value.limits = limits;
-                base.result.value.alwaysHandleSupSub = true;
-                currPos = lex.position;
+                base.value.limits = limits;
+                base.value.alwaysHandleSupSub = true;
             }
+            this.consume();
         } else if (lex.text === "^") {
             // We got a superscript start
             if (superscript) {
                 throw new ParseError(
-                    "Double superscript", this.lexer, currPos);
+                    "Double superscript", this.lexer, this.pos);
             }
-            result = this.handleSupSubscript(
-                lex.position, mode, lex.text, "superscript");
-            currPos = result.position;
-            superscript = result.result;
+            superscript = this.handleSupSubscript("superscript");
         } else if (lex.text === "_") {
             // We got a subscript start
             if (subscript) {
                 throw new ParseError(
-                    "Double subscript", this.lexer, currPos);
+                    "Double subscript", this.lexer, this.pos);
             }
-            result = this.handleSupSubscript(
-                lex.position, mode, lex.text, "subscript");
-            currPos = result.position;
-            subscript = result.result;
+            subscript = this.handleSupSubscript("subscript");
         } else if (lex.text === "'") {
             // We got a prime
-            var prime = new ParseNode("textord", "\\prime", mode);
+            var prime = new ParseNode("textord", "\\prime", this.mode);
 
             // Many primes can be grouped together, so we handle this here
             var primes = [prime];
-            currPos = lex.position;
+            this.consume();
             // Keep lexing tokens until we get something that's not a prime
-            while ((lex = this.lexer.lex(currPos, mode)).text === "'") {
+            while (this.nextToken.text === "'") {
                 // For each one, add another prime to the list
                 primes.push(prime);
-                currPos = lex.position;
+                this.consume();
             }
             // Put them into an ordgroup as the superscript
-            superscript = new ParseNode("ordgroup", primes, mode);
+            superscript = new ParseNode("ordgroup", primes, this.mode);
         } else {
             // If it wasn't ^, _, or ', stop parsing super/subscripts
             break;
@@ -3688,13 +4001,11 @@ Parser.prototype.parseAtom = function(pos, mode) {
 
     if (superscript || subscript) {
         // If we got either a superscript or subscript, create a supsub
-        return new ParseResult(
-            new ParseNode("supsub", {
-                base: base && base.result,
-                sup: superscript,
-                sub: subscript
-            }, mode),
-            currPos);
+        return new ParseNode("supsub", {
+            base: base,
+            sup: superscript,
+            sub: subscript,
+        }, this.mode);
     } else {
         // Otherwise return the original body
         return base;
@@ -3704,12 +4015,12 @@ Parser.prototype.parseAtom = function(pos, mode) {
 // A list of the size-changing functions, for use in parseImplicitGroup
 var sizeFuncs = [
     "\\tiny", "\\scriptsize", "\\footnotesize", "\\small", "\\normalsize",
-    "\\large", "\\Large", "\\LARGE", "\\huge", "\\Huge"
+    "\\large", "\\Large", "\\LARGE", "\\huge", "\\Huge",
 ];
 
 // A list of the style-changing functions, for use in parseImplicitGroup
 var styleFuncs = [
-    "\\displaystyle", "\\textstyle", "\\scriptstyle", "\\scriptscriptstyle"
+    "\\displaystyle", "\\textstyle", "\\scriptstyle", "\\scriptscriptstyle",
 ];
 
 /**
@@ -3721,115 +4032,115 @@ var styleFuncs = [
  *   small text {\Large large text} small text again
  * It is also used for \left and \right to get the correct grouping.
  *
- * @return {?ParseResult}
+ * @return {?ParseNode}
  */
-Parser.prototype.parseImplicitGroup = function(pos, mode) {
-    var start = this.parseSymbol(pos, mode);
+Parser.prototype.parseImplicitGroup = function() {
+    var start = this.parseSymbol();
 
-    if (!start || !start.result) {
+    if (start == null) {
         // If we didn't get anything we handle, fall back to parseFunction
-        return this.parseFunction(pos, mode);
+        return this.parseFunction();
     }
 
-    var func = start.result.result;
+    var func = start.result;
     var body;
 
     if (func === "\\left") {
         // If we see a left:
         // Parse the entire left function (including the delimiter)
-        var left = this.parseFunction(pos, mode);
+        var left = this.parseFunction(start);
         // Parse out the implicit body
-        body = this.parseExpression(left.position, mode, false);
+        body = this.parseExpression(false);
         // Check the next token
-        this.expect(body.peek, "\\right");
-        var right = this.parseFunction(body.position, mode);
-        return new ParseResult(
-            new ParseNode("leftright", {
-                body: body.result,
-                left: left.result.value.value,
-                right: right.result.value.value
-            }, mode),
-            right.position);
+        this.expect("\\right", false);
+        var right = this.parseFunction();
+        return new ParseNode("leftright", {
+            body: body,
+            left: left.value.value,
+            right: right.value.value,
+        }, this.mode);
     } else if (func === "\\begin") {
         // begin...end is similar to left...right
-        var begin = this.parseFunction(pos, mode);
-        var envName = begin.result.value.name;
+        var begin = this.parseFunction(start);
+        var envName = begin.value.name;
         if (!environments.hasOwnProperty(envName)) {
             throw new ParseError(
                 "No such environment: " + envName,
-                this.lexer, begin.result.value.namepos);
+                this.lexer, begin.value.namepos);
         }
         // Build the environment object. Arguments and other information will
         // be made available to the begin and end methods using properties.
         var env = environments[envName];
-        var args = [null, mode, envName];
-        var newPos = this.parseArguments(
-            begin.position, mode, "\\begin{" + envName + "}", env, args);
-        args[0] = newPos;
-        var result = env.handler.apply(this, args);
-        var endLex = this.lexer.lex(result.position, mode);
-        this.expect(endLex, "\\end");
-        var end = this.parseFunction(result.position, mode);
-        if (end.result.value.name !== envName) {
+        var args = this.parseArguments("\\begin{" + envName + "}", env);
+        var context = {
+            mode: this.mode,
+            envName: envName,
+            parser: this,
+            lexer: this.lexer,
+            positions: args.pop(),
+        };
+        var result = env.handler(context, args);
+        this.expect("\\end", false);
+        var end = this.parseFunction();
+        if (end.value.name !== envName) {
             throw new ParseError(
                 "Mismatch: \\begin{" + envName + "} matched " +
-                "by \\end{" + end.result.value.name + "}",
-                this.lexer, end.namepos);
+                "by \\end{" + end.value.name + "}",
+                this.lexer /* , end.value.namepos */);
+            // TODO: Add position to the above line and adjust test case,
+            // requires #385 to get merged first
         }
         result.position = end.position;
         return result;
     } else if (utils.contains(sizeFuncs, func)) {
         // If we see a sizing function, parse out the implict body
-        body = this.parseExpression(start.result.position, mode, false);
-        return new ParseResult(
-            new ParseNode("sizing", {
-                // Figure out what size to use based on the list of functions above
-                size: "size" + (utils.indexOf(sizeFuncs, func) + 1),
-                value: body.result
-            }, mode),
-            body.position);
+        body = this.parseExpression(false);
+        return new ParseNode("sizing", {
+            // Figure out what size to use based on the list of functions above
+            size: "size" + (utils.indexOf(sizeFuncs, func) + 1),
+            value: body,
+        }, this.mode);
     } else if (utils.contains(styleFuncs, func)) {
         // If we see a styling function, parse out the implict body
-        body = this.parseExpression(start.result.position, mode, true);
-        return new ParseResult(
-            new ParseNode("styling", {
-                // Figure out what style to use by pulling out the style from
-                // the function name
-                style: func.slice(1, func.length - 5),
-                value: body.result
-            }, mode),
-            body.position);
+        body = this.parseExpression(true);
+        return new ParseNode("styling", {
+            // Figure out what style to use by pulling out the style from
+            // the function name
+            style: func.slice(1, func.length - 5),
+            value: body,
+        }, this.mode);
     } else {
         // Defer to parseFunction if it's not a function we handle
-        return this.parseFunction(pos, mode);
+        return this.parseFunction(start);
     }
 };
 
 /**
- * Parses an entire function, including its base and all of its arguments
+ * Parses an entire function, including its base and all of its arguments.
+ * The base might either have been parsed already, in which case
+ * it is provided as an argument, or it's the next group in the input.
  *
- * @return {?ParseResult}
+ * @param {ParseFuncOrArgument=} baseGroup optional as described above
+ * @return {?ParseNode}
  */
-Parser.prototype.parseFunction = function(pos, mode) {
-    var baseGroup = this.parseGroup(pos, mode);
+Parser.prototype.parseFunction = function(baseGroup) {
+    if (!baseGroup) {
+        baseGroup = this.parseGroup();
+    }
 
     if (baseGroup) {
         if (baseGroup.isFunction) {
-            var func = baseGroup.result.result;
-            var funcData = functions.funcs[func];
-            if (mode === "text" && !funcData.allowedInText) {
+            var func = baseGroup.result;
+            var funcData = functions[func];
+            if (this.mode === "text" && !funcData.allowedInText) {
                 throw new ParseError(
                     "Can't use function '" + func + "' in text mode",
                     this.lexer, baseGroup.position);
             }
 
-            var args = [func];
-            var newPos = this.parseArguments(
-                baseGroup.result.position, mode, func, funcData, args);
-            var result = functions.funcs[func].handler.apply(this, args);
-            return new ParseResult(
-                new ParseNode(result.type, result, mode),
-                newPos);
+            var args = this.parseArguments(func, funcData);
+            var result = this.callFunction(func, args, args.pop());
+            return new ParseNode(result.type, result, this.mode);
         } else {
             return baseGroup.result;
         }
@@ -3838,83 +4149,91 @@ Parser.prototype.parseFunction = function(pos, mode) {
     }
 };
 
+/**
+ * Call a function handler with a suitable context and arguments.
+ */
+Parser.prototype.callFunction = function(name, args, positions) {
+    var context = {
+        funcName: name,
+        parser: this,
+        lexer: this.lexer,
+        positions: positions,
+    };
+    return functions[name].handler(context, args);
+};
 
 /**
  * Parses the arguments of a function or environment
  *
  * @param {string} func  "\name" or "\begin{name}"
  * @param {{numArgs:number,numOptionalArgs:number|undefined}} funcData
- * @param {Array} args  list of arguments to which new ones will be pushed
- * @return the position after all arguments have been parsed
+ * @return the array of arguments, with the list of positions as last element
  */
-Parser.prototype.parseArguments = function(pos, mode, func, funcData, args) {
+Parser.prototype.parseArguments = function(func, funcData) {
     var totalArgs = funcData.numArgs + funcData.numOptionalArgs;
     if (totalArgs === 0) {
-        return pos;
+        return [[this.pos]];
     }
 
-    var newPos = pos;
     var baseGreediness = funcData.greediness;
-    var positions = [newPos];
+    var positions = [this.pos];
+    var args = [];
 
     for (var i = 0; i < totalArgs; i++) {
         var argType = funcData.argTypes && funcData.argTypes[i];
         var arg;
         if (i < funcData.numOptionalArgs) {
             if (argType) {
-                arg = this.parseSpecialGroup(newPos, argType, mode, true);
+                arg = this.parseSpecialGroup(argType, true);
             } else {
-                arg = this.parseOptionalGroup(newPos, mode);
+                arg = this.parseOptionalGroup();
             }
             if (!arg) {
                 args.push(null);
-                positions.push(newPos);
+                positions.push(this.pos);
                 continue;
             }
         } else {
             if (argType) {
-                arg = this.parseSpecialGroup(newPos, argType, mode);
+                arg = this.parseSpecialGroup(argType);
             } else {
-                arg = this.parseGroup(newPos, mode);
+                arg = this.parseGroup();
             }
             if (!arg) {
-                var lex = this.lexer.lex(newPos, mode);
-
-                if (!this.settings.throwOnError && lex.text[0] === "\\") {
+                if (!this.settings.throwOnError &&
+                    this.nextToken.text[0] === "\\") {
                     arg = new ParseFuncOrArgument(
-                        new ParseResult(
-                            this.handleUnsupportedCmd(lex.text, mode),
-                            lex.position),
+                        this.handleUnsupportedCmd(this.nextToken.text),
                         false);
                 } else {
                     throw new ParseError(
-                        "Expected group after '" + func + "'", this.lexer, pos);
+                        "Expected group after '" + func + "'",
+                        this.lexer, this.pos);
                 }
             }
         }
         var argNode;
         if (arg.isFunction) {
             var argGreediness =
-                functions.funcs[arg.result.result].greediness;
+                functions[arg.result].greediness;
             if (argGreediness > baseGreediness) {
-                argNode = this.parseFunction(newPos, mode);
+                argNode = this.parseFunction(arg);
             } else {
                 throw new ParseError(
-                    "Got function '" + arg.result.result + "' as " +
+                    "Got function '" + arg.result + "' as " +
                     "argument to '" + func + "'",
-                    this.lexer, arg.result.position - 1);
+                    this.lexer, this.pos - 1);
             }
         } else {
             argNode = arg.result;
         }
-        args.push(argNode.result);
-        positions.push(argNode.position);
-        newPos = argNode.position;
+        args.push(argNode);
+        positions.push(this.pos);
     }
 
     args.push(positions);
 
-    return newPos;
+    return args;
 };
 
 
@@ -3924,47 +4243,57 @@ Parser.prototype.parseArguments = function(pos, mode, func, funcData, args) {
  *
  * @return {?ParseFuncOrArgument}
  */
-Parser.prototype.parseSpecialGroup = function(pos, mode, outerMode, optional) {
+Parser.prototype.parseSpecialGroup = function(innerMode, optional) {
+    var outerMode = this.mode;
     // Handle `original` argTypes
-    if (mode === "original") {
-        mode = outerMode;
+    if (innerMode === "original") {
+        innerMode = outerMode;
     }
 
-    if (mode === "color" || mode === "size") {
+    if (innerMode === "color" || innerMode === "size") {
         // color and size modes are special because they should have braces and
         // should only lex a single symbol inside
-        var openBrace = this.lexer.lex(pos, outerMode);
+        var openBrace = this.nextToken;
         if (optional && openBrace.text !== "[") {
             // optional arguments should return null if they don't exist
             return null;
         }
-        this.expect(openBrace, optional ? "[" : "{");
-        var inner = this.lexer.lex(openBrace.position, mode);
+        // The call to expect will lex the token after the '{' in inner mode
+        this.mode = innerMode;
+        this.expect(optional ? "[" : "{");
+        var inner = this.nextToken;
+        this.mode = outerMode;
         var data;
-        if (mode === "color") {
+        if (innerMode === "color") {
             data = inner.text;
         } else {
             data = inner.data;
         }
-        var closeBrace = this.lexer.lex(inner.position, outerMode);
-        this.expect(closeBrace, optional ? "]" : "}");
+        this.consume(); // consume the token stored in inner
+        this.expect(optional ? "]" : "}");
         return new ParseFuncOrArgument(
-            new ParseResult(
-                new ParseNode(mode, data, outerMode),
-                closeBrace.position),
+            new ParseNode(innerMode, data, outerMode),
             false);
-    } else if (mode === "text") {
+    } else if (innerMode === "text") {
         // text mode is special because it should ignore the whitespace before
         // it
-        var whitespace = this.lexer.lex(pos, "whitespace");
-        pos = whitespace.position;
+        var whitespace = this.lexer.lex(this.pos, "whitespace");
+        this.pos = whitespace.position;
     }
 
+    // By the time we get here, innerMode is one of "text" or "math".
+    // We switch the mode of the parser, recurse, then restore the old mode.
+    this.mode = innerMode;
+    this.nextToken = this.lexer.lex(this.pos, innerMode);
+    var res;
     if (optional) {
-        return this.parseOptionalGroup(pos, mode);
+        res = this.parseOptionalGroup();
     } else {
-        return this.parseGroup(pos, mode);
+        res = this.parseGroup();
     }
+    this.mode = outerMode;
+    this.nextToken = this.lexer.lex(this.pos, outerMode);
+    return res;
 };
 
 /**
@@ -3973,23 +4302,20 @@ Parser.prototype.parseSpecialGroup = function(pos, mode, outerMode, optional) {
  *
  * @return {?ParseFuncOrArgument}
  */
-Parser.prototype.parseGroup = function(pos, mode) {
-    var start = this.lexer.lex(pos, mode);
+Parser.prototype.parseGroup = function() {
     // Try to parse an open brace
-    if (start.text === "{") {
+    if (this.nextToken.text === "{") {
         // If we get a brace, parse an expression
-        var expression = this.parseExpression(start.position, mode, false);
+        this.consume();
+        var expression = this.parseExpression(false);
         // Make sure we get a close brace
-        var closeBrace = this.lexer.lex(expression.position, mode);
-        this.expect(closeBrace, "}");
+        this.expect("}");
         return new ParseFuncOrArgument(
-            new ParseResult(
-                new ParseNode("ordgroup", expression.result, mode),
-                closeBrace.position),
+            new ParseNode("ordgroup", expression, this.mode),
             false);
     } else {
         // Otherwise, just return a nucleus
-        return this.parseSymbol(pos, mode);
+        return this.parseSymbol();
     }
 };
 
@@ -3998,19 +4324,16 @@ Parser.prototype.parseGroup = function(pos, mode) {
  *
  * @return {?ParseFuncOrArgument}
  */
-Parser.prototype.parseOptionalGroup = function(pos, mode) {
-    var start = this.lexer.lex(pos, mode);
+Parser.prototype.parseOptionalGroup = function() {
     // Try to parse an open bracket
-    if (start.text === "[") {
+    if (this.nextToken.text === "[") {
         // If we get a brace, parse an expression
-        var expression = this.parseExpression(start.position, mode, false, "]");
+        this.consume();
+        var expression = this.parseExpression(false, "]");
         // Make sure we get a close bracket
-        var closeBracket = this.lexer.lex(expression.position, mode);
-        this.expect(closeBracket, "]");
+        this.expect("]");
         return new ParseFuncOrArgument(
-            new ParseResult(
-                new ParseNode("ordgroup", expression.result, mode),
-                closeBracket.position),
+            new ParseNode("ordgroup", expression, this.mode),
             false);
     } else {
         // Otherwise, return null,
@@ -4024,23 +4347,23 @@ Parser.prototype.parseOptionalGroup = function(pos, mode) {
  *
  * @return {?ParseFuncOrArgument}
  */
-Parser.prototype.parseSymbol = function(pos, mode) {
-    var nucleus = this.lexer.lex(pos, mode);
+Parser.prototype.parseSymbol = function() {
+    var nucleus = this.nextToken;
 
-    if (functions.funcs[nucleus.text]) {
+    if (functions[nucleus.text]) {
+        this.consume();
         // If there exists a function with this name, we return the function and
         // say that it is a function.
         return new ParseFuncOrArgument(
-            new ParseResult(nucleus.text, nucleus.position),
+            nucleus.text,
             true);
-    } else if (symbols[mode][nucleus.text]) {
+    } else if (symbols[this.mode][nucleus.text]) {
+        this.consume();
         // Otherwise if this is a no-argument function, find the type it
         // corresponds to in the symbols map
         return new ParseFuncOrArgument(
-            new ParseResult(
-                new ParseNode(symbols[mode][nucleus.text].group,
-                              nucleus.text, mode),
-                nucleus.position),
+            new ParseNode(symbols[this.mode][nucleus.text].group,
+                          nucleus.text, this.mode),
             false);
     } else {
         return null;
@@ -4051,7 +4374,7 @@ Parser.prototype.ParseNode = ParseNode;
 
 module.exports = Parser;
 
-},{"./Lexer":14,"./ParseError":16,"./environments":26,"./functions":29,"./parseData":31,"./symbols":33,"./utils":34}],18:[function(require,module,exports){
+},{"./Lexer":16,"./ParseError":18,"./environments":28,"./functions":31,"./parseData":33,"./symbols":35,"./utils":36}],20:[function(require,module,exports){
 /**
  * This is a module for storing settings passed into KaTeX. It correctly handles
  * default settings.
@@ -4081,7 +4404,7 @@ function Settings(options) {
 
 module.exports = Settings;
 
-},{}],19:[function(require,module,exports){
+},{}],21:[function(require,module,exports){
 /**
  * This file contains information and classes for the various kinds of styles
  * used in TeX. It provides a generic `Style` class, which holds information
@@ -4170,7 +4493,7 @@ var sizeNames = [
     "displaystyle textstyle",
     "textstyle",
     "scriptstyle",
-    "scriptscriptstyle"
+    "scriptscriptstyle",
 ];
 
 // Reset names for the different sizes
@@ -4178,7 +4501,7 @@ var resetNames = [
     "reset-textstyle",
     "reset-textstyle",
     "reset-scriptstyle",
-    "reset-scriptscriptstyle"
+    "reset-scriptscriptstyle",
 ];
 
 // Instances of the different styles
@@ -4190,7 +4513,7 @@ var styles = [
     new Style(S, 2, 0.7, false),
     new Style(Sc, 2, 0.7, true),
     new Style(SS, 3, 0.5, false),
-    new Style(SSc, 3, 0.5, true)
+    new Style(SSc, 3, 0.5, true),
 ];
 
 // Lookup tables for switching from one style to another
@@ -4206,10 +4529,11 @@ module.exports = {
     DISPLAY: styles[D],
     TEXT: styles[T],
     SCRIPT: styles[S],
-    SCRIPTSCRIPT: styles[SS]
+    SCRIPTSCRIPT: styles[SS],
 };
 
-},{}],20:[function(require,module,exports){
+},{}],22:[function(require,module,exports){
+/* eslint no-console:0 */
 /**
  * This module contains general functions that can be used for building
  * different kinds of domTree nodes in a consistent manner.
@@ -4231,12 +4555,12 @@ var greekCapitals = [
     "\\Upsilon",
     "\\Phi",
     "\\Psi",
-    "\\Omega"
+    "\\Omega",
 ];
 
 var dotlessLetters = [
     "\u0131",   // dotless i, \imath
-    "\u0237"    // dotless j, \jmath
+    "\u0237",   // dotless j, \jmath
 ];
 
 /**
@@ -4342,7 +4666,8 @@ var makeOrd = function(group, options, type) {
         } else {
             var fontName = fontMap[font].fontName;
             if (fontMetrics.getCharacterMetrics(value, fontName)) {
-                return makeSymbol(value, fontName, mode, color, classes.concat([font]));
+                return makeSymbol(
+                    value, fontName, mode, color, classes.concat([font]));
             } else {
                 return mathDefault(value, mode, color, classes, type);
             }
@@ -4413,7 +4738,8 @@ var makeFragment = function(children) {
  */
 var makeFontSizer = function(options, fontSize) {
     var fontSizeInner = makeSpan([], [new domTree.symbolNode("\u200b")]);
-    fontSizeInner.style.fontSize = (fontSize / options.style.sizeMultiplier) + "em";
+    fontSizeInner.style.fontSize =
+        (fontSize / options.style.sizeMultiplier) + "em";
 
     var fontSizer = makeSpan(
         ["fontsize-ensurer", "reset-" + options.size, "size5"],
@@ -4562,7 +4888,7 @@ var sizingMultiplier = {
     size7: 1.44,
     size8: 1.73,
     size9: 2.07,
-    size10: 2.49
+    size10: 2.49,
 };
 
 // A map of spacing functions to their attributes, like size and corresponding
@@ -4570,32 +4896,32 @@ var sizingMultiplier = {
 var spacingFunctions = {
     "\\qquad": {
         size: "2em",
-        className: "qquad"
+        className: "qquad",
     },
     "\\quad": {
         size: "1em",
-        className: "quad"
+        className: "quad",
     },
     "\\enspace": {
         size: "0.5em",
-        className: "enspace"
+        className: "enspace",
     },
     "\\;": {
         size: "0.277778em",
-        className: "thickspace"
+        className: "thickspace",
     },
     "\\:": {
         size: "0.22222em",
-        className: "mediumspace"
+        className: "mediumspace",
     },
     "\\,": {
         size: "0.16667em",
-        className: "thinspace"
+        className: "thinspace",
     },
     "\\!": {
         size: "-0.16667em",
-        className: "negativethinspace"
-    }
+        className: "negativethinspace",
+    },
 };
 
 /**
@@ -4608,11 +4934,11 @@ var fontMap = {
     // styles
     "mathbf": {
         variant: "bold",
-        fontName: "Main-Bold"
+        fontName: "Main-Bold",
     },
     "mathrm": {
         variant: "normal",
-        fontName: "Main-Regular"
+        fontName: "Main-Regular",
     },
 
     // "mathit" is missing because it requires the use of two fonts: Main-Italic
@@ -4622,28 +4948,28 @@ var fontMap = {
     // families
     "mathbb": {
         variant: "double-struck",
-        fontName: "AMS-Regular"
+        fontName: "AMS-Regular",
     },
     "mathcal": {
         variant: "script",
-        fontName: "Caligraphic-Regular"
+        fontName: "Caligraphic-Regular",
     },
     "mathfrak": {
         variant: "fraktur",
-        fontName: "Fraktur-Regular"
+        fontName: "Fraktur-Regular",
     },
     "mathscr": {
         variant: "script",
-        fontName: "Script-Regular"
+        fontName: "Script-Regular",
     },
     "mathsf": {
         variant: "sans-serif",
-        fontName: "SansSerif-Regular"
+        fontName: "SansSerif-Regular",
     },
     "mathtt": {
         variant: "monospace",
-        fontName: "Typewriter-Regular"
-    }
+        fontName: "Typewriter-Regular",
+    },
 };
 
 module.exports = {
@@ -4655,10 +4981,11 @@ module.exports = {
     makeVList: makeVList,
     makeOrd: makeOrd,
     sizingMultiplier: sizingMultiplier,
-    spacingFunctions: spacingFunctions
+    spacingFunctions: spacingFunctions,
 };
 
-},{"./domTree":25,"./fontMetrics":27,"./symbols":33,"./utils":34}],21:[function(require,module,exports){
+},{"./domTree":27,"./fontMetrics":29,"./symbols":35,"./utils":36}],23:[function(require,module,exports){
+/* eslint no-console:0 */
 /**
  * This file does the main work of building a domTree structure from a parse
  * tree. The entry point is the `buildHTML` function, which takes a parse tree.
@@ -4711,10 +5038,11 @@ var groupToType = {
     op: "mop",
     katex: "mord",
     overline: "mord",
+    underline: "mord",
     rule: "mord",
     leftright: "minner",
     sqrt: "mord",
-    accent: "mord"
+    accent: "mord",
 };
 
 /**
@@ -4765,7 +5093,8 @@ var shouldHandleSupSub = function(group, options) {
         // Operators handle supsubs differently when they have limits
         // (e.g. `\displaystyle\sum_2^3`)
         return group.value.limits &&
-            (options.style.size === Style.DISPLAY.size || group.value.alwaysHandleSupSub);
+            (options.style.size === Style.DISPLAY.size ||
+            group.value.alwaysHandleSupSub);
     } else if (group.type === "accent") {
         return isCharacterBox(group.value.base);
     } else {
@@ -4821,7 +5150,7 @@ var makeNullDelimiter = function(options) {
     return makeSpan([
         "sizing", "reset-" + options.size, "size5",
         options.style.reset(), Style.TEXT.cls(),
-        "nulldelimiter"
+        "nulldelimiter",
     ]);
 };
 
@@ -4829,388 +5158,395 @@ var makeNullDelimiter = function(options) {
  * This is a map of group types to the function used to handle that type.
  * Simpler types come at the beginning, while complicated types come afterwards.
  */
-var groupTypes = {
-    mathord: function(group, options, prev) {
-        return buildCommon.makeOrd(group, options, "mathord");
-    },
+var groupTypes = {};
 
-    textord: function(group, options, prev) {
-        return buildCommon.makeOrd(group, options, "textord");
-    },
+groupTypes.mathord = function(group, options, prev) {
+    return buildCommon.makeOrd(group, options, "mathord");
+};
 
-    bin: function(group, options, prev) {
-        var className = "mbin";
-        // Pull out the most recent element. Do some special handling to find
-        // things at the end of a \color group. Note that we don't use the same
-        // logic for ordgroups (which count as ords).
-        var prevAtom = prev;
-        while (prevAtom && prevAtom.type === "color") {
-            var atoms = prevAtom.value.value;
-            prevAtom = atoms[atoms.length - 1];
+groupTypes.textord = function(group, options, prev) {
+    return buildCommon.makeOrd(group, options, "textord");
+};
+
+groupTypes.bin = function(group, options, prev) {
+    var className = "mbin";
+    // Pull out the most recent element. Do some special handling to find
+    // things at the end of a \color group. Note that we don't use the same
+    // logic for ordgroups (which count as ords).
+    var prevAtom = prev;
+    while (prevAtom && prevAtom.type === "color") {
+        var atoms = prevAtom.value.value;
+        prevAtom = atoms[atoms.length - 1];
+    }
+    // See TeXbook pg. 442-446, Rules 5 and 6, and the text before Rule 19.
+    // Here, we determine whether the bin should turn into an ord. We
+    // currently only apply Rule 5.
+    if (!prev || utils.contains(["mbin", "mopen", "mrel", "mop", "mpunct"],
+            getTypeOfGroup(prevAtom))) {
+        group.type = "textord";
+        className = "mord";
+    }
+
+    return buildCommon.mathsym(
+        group.value, group.mode, options.getColor(), [className]);
+};
+
+groupTypes.rel = function(group, options, prev) {
+    return buildCommon.mathsym(
+        group.value, group.mode, options.getColor(), ["mrel"]);
+};
+
+groupTypes.open = function(group, options, prev) {
+    return buildCommon.mathsym(
+        group.value, group.mode, options.getColor(), ["mopen"]);
+};
+
+groupTypes.close = function(group, options, prev) {
+    return buildCommon.mathsym(
+        group.value, group.mode, options.getColor(), ["mclose"]);
+};
+
+groupTypes.inner = function(group, options, prev) {
+    return buildCommon.mathsym(
+        group.value, group.mode, options.getColor(), ["minner"]);
+};
+
+groupTypes.punct = function(group, options, prev) {
+    return buildCommon.mathsym(
+        group.value, group.mode, options.getColor(), ["mpunct"]);
+};
+
+groupTypes.ordgroup = function(group, options, prev) {
+    return makeSpan(
+        ["mord", options.style.cls()],
+        buildExpression(group.value, options.reset())
+    );
+};
+
+groupTypes.text = function(group, options, prev) {
+    return makeSpan(["text", "mord", options.style.cls()],
+        buildExpression(group.value.body, options.reset()));
+};
+
+groupTypes.color = function(group, options, prev) {
+    var elements = buildExpression(
+        group.value.value,
+        options.withColor(group.value.color),
+        prev
+    );
+
+    // \color isn't supposed to affect the type of the elements it contains.
+    // To accomplish this, we wrap the results in a fragment, so the inner
+    // elements will be able to directly interact with their neighbors. For
+    // example, `\color{red}{2 +} 3` has the same spacing as `2 + 3`
+    return new buildCommon.makeFragment(elements);
+};
+
+groupTypes.supsub = function(group, options, prev) {
+    // Superscript and subscripts are handled in the TeXbook on page
+    // 445-446, rules 18(a-f).
+
+    // Here is where we defer to the inner group if it should handle
+    // superscripts and subscripts itself.
+    if (shouldHandleSupSub(group.value.base, options)) {
+        return groupTypes[group.value.base.type](group, options, prev);
+    }
+
+    var base = buildGroup(group.value.base, options.reset());
+    var supmid;
+    var submid;
+    var sup;
+    var sub;
+
+    if (group.value.sup) {
+        sup = buildGroup(group.value.sup,
+                options.withStyle(options.style.sup()));
+        supmid = makeSpan(
+                [options.style.reset(), options.style.sup().cls()], [sup]);
+    }
+
+    if (group.value.sub) {
+        sub = buildGroup(group.value.sub,
+                options.withStyle(options.style.sub()));
+        submid = makeSpan(
+                [options.style.reset(), options.style.sub().cls()], [sub]);
+    }
+
+    // Rule 18a
+    var supShift;
+    var subShift;
+    if (isCharacterBox(group.value.base)) {
+        supShift = 0;
+        subShift = 0;
+    } else {
+        supShift = base.height - fontMetrics.metrics.supDrop;
+        subShift = base.depth + fontMetrics.metrics.subDrop;
+    }
+
+    // Rule 18c
+    var minSupShift;
+    if (options.style === Style.DISPLAY) {
+        minSupShift = fontMetrics.metrics.sup1;
+    } else if (options.style.cramped) {
+        minSupShift = fontMetrics.metrics.sup3;
+    } else {
+        minSupShift = fontMetrics.metrics.sup2;
+    }
+
+    // scriptspace is a font-size-independent size, so scale it
+    // appropriately
+    var multiplier = Style.TEXT.sizeMultiplier *
+            options.style.sizeMultiplier;
+    var scriptspace =
+        (0.5 / fontMetrics.metrics.ptPerEm) / multiplier + "em";
+
+    var supsub;
+    if (!group.value.sup) {
+        // Rule 18b
+        subShift = Math.max(
+            subShift, fontMetrics.metrics.sub1,
+            sub.height - 0.8 * fontMetrics.metrics.xHeight);
+
+        supsub = buildCommon.makeVList([
+            {type: "elem", elem: submid},
+        ], "shift", subShift, options);
+
+        supsub.children[0].style.marginRight = scriptspace;
+
+        // Subscripts shouldn't be shifted by the base's italic correction.
+        // Account for that by shifting the subscript back the appropriate
+        // amount. Note we only do this when the base is a single symbol.
+        if (base instanceof domTree.symbolNode) {
+            supsub.children[0].style.marginLeft = -base.italic + "em";
         }
-        // See TeXbook pg. 442-446, Rules 5 and 6, and the text before Rule 19.
-        // Here, we determine whether the bin should turn into an ord. We
-        // currently only apply Rule 5.
-        if (!prev || utils.contains(["mbin", "mopen", "mrel", "mop", "mpunct"],
-                getTypeOfGroup(prevAtom))) {
-            group.type = "textord";
-            className = "mord";
+    } else if (!group.value.sub) {
+        // Rule 18c, d
+        supShift = Math.max(supShift, minSupShift,
+            sup.depth + 0.25 * fontMetrics.metrics.xHeight);
+
+        supsub = buildCommon.makeVList([
+            {type: "elem", elem: supmid},
+        ], "shift", -supShift, options);
+
+        supsub.children[0].style.marginRight = scriptspace;
+    } else {
+        supShift = Math.max(
+            supShift, minSupShift,
+            sup.depth + 0.25 * fontMetrics.metrics.xHeight);
+        subShift = Math.max(subShift, fontMetrics.metrics.sub2);
+
+        var ruleWidth = fontMetrics.metrics.defaultRuleThickness;
+
+        // Rule 18e
+        if ((supShift - sup.depth) - (sub.height - subShift) <
+                4 * ruleWidth) {
+            subShift = 4 * ruleWidth - (supShift - sup.depth) + sub.height;
+            var psi = 0.8 * fontMetrics.metrics.xHeight -
+                (supShift - sup.depth);
+            if (psi > 0) {
+                supShift += psi;
+                subShift -= psi;
+            }
         }
 
-        return buildCommon.mathsym(
-            group.value, group.mode, options.getColor(), [className]);
-    },
+        supsub = buildCommon.makeVList([
+            {type: "elem", elem: submid, shift: subShift},
+            {type: "elem", elem: supmid, shift: -supShift},
+        ], "individualShift", null, options);
 
-    rel: function(group, options, prev) {
-        return buildCommon.mathsym(
-            group.value, group.mode, options.getColor(), ["mrel"]);
-    },
-
-    open: function(group, options, prev) {
-        return buildCommon.mathsym(
-            group.value, group.mode, options.getColor(), ["mopen"]);
-    },
-
-    close: function(group, options, prev) {
-        return buildCommon.mathsym(
-            group.value, group.mode, options.getColor(), ["mclose"]);
-    },
-
-    inner: function(group, options, prev) {
-        return buildCommon.mathsym(
-            group.value, group.mode, options.getColor(), ["minner"]);
-    },
-
-    punct: function(group, options, prev) {
-        return buildCommon.mathsym(
-            group.value, group.mode, options.getColor(), ["mpunct"]);
-    },
-
-    ordgroup: function(group, options, prev) {
-        return makeSpan(
-            ["mord", options.style.cls()],
-            buildExpression(group.value, options.reset())
-        );
-    },
-
-    text: function(group, options, prev) {
-        return makeSpan(["text", "mord", options.style.cls()],
-            buildExpression(group.value.body, options.reset()));
-    },
-
-    color: function(group, options, prev) {
-        var elements = buildExpression(
-            group.value.value,
-            options.withColor(group.value.color),
-            prev
-        );
-
-        // \color isn't supposed to affect the type of the elements it contains.
-        // To accomplish this, we wrap the results in a fragment, so the inner
-        // elements will be able to directly interact with their neighbors. For
-        // example, `\color{red}{2 +} 3` has the same spacing as `2 + 3`
-        return new buildCommon.makeFragment(elements);
-    },
-
-    supsub: function(group, options, prev) {
-        // Superscript and subscripts are handled in the TeXbook on page
-        // 445-446, rules 18(a-f).
-
-        // Here is where we defer to the inner group if it should handle
-        // superscripts and subscripts itself.
-        if (shouldHandleSupSub(group.value.base, options)) {
-            return groupTypes[group.value.base.type](group, options, prev);
+        // See comment above about subscripts not being shifted
+        if (base instanceof domTree.symbolNode) {
+            supsub.children[0].style.marginLeft = -base.italic + "em";
         }
 
-        var base = buildGroup(group.value.base, options.reset());
-        var supmid, submid, sup, sub;
+        supsub.children[0].style.marginRight = scriptspace;
+        supsub.children[1].style.marginRight = scriptspace;
+    }
 
-        if (group.value.sup) {
-            sup = buildGroup(group.value.sup,
-                    options.withStyle(options.style.sup()));
-            supmid = makeSpan(
-                    [options.style.reset(), options.style.sup().cls()], [sup]);
-        }
+    return makeSpan([getTypeOfGroup(group.value.base)],
+        [base, supsub]);
+};
 
-        if (group.value.sub) {
-            sub = buildGroup(group.value.sub,
-                    options.withStyle(options.style.sub()));
-            submid = makeSpan(
-                    [options.style.reset(), options.style.sub().cls()], [sub]);
-        }
+groupTypes.genfrac = function(group, options, prev) {
+    // Fractions are handled in the TeXbook on pages 444-445, rules 15(a-e).
+    // Figure out what style this fraction should be in based on the
+    // function used
+    var fstyle = options.style;
+    if (group.value.size === "display") {
+        fstyle = Style.DISPLAY;
+    } else if (group.value.size === "text") {
+        fstyle = Style.TEXT;
+    }
 
-        // Rule 18a
-        var supShift, subShift;
-        if (isCharacterBox(group.value.base)) {
-            supShift = 0;
-            subShift = 0;
+    var nstyle = fstyle.fracNum();
+    var dstyle = fstyle.fracDen();
+
+    var numer = buildGroup(group.value.numer, options.withStyle(nstyle));
+    var numerreset = makeSpan([fstyle.reset(), nstyle.cls()], [numer]);
+
+    var denom = buildGroup(group.value.denom, options.withStyle(dstyle));
+    var denomreset = makeSpan([fstyle.reset(), dstyle.cls()], [denom]);
+
+    var ruleWidth;
+    if (group.value.hasBarLine) {
+        ruleWidth = fontMetrics.metrics.defaultRuleThickness /
+            options.style.sizeMultiplier;
+    } else {
+        ruleWidth = 0;
+    }
+
+    // Rule 15b
+    var numShift;
+    var clearance;
+    var denomShift;
+    if (fstyle.size === Style.DISPLAY.size) {
+        numShift = fontMetrics.metrics.num1;
+        if (ruleWidth > 0) {
+            clearance = 3 * ruleWidth;
         } else {
-            supShift = base.height - fontMetrics.metrics.supDrop;
-            subShift = base.depth + fontMetrics.metrics.subDrop;
+            clearance = 7 * fontMetrics.metrics.defaultRuleThickness;
         }
-
-        // Rule 18c
-        var minSupShift;
-        if (options.style === Style.DISPLAY) {
-            minSupShift = fontMetrics.metrics.sup1;
-        } else if (options.style.cramped) {
-            minSupShift = fontMetrics.metrics.sup3;
+        denomShift = fontMetrics.metrics.denom1;
+    } else {
+        if (ruleWidth > 0) {
+            numShift = fontMetrics.metrics.num2;
+            clearance = ruleWidth;
         } else {
-            minSupShift = fontMetrics.metrics.sup2;
+            numShift = fontMetrics.metrics.num3;
+            clearance = 3 * fontMetrics.metrics.defaultRuleThickness;
+        }
+        denomShift = fontMetrics.metrics.denom2;
+    }
+
+    var frac;
+    if (ruleWidth === 0) {
+        // Rule 15c
+        var candiateClearance =
+            (numShift - numer.depth) - (denom.height - denomShift);
+        if (candiateClearance < clearance) {
+            numShift += 0.5 * (clearance - candiateClearance);
+            denomShift += 0.5 * (clearance - candiateClearance);
         }
 
-        // scriptspace is a font-size-independent size, so scale it
-        // appropriately
-        var multiplier = Style.TEXT.sizeMultiplier *
-                options.style.sizeMultiplier;
-        var scriptspace =
-            (0.5 / fontMetrics.metrics.ptPerEm) / multiplier + "em";
+        frac = buildCommon.makeVList([
+            {type: "elem", elem: denomreset, shift: denomShift},
+            {type: "elem", elem: numerreset, shift: -numShift},
+        ], "individualShift", null, options);
+    } else {
+        // Rule 15d
+        var axisHeight = fontMetrics.metrics.axisHeight;
 
-        var supsub;
-        if (!group.value.sup) {
-            // Rule 18b
-            subShift = Math.max(
-                subShift, fontMetrics.metrics.sub1,
-                sub.height - 0.8 * fontMetrics.metrics.xHeight);
-
-            supsub = buildCommon.makeVList([
-                {type: "elem", elem: submid}
-            ], "shift", subShift, options);
-
-            supsub.children[0].style.marginRight = scriptspace;
-
-            // Subscripts shouldn't be shifted by the base's italic correction.
-            // Account for that by shifting the subscript back the appropriate
-            // amount. Note we only do this when the base is a single symbol.
-            if (base instanceof domTree.symbolNode) {
-                supsub.children[0].style.marginLeft = -base.italic + "em";
-            }
-        } else if (!group.value.sub) {
-            // Rule 18c, d
-            supShift = Math.max(supShift, minSupShift,
-                sup.depth + 0.25 * fontMetrics.metrics.xHeight);
-
-            supsub = buildCommon.makeVList([
-                {type: "elem", elem: supmid}
-            ], "shift", -supShift, options);
-
-            supsub.children[0].style.marginRight = scriptspace;
-        } else {
-            supShift = Math.max(
-                supShift, minSupShift,
-                sup.depth + 0.25 * fontMetrics.metrics.xHeight);
-            subShift = Math.max(subShift, fontMetrics.metrics.sub2);
-
-            var ruleWidth = fontMetrics.metrics.defaultRuleThickness;
-
-            // Rule 18e
-            if ((supShift - sup.depth) - (sub.height - subShift) <
-                    4 * ruleWidth) {
-                subShift = 4 * ruleWidth - (supShift - sup.depth) + sub.height;
-                var psi = 0.8 * fontMetrics.metrics.xHeight -
-                    (supShift - sup.depth);
-                if (psi > 0) {
-                    supShift += psi;
-                    subShift -= psi;
-                }
-            }
-
-            supsub = buildCommon.makeVList([
-                {type: "elem", elem: submid, shift: subShift},
-                {type: "elem", elem: supmid, shift: -supShift}
-            ], "individualShift", null, options);
-
-            // See comment above about subscripts not being shifted
-            if (base instanceof domTree.symbolNode) {
-                supsub.children[0].style.marginLeft = -base.italic + "em";
-            }
-
-            supsub.children[0].style.marginRight = scriptspace;
-            supsub.children[1].style.marginRight = scriptspace;
+        if ((numShift - numer.depth) - (axisHeight + 0.5 * ruleWidth) <
+                clearance) {
+            numShift +=
+                clearance - ((numShift - numer.depth) -
+                             (axisHeight + 0.5 * ruleWidth));
         }
 
-        return makeSpan([getTypeOfGroup(group.value.base)],
-            [base, supsub]);
-    },
-
-    genfrac: function(group, options, prev) {
-        // Fractions are handled in the TeXbook on pages 444-445, rules 15(a-e).
-        // Figure out what style this fraction should be in based on the
-        // function used
-        var fstyle = options.style;
-        if (group.value.size === "display") {
-            fstyle = Style.DISPLAY;
-        } else if (group.value.size === "text") {
-            fstyle = Style.TEXT;
+        if ((axisHeight - 0.5 * ruleWidth) - (denom.height - denomShift) <
+                clearance) {
+            denomShift +=
+                clearance - ((axisHeight - 0.5 * ruleWidth) -
+                             (denom.height - denomShift));
         }
 
-        var nstyle = fstyle.fracNum();
-        var dstyle = fstyle.fracDen();
+        var mid = makeSpan(
+            [options.style.reset(), Style.TEXT.cls(), "frac-line"]);
+        // Manually set the height of the line because its height is
+        // created in CSS
+        mid.height = ruleWidth;
 
-        var numer = buildGroup(group.value.numer, options.withStyle(nstyle));
-        var numerreset = makeSpan([fstyle.reset(), nstyle.cls()], [numer]);
+        var midShift = -(axisHeight - 0.5 * ruleWidth);
 
-        var denom = buildGroup(group.value.denom, options.withStyle(dstyle));
-        var denomreset = makeSpan([fstyle.reset(), dstyle.cls()], [denom]);
+        frac = buildCommon.makeVList([
+            {type: "elem", elem: denomreset, shift: denomShift},
+            {type: "elem", elem: mid,        shift: midShift},
+            {type: "elem", elem: numerreset, shift: -numShift},
+        ], "individualShift", null, options);
+    }
 
-        var ruleWidth;
-        if (group.value.hasBarLine) {
-            ruleWidth = fontMetrics.metrics.defaultRuleThickness /
-                options.style.sizeMultiplier;
-        } else {
-            ruleWidth = 0;
+    // Since we manually change the style sometimes (with \dfrac or \tfrac),
+    // account for the possible size change here.
+    frac.height *= fstyle.sizeMultiplier / options.style.sizeMultiplier;
+    frac.depth *= fstyle.sizeMultiplier / options.style.sizeMultiplier;
+
+    // Rule 15e
+    var delimSize;
+    if (fstyle.size === Style.DISPLAY.size) {
+        delimSize = fontMetrics.metrics.delim1;
+    } else {
+        delimSize = fontMetrics.metrics.getDelim2(fstyle);
+    }
+
+    var leftDelim;
+    var rightDelim;
+    if (group.value.leftDelim == null) {
+        leftDelim = makeNullDelimiter(options);
+    } else {
+        leftDelim = delimiter.customSizedDelim(
+            group.value.leftDelim, delimSize, true,
+            options.withStyle(fstyle), group.mode);
+    }
+    if (group.value.rightDelim == null) {
+        rightDelim = makeNullDelimiter(options);
+    } else {
+        rightDelim = delimiter.customSizedDelim(
+            group.value.rightDelim, delimSize, true,
+            options.withStyle(fstyle), group.mode);
+    }
+
+    return makeSpan(
+        ["mord", options.style.reset(), fstyle.cls()],
+        [leftDelim, makeSpan(["mfrac"], [frac]), rightDelim],
+        options.getColor());
+};
+
+groupTypes.array = function(group, options, prev) {
+    var r;
+    var c;
+    var nr = group.value.body.length;
+    var nc = 0;
+    var body = new Array(nr);
+
+    // Horizontal spacing
+    var pt = 1 / fontMetrics.metrics.ptPerEm;
+    var arraycolsep = 5 * pt; // \arraycolsep in article.cls
+
+    // Vertical spacing
+    var baselineskip = 12 * pt; // see size10.clo
+    // Default \arraystretch from lttab.dtx
+    // TODO(gagern): may get redefined once we have user-defined macros
+    var arraystretch = utils.deflt(group.value.arraystretch, 1);
+    var arrayskip = arraystretch * baselineskip;
+    var arstrutHeight = 0.7 * arrayskip; // \strutbox in ltfsstrc.dtx and
+    var arstrutDepth = 0.3 * arrayskip;  // \@arstrutbox in lttab.dtx
+
+    var totalHeight = 0;
+    for (r = 0; r < group.value.body.length; ++r) {
+        var inrow = group.value.body[r];
+        var height = arstrutHeight; // \@array adds an \@arstrut
+        var depth = arstrutDepth;   // to each tow (via the template)
+
+        if (nc < inrow.length) {
+            nc = inrow.length;
         }
 
-        // Rule 15b
-        var numShift;
-        var clearance;
-        var denomShift;
-        if (fstyle.size === Style.DISPLAY.size) {
-            numShift = fontMetrics.metrics.num1;
-            if (ruleWidth > 0) {
-                clearance = 3 * ruleWidth;
-            } else {
-                clearance = 7 * fontMetrics.metrics.defaultRuleThickness;
+        var outrow = new Array(inrow.length);
+        for (c = 0; c < inrow.length; ++c) {
+            var elt = buildGroup(inrow[c], options);
+            if (depth < elt.depth) {
+                depth = elt.depth;
             }
-            denomShift = fontMetrics.metrics.denom1;
-        } else {
-            if (ruleWidth > 0) {
-                numShift = fontMetrics.metrics.num2;
-                clearance = ruleWidth;
-            } else {
-                numShift = fontMetrics.metrics.num3;
-                clearance = 3 * fontMetrics.metrics.defaultRuleThickness;
+            if (height < elt.height) {
+                height = elt.height;
             }
-            denomShift = fontMetrics.metrics.denom2;
+            outrow[c] = elt;
         }
 
-        var frac;
-        if (ruleWidth === 0) {
-            // Rule 15c
-            var candiateClearance =
-                (numShift - numer.depth) - (denom.height - denomShift);
-            if (candiateClearance < clearance) {
-                numShift += 0.5 * (clearance - candiateClearance);
-                denomShift += 0.5 * (clearance - candiateClearance);
-            }
-
-            frac = buildCommon.makeVList([
-                {type: "elem", elem: denomreset, shift: denomShift},
-                {type: "elem", elem: numerreset, shift: -numShift}
-            ], "individualShift", null, options);
-        } else {
-            // Rule 15d
-            var axisHeight = fontMetrics.metrics.axisHeight;
-
-            if ((numShift - numer.depth) - (axisHeight + 0.5 * ruleWidth) <
-                    clearance) {
-                numShift +=
-                    clearance - ((numShift - numer.depth) -
-                                 (axisHeight + 0.5 * ruleWidth));
-            }
-
-            if ((axisHeight - 0.5 * ruleWidth) - (denom.height - denomShift) <
-                    clearance) {
-                denomShift +=
-                    clearance - ((axisHeight - 0.5 * ruleWidth) -
-                                 (denom.height - denomShift));
-            }
-
-            var mid = makeSpan(
-                [options.style.reset(), Style.TEXT.cls(), "frac-line"]);
-            // Manually set the height of the line because its height is
-            // created in CSS
-            mid.height = ruleWidth;
-
-            var midShift = -(axisHeight - 0.5 * ruleWidth);
-
-            frac = buildCommon.makeVList([
-                {type: "elem", elem: denomreset, shift: denomShift},
-                {type: "elem", elem: mid,        shift: midShift},
-                {type: "elem", elem: numerreset, shift: -numShift}
-            ], "individualShift", null, options);
-        }
-
-        // Since we manually change the style sometimes (with \dfrac or \tfrac),
-        // account for the possible size change here.
-        frac.height *= fstyle.sizeMultiplier / options.style.sizeMultiplier;
-        frac.depth *= fstyle.sizeMultiplier / options.style.sizeMultiplier;
-
-        // Rule 15e
-        var delimSize;
-        if (fstyle.size === Style.DISPLAY.size) {
-            delimSize = fontMetrics.metrics.delim1;
-        } else {
-            delimSize = fontMetrics.metrics.getDelim2(fstyle);
-        }
-
-        var leftDelim, rightDelim;
-        if (group.value.leftDelim == null) {
-            leftDelim = makeNullDelimiter(options);
-        } else {
-            leftDelim = delimiter.customSizedDelim(
-                group.value.leftDelim, delimSize, true,
-                options.withStyle(fstyle), group.mode);
-        }
-        if (group.value.rightDelim == null) {
-            rightDelim = makeNullDelimiter(options);
-        } else {
-            rightDelim = delimiter.customSizedDelim(
-                group.value.rightDelim, delimSize, true,
-                options.withStyle(fstyle), group.mode);
-        }
-
-        return makeSpan(
-            ["mord", options.style.reset(), fstyle.cls()],
-            [leftDelim, makeSpan(["mfrac"], [frac]), rightDelim],
-            options.getColor());
-    },
-
-    array: function(group, options, prev) {
-        var r, c;
-        var nr = group.value.body.length;
-        var nc = 0;
-        var body = new Array(nr);
-
-        // Horizontal spacing
-        var pt = 1 / fontMetrics.metrics.ptPerEm;
-        var arraycolsep = 5 * pt; // \arraycolsep in article.cls
-
-        // Vertical spacing
-        var baselineskip = 12 * pt; // see size10.clo
-        // Default \arraystretch from lttab.dtx
-        // TODO(gagern): may get redefined once we have user-defined macros
-        var arraystretch = utils.deflt(group.value.arraystretch, 1);
-        var arrayskip = arraystretch * baselineskip;
-        var arstrutHeight = 0.7 * arrayskip; // \strutbox in ltfsstrc.dtx and
-        var arstrutDepth = 0.3 * arrayskip;  // \@arstrutbox in lttab.dtx
-
-        var totalHeight = 0;
-        for (r = 0; r < group.value.body.length; ++r) {
-            var inrow = group.value.body[r];
-            var height = arstrutHeight; // \@array adds an \@arstrut
-            var depth = arstrutDepth;   // to each tow (via the template)
-
-            if (nc < inrow.length) {
-                nc = inrow.length;
-            }
-
-            var outrow = new Array(inrow.length);
-            for (c = 0; c < inrow.length; ++c) {
-                var elt = buildGroup(inrow[c], options);
-                if (depth < elt.depth) {
-                    depth = elt.depth;
-                }
-                if (height < elt.height) {
-                    height = elt.height;
-                }
-                outrow[c] = elt;
-            }
-
-            var gap = 0;
-            if (group.value.rowGaps[r]) {
-                gap = group.value.rowGaps[r].value;
-                switch (gap.unit) {
+        var gap = 0;
+        if (group.value.rowGaps[r]) {
+            gap = group.value.rowGaps[r].value;
+            switch (gap.unit) {
                 case "em":
                     gap = gap.number;
                     break;
@@ -5220,728 +5556,758 @@ var groupTypes = {
                 default:
                     console.error("Can't handle unit " + gap.unit);
                     gap = 0;
-                }
-                if (gap > 0) { // \@argarraycr
-                    gap += arstrutDepth;
-                    if (depth < gap) {
-                        depth = gap; // \@xargarraycr
-                    }
-                    gap = 0;
-                }
             }
-
-            outrow.height = height;
-            outrow.depth = depth;
-            totalHeight += height;
-            outrow.pos = totalHeight;
-            totalHeight += depth + gap; // \@yargarraycr
-            body[r] = outrow;
+            if (gap > 0) { // \@argarraycr
+                gap += arstrutDepth;
+                if (depth < gap) {
+                    depth = gap; // \@xargarraycr
+                }
+                gap = 0;
+            }
         }
 
-        var offset = totalHeight / 2 + fontMetrics.metrics.axisHeight;
-        var colDescriptions = group.value.cols || [];
-        var cols = [];
-        var colSep;
-        var colDescrNum;
-        for (c = 0, colDescrNum = 0;
-             // Continue while either there are more columns or more column
-             // descriptions, so trailing separators don't get lost.
-             c < nc || colDescrNum < colDescriptions.length;
-             ++c, ++colDescrNum) {
+        outrow.height = height;
+        outrow.depth = depth;
+        totalHeight += height;
+        outrow.pos = totalHeight;
+        totalHeight += depth + gap; // \@yargarraycr
+        body[r] = outrow;
+    }
 
-            var colDescr = colDescriptions[colDescrNum] || {};
+    var offset = totalHeight / 2 + fontMetrics.metrics.axisHeight;
+    var colDescriptions = group.value.cols || [];
+    var cols = [];
+    var colSep;
+    var colDescrNum;
+    for (c = 0, colDescrNum = 0;
+         // Continue while either there are more columns or more column
+         // descriptions, so trailing separators don't get lost.
+         c < nc || colDescrNum < colDescriptions.length;
+         ++c, ++colDescrNum) {
 
-            var firstSeparator = true;
-            while (colDescr.type === "separator") {
-                // If there is more than one separator in a row, add a space
-                // between them.
-                if (!firstSeparator) {
-                    colSep = makeSpan(["arraycolsep"], []);
-                    colSep.style.width =
-                        fontMetrics.metrics.doubleRuleSep + "em";
-                    cols.push(colSep);
-                }
+        var colDescr = colDescriptions[colDescrNum] || {};
 
-                if (colDescr.separator === "|") {
-                    var separator = makeSpan(
-                        ["vertical-separator"],
-                        []);
-                    separator.style.height = totalHeight + "em";
-                    separator.style.verticalAlign =
-                        -(totalHeight - offset) + "em";
-
-                    cols.push(separator);
-                } else {
-                    throw new ParseError(
-                        "Invalid separator type: " + colDescr.separator);
-                }
-
-                colDescrNum++;
-                colDescr = colDescriptions[colDescrNum] || {};
-                firstSeparator = false;
+        var firstSeparator = true;
+        while (colDescr.type === "separator") {
+            // If there is more than one separator in a row, add a space
+            // between them.
+            if (!firstSeparator) {
+                colSep = makeSpan(["arraycolsep"], []);
+                colSep.style.width =
+                    fontMetrics.metrics.doubleRuleSep + "em";
+                cols.push(colSep);
             }
 
-            if (c >= nc) {
+            if (colDescr.separator === "|") {
+                var separator = makeSpan(
+                    ["vertical-separator"],
+                    []);
+                separator.style.height = totalHeight + "em";
+                separator.style.verticalAlign =
+                    -(totalHeight - offset) + "em";
+
+                cols.push(separator);
+            } else {
+                throw new ParseError(
+                    "Invalid separator type: " + colDescr.separator);
+            }
+
+            colDescrNum++;
+            colDescr = colDescriptions[colDescrNum] || {};
+            firstSeparator = false;
+        }
+
+        if (c >= nc) {
+            continue;
+        }
+
+        var sepwidth;
+        if (c > 0 || group.value.hskipBeforeAndAfter) {
+            sepwidth = utils.deflt(colDescr.pregap, arraycolsep);
+            if (sepwidth !== 0) {
+                colSep = makeSpan(["arraycolsep"], []);
+                colSep.style.width = sepwidth + "em";
+                cols.push(colSep);
+            }
+        }
+
+        var col = [];
+        for (r = 0; r < nr; ++r) {
+            var row = body[r];
+            var elem = row[c];
+            if (!elem) {
                 continue;
             }
+            var shift = row.pos - offset;
+            elem.depth = row.depth;
+            elem.height = row.height;
+            col.push({type: "elem", elem: elem, shift: shift});
+        }
 
-            var sepwidth;
-            if (c > 0 || group.value.hskipBeforeAndAfter) {
-                sepwidth = utils.deflt(colDescr.pregap, arraycolsep);
-                if (sepwidth !== 0) {
-                    colSep = makeSpan(["arraycolsep"], []);
-                    colSep.style.width = sepwidth + "em";
-                    cols.push(colSep);
-                }
-            }
+        col = buildCommon.makeVList(col, "individualShift", null, options);
+        col = makeSpan(
+            ["col-align-" + (colDescr.align || "c")],
+            [col]);
+        cols.push(col);
 
-            var col = [];
-            for (r = 0; r < nr; ++r) {
-                var row = body[r];
-                var elem = row[c];
-                if (!elem) {
-                    continue;
-                }
-                var shift = row.pos - offset;
-                elem.depth = row.depth;
-                elem.height = row.height;
-                col.push({type: "elem", elem: elem, shift: shift});
-            }
-
-            col = buildCommon.makeVList(col, "individualShift", null, options);
-            col = makeSpan(
-                ["col-align-" + (colDescr.align || "c")],
-                [col]);
-            cols.push(col);
-
-            if (c < nc - 1 || group.value.hskipBeforeAndAfter) {
-                sepwidth = utils.deflt(colDescr.postgap, arraycolsep);
-                if (sepwidth !== 0) {
-                    colSep = makeSpan(["arraycolsep"], []);
-                    colSep.style.width = sepwidth + "em";
-                    cols.push(colSep);
-                }
+        if (c < nc - 1 || group.value.hskipBeforeAndAfter) {
+            sepwidth = utils.deflt(colDescr.postgap, arraycolsep);
+            if (sepwidth !== 0) {
+                colSep = makeSpan(["arraycolsep"], []);
+                colSep.style.width = sepwidth + "em";
+                cols.push(colSep);
             }
         }
-        body = makeSpan(["mtable"], cols);
-        return makeSpan(["mord"], [body], options.getColor());
-    },
-
-    spacing: function(group, options, prev) {
-        if (group.value === "\\ " || group.value === "\\space" ||
-            group.value === " " || group.value === "~") {
-            // Spaces are generated by adding an actual space. Each of these
-            // things has an entry in the symbols table, so these will be turned
-            // into appropriate outputs.
-            return makeSpan(
-                ["mord", "mspace"],
-                [buildCommon.mathsym(group.value, group.mode)]
-            );
-        } else {
-            // Other kinds of spaces are of arbitrary width. We use CSS to
-            // generate these.
-            return makeSpan(
-                ["mord", "mspace",
-                 buildCommon.spacingFunctions[group.value].className]);
-        }
-    },
-
-    llap: function(group, options, prev) {
-        var inner = makeSpan(
-            ["inner"], [buildGroup(group.value.body, options.reset())]);
-        var fix = makeSpan(["fix"], []);
-        return makeSpan(
-            ["llap", options.style.cls()], [inner, fix]);
-    },
-
-    rlap: function(group, options, prev) {
-        var inner = makeSpan(
-            ["inner"], [buildGroup(group.value.body, options.reset())]);
-        var fix = makeSpan(["fix"], []);
-        return makeSpan(
-            ["rlap", options.style.cls()], [inner, fix]);
-    },
-
-    op: function(group, options, prev) {
-        // Operators are handled in the TeXbook pg. 443-444, rule 13(a).
-        var supGroup;
-        var subGroup;
-        var hasLimits = false;
-        if (group.type === "supsub" ) {
-            // If we have limits, supsub will pass us its group to handle. Pull
-            // out the superscript and subscript and set the group to the op in
-            // its base.
-            supGroup = group.value.sup;
-            subGroup = group.value.sub;
-            group = group.value.base;
-            hasLimits = true;
-        }
-
-        // Most operators have a large successor symbol, but these don't.
-        var noSuccessor = [
-            "\\smallint"
-        ];
-
-        var large = false;
-        if (options.style.size === Style.DISPLAY.size &&
-            group.value.symbol &&
-            !utils.contains(noSuccessor, group.value.body)) {
-
-            // Most symbol operators get larger in displaystyle (rule 13)
-            large = true;
-        }
-
-        var base;
-        var baseShift = 0;
-        var slant = 0;
-        if (group.value.symbol) {
-            // If this is a symbol, create the symbol.
-            var style = large ? "Size2-Regular" : "Size1-Regular";
-            base = buildCommon.makeSymbol(
-                group.value.body, style, "math", options.getColor(),
-                ["op-symbol", large ? "large-op" : "small-op", "mop"]);
-
-            // Shift the symbol so its center lies on the axis (rule 13). It
-            // appears that our fonts have the centers of the symbols already
-            // almost on the axis, so these numbers are very small. Note we
-            // don't actually apply this here, but instead it is used either in
-            // the vlist creation or separately when there are no limits.
-            baseShift = (base.height - base.depth) / 2 -
-                fontMetrics.metrics.axisHeight *
-                options.style.sizeMultiplier;
-
-            // The slant of the symbol is just its italic correction.
-            slant = base.italic;
-        } else {
-            // Otherwise, this is a text operator. Build the text from the
-            // operator's name.
-            // TODO(emily): Add a space in the middle of some of these
-            // operators, like \limsup
-            var output = [];
-            for (var i = 1; i < group.value.body.length; i++) {
-                output.push(buildCommon.mathsym(group.value.body[i], group.mode));
-            }
-            base = makeSpan(["mop"], output, options.getColor());
-        }
-
-        if (hasLimits) {
-            // IE 8 clips \int if it is in a display: inline-block. We wrap it
-            // in a new span so it is an inline, and works.
-            base = makeSpan([], [base]);
-
-            var supmid, supKern, submid, subKern;
-            // We manually have to handle the superscripts and subscripts. This,
-            // aside from the kern calculations, is copied from supsub.
-            if (supGroup) {
-                var sup = buildGroup(
-                    supGroup, options.withStyle(options.style.sup()));
-                supmid = makeSpan(
-                    [options.style.reset(), options.style.sup().cls()], [sup]);
-
-                supKern = Math.max(
-                    fontMetrics.metrics.bigOpSpacing1,
-                    fontMetrics.metrics.bigOpSpacing3 - sup.depth);
-            }
-
-            if (subGroup) {
-                var sub = buildGroup(
-                    subGroup, options.withStyle(options.style.sub()));
-                submid = makeSpan(
-                    [options.style.reset(), options.style.sub().cls()],
-                    [sub]);
-
-                subKern = Math.max(
-                    fontMetrics.metrics.bigOpSpacing2,
-                    fontMetrics.metrics.bigOpSpacing4 - sub.height);
-            }
-
-            // Build the final group as a vlist of the possible subscript, base,
-            // and possible superscript.
-            var finalGroup, top, bottom;
-            if (!supGroup) {
-                top = base.height - baseShift;
-
-                finalGroup = buildCommon.makeVList([
-                    {type: "kern", size: fontMetrics.metrics.bigOpSpacing5},
-                    {type: "elem", elem: submid},
-                    {type: "kern", size: subKern},
-                    {type: "elem", elem: base}
-                ], "top", top, options);
-
-                // Here, we shift the limits by the slant of the symbol. Note
-                // that we are supposed to shift the limits by 1/2 of the slant,
-                // but since we are centering the limits adding a full slant of
-                // margin will shift by 1/2 that.
-                finalGroup.children[0].style.marginLeft = -slant + "em";
-            } else if (!subGroup) {
-                bottom = base.depth + baseShift;
-
-                finalGroup = buildCommon.makeVList([
-                    {type: "elem", elem: base},
-                    {type: "kern", size: supKern},
-                    {type: "elem", elem: supmid},
-                    {type: "kern", size: fontMetrics.metrics.bigOpSpacing5}
-                ], "bottom", bottom, options);
-
-                // See comment above about slants
-                finalGroup.children[1].style.marginLeft = slant + "em";
-            } else if (!supGroup && !subGroup) {
-                // This case probably shouldn't occur (this would mean the
-                // supsub was sending us a group with no superscript or
-                // subscript) but be safe.
-                return base;
-            } else {
-                bottom = fontMetrics.metrics.bigOpSpacing5 +
-                    submid.height + submid.depth +
-                    subKern +
-                    base.depth + baseShift;
-
-                finalGroup = buildCommon.makeVList([
-                    {type: "kern", size: fontMetrics.metrics.bigOpSpacing5},
-                    {type: "elem", elem: submid},
-                    {type: "kern", size: subKern},
-                    {type: "elem", elem: base},
-                    {type: "kern", size: supKern},
-                    {type: "elem", elem: supmid},
-                    {type: "kern", size: fontMetrics.metrics.bigOpSpacing5}
-                ], "bottom", bottom, options);
-
-                // See comment above about slants
-                finalGroup.children[0].style.marginLeft = -slant + "em";
-                finalGroup.children[2].style.marginLeft = slant + "em";
-            }
-
-            return makeSpan(["mop", "op-limits"], [finalGroup]);
-        } else {
-            if (group.value.symbol) {
-                base.style.top = baseShift + "em";
-            }
-
-            return base;
-        }
-    },
-
-    katex: function(group, options, prev) {
-        // The KaTeX logo. The offsets for the K and a were chosen to look
-        // good, but the offsets for the T, E, and X were taken from the
-        // definition of \TeX in TeX (see TeXbook pg. 356)
-        var k = makeSpan(
-            ["k"], [buildCommon.mathsym("K", group.mode)]);
-        var a = makeSpan(
-            ["a"], [buildCommon.mathsym("A", group.mode)]);
-
-        a.height = (a.height + 0.2) * 0.75;
-        a.depth = (a.height - 0.2) * 0.75;
-
-        var t = makeSpan(
-            ["t"], [buildCommon.mathsym("T", group.mode)]);
-        var e = makeSpan(
-            ["e"], [buildCommon.mathsym("E", group.mode)]);
-
-        e.height = (e.height - 0.2155);
-        e.depth = (e.depth + 0.2155);
-
-        var x = makeSpan(
-            ["x"], [buildCommon.mathsym("X", group.mode)]);
-
-        return makeSpan(
-            ["katex-logo", "mord"], [k, a, t, e, x], options.getColor());
-    },
-
-    overline: function(group, options, prev) {
-        // Overlines are handled in the TeXbook pg 443, Rule 9.
-
-        // Build the inner group in the cramped style.
-        var innerGroup = buildGroup(group.value.body,
-                options.withStyle(options.style.cramp()));
-
-        var ruleWidth = fontMetrics.metrics.defaultRuleThickness /
-            options.style.sizeMultiplier;
-
-        // Create the line above the body
-        var line = makeSpan(
-            [options.style.reset(), Style.TEXT.cls(), "overline-line"]);
-        line.height = ruleWidth;
-        line.maxFontSize = 1.0;
-
-        // Generate the vlist, with the appropriate kerns
-        var vlist = buildCommon.makeVList([
-            {type: "elem", elem: innerGroup},
-            {type: "kern", size: 3 * ruleWidth},
-            {type: "elem", elem: line},
-            {type: "kern", size: ruleWidth}
-        ], "firstBaseline", null, options);
-
-        return makeSpan(["overline", "mord"], [vlist], options.getColor());
-    },
-
-    sqrt: function(group, options, prev) {
-        // Square roots are handled in the TeXbook pg. 443, Rule 11.
-
-        // First, we do the same steps as in overline to build the inner group
-        // and line
-        var inner = buildGroup(group.value.body,
-                options.withStyle(options.style.cramp()));
-
-        var ruleWidth = fontMetrics.metrics.defaultRuleThickness /
-            options.style.sizeMultiplier;
-
-        var line = makeSpan(
-            [options.style.reset(), Style.TEXT.cls(), "sqrt-line"], [],
-            options.getColor());
-        line.height = ruleWidth;
-        line.maxFontSize = 1.0;
-
-        var phi = ruleWidth;
-        if (options.style.id < Style.TEXT.id) {
-            phi = fontMetrics.metrics.xHeight;
-        }
-
-        // Calculate the clearance between the body and line
-        var lineClearance = ruleWidth + phi / 4;
-
-        var innerHeight =
-            (inner.height + inner.depth) * options.style.sizeMultiplier;
-        var minDelimiterHeight = innerHeight + lineClearance + ruleWidth;
-
-        // Create a \surd delimiter of the required minimum size
-        var delim = makeSpan(["sqrt-sign"], [
-            delimiter.customSizedDelim("\\surd", minDelimiterHeight,
-                                       false, options, group.mode)],
-                             options.getColor());
-
-        var delimDepth = (delim.height + delim.depth) - ruleWidth;
-
-        // Adjust the clearance based on the delimiter size
-        if (delimDepth > inner.height + inner.depth + lineClearance) {
-            lineClearance =
-                (lineClearance + delimDepth - inner.height - inner.depth) / 2;
-        }
-
-        // Shift the delimiter so that its top lines up with the top of the line
-        var delimShift = -(inner.height + lineClearance + ruleWidth) + delim.height;
-        delim.style.top = delimShift + "em";
-        delim.height -= delimShift;
-        delim.depth += delimShift;
-
-        // We add a special case here, because even when `inner` is empty, we
-        // still get a line. So, we use a simple heuristic to decide if we
-        // should omit the body entirely. (note this doesn't work for something
-        // like `\sqrt{\rlap{x}}`, but if someone is doing that they deserve for
-        // it not to work.
-        var body;
-        if (inner.height === 0 && inner.depth === 0) {
-            body = makeSpan();
-        } else {
-            body = buildCommon.makeVList([
-                {type: "elem", elem: inner},
-                {type: "kern", size: lineClearance},
-                {type: "elem", elem: line},
-                {type: "kern", size: ruleWidth}
-            ], "firstBaseline", null, options);
-        }
-
-        if (!group.value.index) {
-            return makeSpan(["sqrt", "mord"], [delim, body]);
-        } else {
-            // Handle the optional root index
-
-            // The index is always in scriptscript style
-            var root = buildGroup(
-                group.value.index,
-                options.withStyle(Style.SCRIPTSCRIPT));
-            var rootWrap = makeSpan(
-                [options.style.reset(), Style.SCRIPTSCRIPT.cls()],
-                [root]);
-
-            // Figure out the height and depth of the inner part
-            var innerRootHeight = Math.max(delim.height, body.height);
-            var innerRootDepth = Math.max(delim.depth, body.depth);
-
-            // The amount the index is shifted by. This is taken from the TeX
-            // source, in the definition of `\r@@t`.
-            var toShift = 0.6 * (innerRootHeight - innerRootDepth);
-
-            // Build a VList with the superscript shifted up correctly
-            var rootVList = buildCommon.makeVList(
-                [{type: "elem", elem: rootWrap}],
-                "shift", -toShift, options);
-            // Add a class surrounding it so we can add on the appropriate
-            // kerning
-            var rootVListWrap = makeSpan(["root"], [rootVList]);
-
-            return makeSpan(["sqrt", "mord"], [rootVListWrap, delim, body]);
-        }
-    },
-
-    sizing: function(group, options, prev) {
-        // Handle sizing operators like \Huge. Real TeX doesn't actually allow
-        // these functions inside of math expressions, so we do some special
-        // handling.
-        var inner = buildExpression(group.value.value,
-                options.withSize(group.value.size), prev);
-
-        var span = makeSpan(["mord"],
-            [makeSpan(["sizing", "reset-" + options.size, group.value.size,
-                       options.style.cls()],
-                      inner)]);
-
-        // Calculate the correct maxFontSize manually
-        var fontSize = buildCommon.sizingMultiplier[group.value.size];
-        span.maxFontSize = fontSize * options.style.sizeMultiplier;
-
-        return span;
-    },
-
-    styling: function(group, options, prev) {
-        // Style changes are handled in the TeXbook on pg. 442, Rule 3.
-
-        // Figure out what style we're changing to.
-        var style = {
-            "display": Style.DISPLAY,
-            "text": Style.TEXT,
-            "script": Style.SCRIPT,
-            "scriptscript": Style.SCRIPTSCRIPT
-        };
-
-        var newStyle = style[group.value.style];
-
-        // Build the inner expression in the new style.
-        var inner = buildExpression(
-            group.value.value, options.withStyle(newStyle), prev);
-
-        return makeSpan([options.style.reset(), newStyle.cls()], inner);
-    },
-
-    font: function(group, options, prev) {
-        var font = group.value.font;
-        return buildGroup(group.value.body, options.withFont(font), prev);
-    },
-
-    delimsizing: function(group, options, prev) {
-        var delim = group.value.value;
-
-        if (delim === ".") {
-            // Empty delimiters still count as elements, even though they don't
-            // show anything.
-            return makeSpan([groupToType[group.value.delimType]]);
-        }
-
-        // Use delimiter.sizedDelim to generate the delimiter.
-        return makeSpan(
-            [groupToType[group.value.delimType]],
-            [delimiter.sizedDelim(
-                delim, group.value.size, options, group.mode)]);
-    },
-
-    leftright: function(group, options, prev) {
-        // Build the inner expression
-        var inner = buildExpression(group.value.body, options.reset());
-
-        var innerHeight = 0;
-        var innerDepth = 0;
-
-        // Calculate its height and depth
-        for (var i = 0; i < inner.length; i++) {
-            innerHeight = Math.max(inner[i].height, innerHeight);
-            innerDepth = Math.max(inner[i].depth, innerDepth);
-        }
-
-        // The size of delimiters is the same, regardless of what style we are
-        // in. Thus, to correctly calculate the size of delimiter we need around
-        // a group, we scale down the inner size based on the size.
-        innerHeight *= options.style.sizeMultiplier;
-        innerDepth *= options.style.sizeMultiplier;
-
-        var leftDelim;
-        if (group.value.left === ".") {
-            // Empty delimiters in \left and \right make null delimiter spaces.
-            leftDelim = makeNullDelimiter(options);
-        } else {
-            // Otherwise, use leftRightDelim to generate the correct sized
-            // delimiter.
-            leftDelim = delimiter.leftRightDelim(
-                group.value.left, innerHeight, innerDepth, options,
-                group.mode);
-        }
-        // Add it to the beginning of the expression
-        inner.unshift(leftDelim);
-
-        var rightDelim;
-        // Same for the right delimiter
-        if (group.value.right === ".") {
-            rightDelim = makeNullDelimiter(options);
-        } else {
-            rightDelim = delimiter.leftRightDelim(
-                group.value.right, innerHeight, innerDepth, options,
-                group.mode);
-        }
-        // Add it to the end of the expression.
-        inner.push(rightDelim);
-
-        return makeSpan(
-            ["minner", options.style.cls()], inner, options.getColor());
-    },
-
-    rule: function(group, options, prev) {
-        // Make an empty span for the rule
-        var rule = makeSpan(["mord", "rule"], [], options.getColor());
-
-        // Calculate the shift, width, and height of the rule, and account for units
-        var shift = 0;
-        if (group.value.shift) {
-            shift = group.value.shift.number;
-            if (group.value.shift.unit === "ex") {
-                shift *= fontMetrics.metrics.xHeight;
-            }
-        }
-
-        var width = group.value.width.number;
-        if (group.value.width.unit === "ex") {
-            width *= fontMetrics.metrics.xHeight;
-        }
-
-        var height = group.value.height.number;
-        if (group.value.height.unit === "ex") {
-            height *= fontMetrics.metrics.xHeight;
-        }
-
-        // The sizes of rules are absolute, so make it larger if we are in a
-        // smaller style.
-        shift /= options.style.sizeMultiplier;
-        width /= options.style.sizeMultiplier;
-        height /= options.style.sizeMultiplier;
-
-        // Style the rule to the right size
-        rule.style.borderRightWidth = width + "em";
-        rule.style.borderTopWidth = height + "em";
-        rule.style.bottom = shift + "em";
-
-        // Record the height and width
-        rule.width = width;
-        rule.height = height + shift;
-        rule.depth = -shift;
-
-        return rule;
-    },
-
-    accent: function(group, options, prev) {
-        // Accents are handled in the TeXbook pg. 443, rule 12.
-        var base = group.value.base;
-
-        var supsubGroup;
-        if (group.type === "supsub") {
-            // If our base is a character box, and we have superscripts and
-            // subscripts, the supsub will defer to us. In particular, we want
-            // to attach the superscripts and subscripts to the inner body (so
-            // that the position of the superscripts and subscripts won't be
-            // affected by the height of the accent). We accomplish this by
-            // sticking the base of the accent into the base of the supsub, and
-            // rendering that, while keeping track of where the accent is.
-
-            // The supsub group is the group that was passed in
-            var supsub = group;
-            // The real accent group is the base of the supsub group
-            group = supsub.value.base;
-            // The character box is the base of the accent group
-            base = group.value.base;
-            // Stick the character box into the base of the supsub group
-            supsub.value.base = base;
-
-            // Rerender the supsub group with its new base, and store that
-            // result.
-            supsubGroup = buildGroup(
-                supsub, options.reset(), prev);
-        }
-
-        // Build the base group
-        var body = buildGroup(
-            base, options.withStyle(options.style.cramp()));
-
-        // Calculate the skew of the accent. This is based on the line "If the
-        // nucleus is not a single character, let s = 0; otherwise set s to the
-        // kern amount for the nucleus followed by the \skewchar of its font."
-        // Note that our skew metrics are just the kern between each character
-        // and the skewchar.
-        var skew;
-        if (isCharacterBox(base)) {
-            // If the base is a character box, then we want the skew of the
-            // innermost character. To do that, we find the innermost character:
-            var baseChar = getBaseElem(base);
-            // Then, we render its group to get the symbol inside it
-            var baseGroup = buildGroup(
-                baseChar, options.withStyle(options.style.cramp()));
-            // Finally, we pull the skew off of the symbol.
-            skew = baseGroup.skew;
-            // Note that we now throw away baseGroup, because the layers we
-            // removed with getBaseElem might contain things like \color which
-            // we can't get rid of.
-            // TODO(emily): Find a better way to get the skew
-        } else {
-            skew = 0;
-        }
-
-        // calculate the amount of space between the body and the accent
-        var clearance = Math.min(body.height, fontMetrics.metrics.xHeight);
-
-        // Build the accent
-        var accent = buildCommon.makeSymbol(
-            group.value.accent, "Main-Regular", "math", options.getColor());
-        // Remove the italic correction of the accent, because it only serves to
-        // shift the accent over to a place we don't want.
-        accent.italic = 0;
-
-        // The \vec character that the fonts use is a combining character, and
-        // thus shows up much too far to the left. To account for this, we add a
-        // specific class which shifts the accent over to where we want it.
-        // TODO(emily): Fix this in a better way, like by changing the font
-        var vecClass = group.value.accent === "\\vec" ? "accent-vec" : null;
-
-        var accentBody = makeSpan(["accent-body", vecClass], [
-            makeSpan([], [accent])]);
-
-        accentBody = buildCommon.makeVList([
-            {type: "elem", elem: body},
-            {type: "kern", size: -clearance},
-            {type: "elem", elem: accentBody}
-        ], "firstBaseline", null, options);
-
-        // Shift the accent over by the skew. Note we shift by twice the skew
-        // because we are centering the accent, so by adding 2*skew to the left,
-        // we shift it to the right by 1*skew.
-        accentBody.children[1].style.marginLeft = 2 * skew + "em";
-
-        var accentWrap = makeSpan(["mord", "accent"], [accentBody]);
-
-        if (supsubGroup) {
-            // Here, we replace the "base" child of the supsub with our newly
-            // generated accent.
-            supsubGroup.children[0] = accentWrap;
-
-            // Since we don't rerun the height calculation after replacing the
-            // accent, we manually recalculate height.
-            supsubGroup.height = Math.max(accentWrap.height, supsubGroup.height);
-
-            // Accents should always be ords, even when their innards are not.
-            supsubGroup.classes[0] = "mord";
-
-            return supsubGroup;
-        } else {
-            return accentWrap;
-        }
-    },
-
-    phantom: function(group, options, prev) {
-        var elements = buildExpression(
-            group.value.value,
-            options.withPhantom(),
-            prev
-        );
-
-        // \phantom isn't supposed to affect the elements it contains.
-        // See "color" for more details.
-        return new buildCommon.makeFragment(elements);
     }
+    body = makeSpan(["mtable"], cols);
+    return makeSpan(["mord"], [body], options.getColor());
+};
+
+groupTypes.spacing = function(group, options, prev) {
+    if (group.value === "\\ " || group.value === "\\space" ||
+        group.value === " " || group.value === "~") {
+        // Spaces are generated by adding an actual space. Each of these
+        // things has an entry in the symbols table, so these will be turned
+        // into appropriate outputs.
+        return makeSpan(
+            ["mord", "mspace"],
+            [buildCommon.mathsym(group.value, group.mode)]
+        );
+    } else {
+        // Other kinds of spaces are of arbitrary width. We use CSS to
+        // generate these.
+        return makeSpan(
+            ["mord", "mspace",
+             buildCommon.spacingFunctions[group.value].className]);
+    }
+};
+
+groupTypes.llap = function(group, options, prev) {
+    var inner = makeSpan(
+        ["inner"], [buildGroup(group.value.body, options.reset())]);
+    var fix = makeSpan(["fix"], []);
+    return makeSpan(
+        ["llap", options.style.cls()], [inner, fix]);
+};
+
+groupTypes.rlap = function(group, options, prev) {
+    var inner = makeSpan(
+        ["inner"], [buildGroup(group.value.body, options.reset())]);
+    var fix = makeSpan(["fix"], []);
+    return makeSpan(
+        ["rlap", options.style.cls()], [inner, fix]);
+};
+
+groupTypes.op = function(group, options, prev) {
+    // Operators are handled in the TeXbook pg. 443-444, rule 13(a).
+    var supGroup;
+    var subGroup;
+    var hasLimits = false;
+    if (group.type === "supsub" ) {
+        // If we have limits, supsub will pass us its group to handle. Pull
+        // out the superscript and subscript and set the group to the op in
+        // its base.
+        supGroup = group.value.sup;
+        subGroup = group.value.sub;
+        group = group.value.base;
+        hasLimits = true;
+    }
+
+    // Most operators have a large successor symbol, but these don't.
+    var noSuccessor = [
+        "\\smallint",
+    ];
+
+    var large = false;
+    if (options.style.size === Style.DISPLAY.size &&
+        group.value.symbol &&
+        !utils.contains(noSuccessor, group.value.body)) {
+
+        // Most symbol operators get larger in displaystyle (rule 13)
+        large = true;
+    }
+
+    var base;
+    var baseShift = 0;
+    var slant = 0;
+    if (group.value.symbol) {
+        // If this is a symbol, create the symbol.
+        var style = large ? "Size2-Regular" : "Size1-Regular";
+        base = buildCommon.makeSymbol(
+            group.value.body, style, "math", options.getColor(),
+            ["op-symbol", large ? "large-op" : "small-op", "mop"]);
+
+        // Shift the symbol so its center lies on the axis (rule 13). It
+        // appears that our fonts have the centers of the symbols already
+        // almost on the axis, so these numbers are very small. Note we
+        // don't actually apply this here, but instead it is used either in
+        // the vlist creation or separately when there are no limits.
+        baseShift = (base.height - base.depth) / 2 -
+            fontMetrics.metrics.axisHeight *
+            options.style.sizeMultiplier;
+
+        // The slant of the symbol is just its italic correction.
+        slant = base.italic;
+    } else {
+        // Otherwise, this is a text operator. Build the text from the
+        // operator's name.
+        // TODO(emily): Add a space in the middle of some of these
+        // operators, like \limsup
+        var output = [];
+        for (var i = 1; i < group.value.body.length; i++) {
+            output.push(buildCommon.mathsym(group.value.body[i], group.mode));
+        }
+        base = makeSpan(["mop"], output, options.getColor());
+    }
+
+    if (hasLimits) {
+        // IE 8 clips \int if it is in a display: inline-block. We wrap it
+        // in a new span so it is an inline, and works.
+        base = makeSpan([], [base]);
+
+        var supmid;
+        var supKern;
+        var submid;
+        var subKern;
+        // We manually have to handle the superscripts and subscripts. This,
+        // aside from the kern calculations, is copied from supsub.
+        if (supGroup) {
+            var sup = buildGroup(
+                supGroup, options.withStyle(options.style.sup()));
+            supmid = makeSpan(
+                [options.style.reset(), options.style.sup().cls()], [sup]);
+
+            supKern = Math.max(
+                fontMetrics.metrics.bigOpSpacing1,
+                fontMetrics.metrics.bigOpSpacing3 - sup.depth);
+        }
+
+        if (subGroup) {
+            var sub = buildGroup(
+                subGroup, options.withStyle(options.style.sub()));
+            submid = makeSpan(
+                [options.style.reset(), options.style.sub().cls()],
+                [sub]);
+
+            subKern = Math.max(
+                fontMetrics.metrics.bigOpSpacing2,
+                fontMetrics.metrics.bigOpSpacing4 - sub.height);
+        }
+
+        // Build the final group as a vlist of the possible subscript, base,
+        // and possible superscript.
+        var finalGroup;
+        var top;
+        var bottom;
+        if (!supGroup) {
+            top = base.height - baseShift;
+
+            finalGroup = buildCommon.makeVList([
+                {type: "kern", size: fontMetrics.metrics.bigOpSpacing5},
+                {type: "elem", elem: submid},
+                {type: "kern", size: subKern},
+                {type: "elem", elem: base},
+            ], "top", top, options);
+
+            // Here, we shift the limits by the slant of the symbol. Note
+            // that we are supposed to shift the limits by 1/2 of the slant,
+            // but since we are centering the limits adding a full slant of
+            // margin will shift by 1/2 that.
+            finalGroup.children[0].style.marginLeft = -slant + "em";
+        } else if (!subGroup) {
+            bottom = base.depth + baseShift;
+
+            finalGroup = buildCommon.makeVList([
+                {type: "elem", elem: base},
+                {type: "kern", size: supKern},
+                {type: "elem", elem: supmid},
+                {type: "kern", size: fontMetrics.metrics.bigOpSpacing5},
+            ], "bottom", bottom, options);
+
+            // See comment above about slants
+            finalGroup.children[1].style.marginLeft = slant + "em";
+        } else if (!supGroup && !subGroup) {
+            // This case probably shouldn't occur (this would mean the
+            // supsub was sending us a group with no superscript or
+            // subscript) but be safe.
+            return base;
+        } else {
+            bottom = fontMetrics.metrics.bigOpSpacing5 +
+                submid.height + submid.depth +
+                subKern +
+                base.depth + baseShift;
+
+            finalGroup = buildCommon.makeVList([
+                {type: "kern", size: fontMetrics.metrics.bigOpSpacing5},
+                {type: "elem", elem: submid},
+                {type: "kern", size: subKern},
+                {type: "elem", elem: base},
+                {type: "kern", size: supKern},
+                {type: "elem", elem: supmid},
+                {type: "kern", size: fontMetrics.metrics.bigOpSpacing5},
+            ], "bottom", bottom, options);
+
+            // See comment above about slants
+            finalGroup.children[0].style.marginLeft = -slant + "em";
+            finalGroup.children[2].style.marginLeft = slant + "em";
+        }
+
+        return makeSpan(["mop", "op-limits"], [finalGroup]);
+    } else {
+        if (group.value.symbol) {
+            base.style.top = baseShift + "em";
+        }
+
+        return base;
+    }
+};
+
+groupTypes.katex = function(group, options, prev) {
+    // The KaTeX logo. The offsets for the K and a were chosen to look
+    // good, but the offsets for the T, E, and X were taken from the
+    // definition of \TeX in TeX (see TeXbook pg. 356)
+    var k = makeSpan(
+        ["k"], [buildCommon.mathsym("K", group.mode)]);
+    var a = makeSpan(
+        ["a"], [buildCommon.mathsym("A", group.mode)]);
+
+    a.height = (a.height + 0.2) * 0.75;
+    a.depth = (a.height - 0.2) * 0.75;
+
+    var t = makeSpan(
+        ["t"], [buildCommon.mathsym("T", group.mode)]);
+    var e = makeSpan(
+        ["e"], [buildCommon.mathsym("E", group.mode)]);
+
+    e.height = (e.height - 0.2155);
+    e.depth = (e.depth + 0.2155);
+
+    var x = makeSpan(
+        ["x"], [buildCommon.mathsym("X", group.mode)]);
+
+    return makeSpan(
+        ["katex-logo", "mord"], [k, a, t, e, x], options.getColor());
+};
+
+groupTypes.overline = function(group, options, prev) {
+    // Overlines are handled in the TeXbook pg 443, Rule 9.
+
+    // Build the inner group in the cramped style.
+    var innerGroup = buildGroup(group.value.body,
+            options.withStyle(options.style.cramp()));
+
+    var ruleWidth = fontMetrics.metrics.defaultRuleThickness /
+        options.style.sizeMultiplier;
+
+    // Create the line above the body
+    var line = makeSpan(
+        [options.style.reset(), Style.TEXT.cls(), "overline-line"]);
+    line.height = ruleWidth;
+    line.maxFontSize = 1.0;
+
+    // Generate the vlist, with the appropriate kerns
+    var vlist = buildCommon.makeVList([
+        {type: "elem", elem: innerGroup},
+        {type: "kern", size: 3 * ruleWidth},
+        {type: "elem", elem: line},
+        {type: "kern", size: ruleWidth},
+    ], "firstBaseline", null, options);
+
+    return makeSpan(["overline", "mord"], [vlist], options.getColor());
+};
+
+groupTypes.underline = function(group, options, prev) {
+    // Underlines are handled in the TeXbook pg 443, Rule 10.
+
+    // Build the inner group.
+    var innerGroup = buildGroup(group.value.body, options);
+
+    var ruleWidth = fontMetrics.metrics.defaultRuleThickness /
+        options.style.sizeMultiplier;
+
+    // Create the line above the body
+    var line = makeSpan(
+        [options.style.reset(), Style.TEXT.cls(), "underline-line"]);
+    line.height = ruleWidth;
+    line.maxFontSize = 1.0;
+
+    // Generate the vlist, with the appropriate kerns
+    var vlist = buildCommon.makeVList([
+        {type: "kern", size: ruleWidth},
+        {type: "elem", elem: line},
+        {type: "kern", size: 3 * ruleWidth},
+        {type: "elem", elem: innerGroup},
+    ], "top", innerGroup.height, options);
+
+    return makeSpan(["underline", "mord"], [vlist], options.getColor());
+};
+
+groupTypes.sqrt = function(group, options, prev) {
+    // Square roots are handled in the TeXbook pg. 443, Rule 11.
+
+    // First, we do the same steps as in overline to build the inner group
+    // and line
+    var inner = buildGroup(group.value.body,
+            options.withStyle(options.style.cramp()));
+
+    var ruleWidth = fontMetrics.metrics.defaultRuleThickness /
+        options.style.sizeMultiplier;
+
+    var line = makeSpan(
+        [options.style.reset(), Style.TEXT.cls(), "sqrt-line"], [],
+        options.getColor());
+    line.height = ruleWidth;
+    line.maxFontSize = 1.0;
+
+    var phi = ruleWidth;
+    if (options.style.id < Style.TEXT.id) {
+        phi = fontMetrics.metrics.xHeight;
+    }
+
+    // Calculate the clearance between the body and line
+    var lineClearance = ruleWidth + phi / 4;
+
+    var innerHeight =
+        (inner.height + inner.depth) * options.style.sizeMultiplier;
+    var minDelimiterHeight = innerHeight + lineClearance + ruleWidth;
+
+    // Create a \surd delimiter of the required minimum size
+    var delim = makeSpan(["sqrt-sign"], [
+        delimiter.customSizedDelim("\\surd", minDelimiterHeight,
+                                   false, options, group.mode)],
+                         options.getColor());
+
+    var delimDepth = (delim.height + delim.depth) - ruleWidth;
+
+    // Adjust the clearance based on the delimiter size
+    if (delimDepth > inner.height + inner.depth + lineClearance) {
+        lineClearance =
+            (lineClearance + delimDepth - inner.height - inner.depth) / 2;
+    }
+
+    // Shift the delimiter so that its top lines up with the top of the line
+    var delimShift = -(inner.height + lineClearance + ruleWidth) + delim.height;
+    delim.style.top = delimShift + "em";
+    delim.height -= delimShift;
+    delim.depth += delimShift;
+
+    // We add a special case here, because even when `inner` is empty, we
+    // still get a line. So, we use a simple heuristic to decide if we
+    // should omit the body entirely. (note this doesn't work for something
+    // like `\sqrt{\rlap{x}}`, but if someone is doing that they deserve for
+    // it not to work.
+    var body;
+    if (inner.height === 0 && inner.depth === 0) {
+        body = makeSpan();
+    } else {
+        body = buildCommon.makeVList([
+            {type: "elem", elem: inner},
+            {type: "kern", size: lineClearance},
+            {type: "elem", elem: line},
+            {type: "kern", size: ruleWidth},
+        ], "firstBaseline", null, options);
+    }
+
+    if (!group.value.index) {
+        return makeSpan(["sqrt", "mord"], [delim, body]);
+    } else {
+        // Handle the optional root index
+
+        // The index is always in scriptscript style
+        var root = buildGroup(
+            group.value.index,
+            options.withStyle(Style.SCRIPTSCRIPT));
+        var rootWrap = makeSpan(
+            [options.style.reset(), Style.SCRIPTSCRIPT.cls()],
+            [root]);
+
+        // Figure out the height and depth of the inner part
+        var innerRootHeight = Math.max(delim.height, body.height);
+        var innerRootDepth = Math.max(delim.depth, body.depth);
+
+        // The amount the index is shifted by. This is taken from the TeX
+        // source, in the definition of `\r@@t`.
+        var toShift = 0.6 * (innerRootHeight - innerRootDepth);
+
+        // Build a VList with the superscript shifted up correctly
+        var rootVList = buildCommon.makeVList(
+            [{type: "elem", elem: rootWrap}],
+            "shift", -toShift, options);
+        // Add a class surrounding it so we can add on the appropriate
+        // kerning
+        var rootVListWrap = makeSpan(["root"], [rootVList]);
+
+        return makeSpan(["sqrt", "mord"], [rootVListWrap, delim, body]);
+    }
+};
+
+groupTypes.sizing = function(group, options, prev) {
+    // Handle sizing operators like \Huge. Real TeX doesn't actually allow
+    // these functions inside of math expressions, so we do some special
+    // handling.
+    var inner = buildExpression(group.value.value,
+            options.withSize(group.value.size), prev);
+
+    var span = makeSpan(["mord"],
+        [makeSpan(["sizing", "reset-" + options.size, group.value.size,
+                   options.style.cls()],
+                  inner)]);
+
+    // Calculate the correct maxFontSize manually
+    var fontSize = buildCommon.sizingMultiplier[group.value.size];
+    span.maxFontSize = fontSize * options.style.sizeMultiplier;
+
+    return span;
+};
+
+groupTypes.styling = function(group, options, prev) {
+    // Style changes are handled in the TeXbook on pg. 442, Rule 3.
+
+    // Figure out what style we're changing to.
+    var style = {
+        "display": Style.DISPLAY,
+        "text": Style.TEXT,
+        "script": Style.SCRIPT,
+        "scriptscript": Style.SCRIPTSCRIPT,
+    };
+
+    var newStyle = style[group.value.style];
+
+    // Build the inner expression in the new style.
+    var inner = buildExpression(
+        group.value.value, options.withStyle(newStyle), prev);
+
+    return makeSpan([options.style.reset(), newStyle.cls()], inner);
+};
+
+groupTypes.font = function(group, options, prev) {
+    var font = group.value.font;
+    return buildGroup(group.value.body, options.withFont(font), prev);
+};
+
+groupTypes.delimsizing = function(group, options, prev) {
+    var delim = group.value.value;
+
+    if (delim === ".") {
+        // Empty delimiters still count as elements, even though they don't
+        // show anything.
+        return makeSpan([groupToType[group.value.delimType]]);
+    }
+
+    // Use delimiter.sizedDelim to generate the delimiter.
+    return makeSpan(
+        [groupToType[group.value.delimType]],
+        [delimiter.sizedDelim(
+            delim, group.value.size, options, group.mode)]);
+};
+
+groupTypes.leftright = function(group, options, prev) {
+    // Build the inner expression
+    var inner = buildExpression(group.value.body, options.reset());
+
+    var innerHeight = 0;
+    var innerDepth = 0;
+
+    // Calculate its height and depth
+    for (var i = 0; i < inner.length; i++) {
+        innerHeight = Math.max(inner[i].height, innerHeight);
+        innerDepth = Math.max(inner[i].depth, innerDepth);
+    }
+
+    // The size of delimiters is the same, regardless of what style we are
+    // in. Thus, to correctly calculate the size of delimiter we need around
+    // a group, we scale down the inner size based on the size.
+    innerHeight *= options.style.sizeMultiplier;
+    innerDepth *= options.style.sizeMultiplier;
+
+    var leftDelim;
+    if (group.value.left === ".") {
+        // Empty delimiters in \left and \right make null delimiter spaces.
+        leftDelim = makeNullDelimiter(options);
+    } else {
+        // Otherwise, use leftRightDelim to generate the correct sized
+        // delimiter.
+        leftDelim = delimiter.leftRightDelim(
+            group.value.left, innerHeight, innerDepth, options,
+            group.mode);
+    }
+    // Add it to the beginning of the expression
+    inner.unshift(leftDelim);
+
+    var rightDelim;
+    // Same for the right delimiter
+    if (group.value.right === ".") {
+        rightDelim = makeNullDelimiter(options);
+    } else {
+        rightDelim = delimiter.leftRightDelim(
+            group.value.right, innerHeight, innerDepth, options,
+            group.mode);
+    }
+    // Add it to the end of the expression.
+    inner.push(rightDelim);
+
+    return makeSpan(
+        ["minner", options.style.cls()], inner, options.getColor());
+};
+
+groupTypes.rule = function(group, options, prev) {
+    // Make an empty span for the rule
+    var rule = makeSpan(["mord", "rule"], [], options.getColor());
+
+    // Calculate the shift, width, and height of the rule, and account for units
+    var shift = 0;
+    if (group.value.shift) {
+        shift = group.value.shift.number;
+        if (group.value.shift.unit === "ex") {
+            shift *= fontMetrics.metrics.xHeight;
+        }
+    }
+
+    var width = group.value.width.number;
+    if (group.value.width.unit === "ex") {
+        width *= fontMetrics.metrics.xHeight;
+    }
+
+    var height = group.value.height.number;
+    if (group.value.height.unit === "ex") {
+        height *= fontMetrics.metrics.xHeight;
+    }
+
+    // The sizes of rules are absolute, so make it larger if we are in a
+    // smaller style.
+    shift /= options.style.sizeMultiplier;
+    width /= options.style.sizeMultiplier;
+    height /= options.style.sizeMultiplier;
+
+    // Style the rule to the right size
+    rule.style.borderRightWidth = width + "em";
+    rule.style.borderTopWidth = height + "em";
+    rule.style.bottom = shift + "em";
+
+    // Record the height and width
+    rule.width = width;
+    rule.height = height + shift;
+    rule.depth = -shift;
+
+    return rule;
+};
+
+groupTypes.accent = function(group, options, prev) {
+    // Accents are handled in the TeXbook pg. 443, rule 12.
+    var base = group.value.base;
+
+    var supsubGroup;
+    if (group.type === "supsub") {
+        // If our base is a character box, and we have superscripts and
+        // subscripts, the supsub will defer to us. In particular, we want
+        // to attach the superscripts and subscripts to the inner body (so
+        // that the position of the superscripts and subscripts won't be
+        // affected by the height of the accent). We accomplish this by
+        // sticking the base of the accent into the base of the supsub, and
+        // rendering that, while keeping track of where the accent is.
+
+        // The supsub group is the group that was passed in
+        var supsub = group;
+        // The real accent group is the base of the supsub group
+        group = supsub.value.base;
+        // The character box is the base of the accent group
+        base = group.value.base;
+        // Stick the character box into the base of the supsub group
+        supsub.value.base = base;
+
+        // Rerender the supsub group with its new base, and store that
+        // result.
+        supsubGroup = buildGroup(
+            supsub, options.reset(), prev);
+    }
+
+    // Build the base group
+    var body = buildGroup(
+        base, options.withStyle(options.style.cramp()));
+
+    // Calculate the skew of the accent. This is based on the line "If the
+    // nucleus is not a single character, let s = 0; otherwise set s to the
+    // kern amount for the nucleus followed by the \skewchar of its font."
+    // Note that our skew metrics are just the kern between each character
+    // and the skewchar.
+    var skew;
+    if (isCharacterBox(base)) {
+        // If the base is a character box, then we want the skew of the
+        // innermost character. To do that, we find the innermost character:
+        var baseChar = getBaseElem(base);
+        // Then, we render its group to get the symbol inside it
+        var baseGroup = buildGroup(
+            baseChar, options.withStyle(options.style.cramp()));
+        // Finally, we pull the skew off of the symbol.
+        skew = baseGroup.skew;
+        // Note that we now throw away baseGroup, because the layers we
+        // removed with getBaseElem might contain things like \color which
+        // we can't get rid of.
+        // TODO(emily): Find a better way to get the skew
+    } else {
+        skew = 0;
+    }
+
+    // calculate the amount of space between the body and the accent
+    var clearance = Math.min(body.height, fontMetrics.metrics.xHeight);
+
+    // Build the accent
+    var accent = buildCommon.makeSymbol(
+        group.value.accent, "Main-Regular", "math", options.getColor());
+    // Remove the italic correction of the accent, because it only serves to
+    // shift the accent over to a place we don't want.
+    accent.italic = 0;
+
+    // The \vec character that the fonts use is a combining character, and
+    // thus shows up much too far to the left. To account for this, we add a
+    // specific class which shifts the accent over to where we want it.
+    // TODO(emily): Fix this in a better way, like by changing the font
+    var vecClass = group.value.accent === "\\vec" ? "accent-vec" : null;
+
+    var accentBody = makeSpan(["accent-body", vecClass], [
+        makeSpan([], [accent])]);
+
+    accentBody = buildCommon.makeVList([
+        {type: "elem", elem: body},
+        {type: "kern", size: -clearance},
+        {type: "elem", elem: accentBody},
+    ], "firstBaseline", null, options);
+
+    // Shift the accent over by the skew. Note we shift by twice the skew
+    // because we are centering the accent, so by adding 2*skew to the left,
+    // we shift it to the right by 1*skew.
+    accentBody.children[1].style.marginLeft = 2 * skew + "em";
+
+    var accentWrap = makeSpan(["mord", "accent"], [accentBody]);
+
+    if (supsubGroup) {
+        // Here, we replace the "base" child of the supsub with our newly
+        // generated accent.
+        supsubGroup.children[0] = accentWrap;
+
+        // Since we don't rerun the height calculation after replacing the
+        // accent, we manually recalculate height.
+        supsubGroup.height = Math.max(accentWrap.height, supsubGroup.height);
+
+        // Accents should always be ords, even when their innards are not.
+        supsubGroup.classes[0] = "mord";
+
+        return supsubGroup;
+    } else {
+        return accentWrap;
+    }
+};
+
+groupTypes.phantom = function(group, options, prev) {
+    var elements = buildExpression(
+        group.value.value,
+        options.withPhantom(),
+        prev
+    );
+
+    // \phantom isn't supposed to affect the elements it contains.
+    // See "color" for more details.
+    return new buildCommon.makeFragment(elements);
 };
 
 /**
@@ -6022,7 +6388,7 @@ var buildHTML = function(tree, options) {
 
 module.exports = buildHTML;
 
-},{"./ParseError":16,"./Style":19,"./buildCommon":20,"./delimiter":24,"./domTree":25,"./fontMetrics":27,"./utils":34}],22:[function(require,module,exports){
+},{"./ParseError":18,"./Style":21,"./buildCommon":22,"./delimiter":26,"./domTree":27,"./fontMetrics":29,"./utils":36}],24:[function(require,module,exports){
 /**
  * This file converts a parse tree into a cooresponding MathML tree. The main
  * entry point is the `buildMathML` function, which takes a parse tree from the
@@ -6086,397 +6452,411 @@ var getVariant = function(group, options) {
  * Functions for handling the different types of groups found in the parse
  * tree. Each function should take a parse group and return a MathML node.
  */
-var groupTypes = {
-    mathord: function(group, options) {
-        var node = new mathMLTree.MathNode(
-            "mi",
-            [makeText(group.value, group.mode)]);
+var groupTypes = {};
 
-        var variant = getVariant(group, options);
-        if (variant) {
+groupTypes.mathord = function(group, options) {
+    var node = new mathMLTree.MathNode(
+        "mi",
+        [makeText(group.value, group.mode)]);
+
+    var variant = getVariant(group, options);
+    if (variant) {
+        node.setAttribute("mathvariant", variant);
+    }
+    return node;
+};
+
+groupTypes.textord = function(group, options) {
+    var text = makeText(group.value, group.mode);
+
+    var variant = getVariant(group, options) || "normal";
+
+    var node;
+    if (/[0-9]/.test(group.value)) {
+        // TODO(kevinb) merge adjacent <mn> nodes
+        // do it as a post processing step
+        node = new mathMLTree.MathNode("mn", [text]);
+        if (options.font) {
             node.setAttribute("mathvariant", variant);
         }
-        return node;
-    },
+    } else {
+        node = new mathMLTree.MathNode("mi", [text]);
+        node.setAttribute("mathvariant", variant);
+    }
 
-    textord: function(group, options) {
-        var text = makeText(group.value, group.mode);
+    return node;
+};
 
-        var variant = getVariant(group, options) || "normal";
+groupTypes.bin = function(group) {
+    var node = new mathMLTree.MathNode(
+        "mo", [makeText(group.value, group.mode)]);
 
-        var node;
-        if (/[0-9]/.test(group.value)) {
-            // TODO(kevinb) merge adjacent <mn> nodes
-            // do it as a post processing step
-            node = new mathMLTree.MathNode("mn", [text]);
-            if (options.font) {
-                node.setAttribute("mathvariant", variant);
-            }
-        } else {
-            node = new mathMLTree.MathNode("mi", [text]);
-            node.setAttribute("mathvariant", variant);
+    return node;
+};
+
+groupTypes.rel = function(group) {
+    var node = new mathMLTree.MathNode(
+        "mo", [makeText(group.value, group.mode)]);
+
+    return node;
+};
+
+groupTypes.open = function(group) {
+    var node = new mathMLTree.MathNode(
+        "mo", [makeText(group.value, group.mode)]);
+
+    return node;
+};
+
+groupTypes.close = function(group) {
+    var node = new mathMLTree.MathNode(
+        "mo", [makeText(group.value, group.mode)]);
+
+    return node;
+};
+
+groupTypes.inner = function(group) {
+    var node = new mathMLTree.MathNode(
+        "mo", [makeText(group.value, group.mode)]);
+
+    return node;
+};
+
+groupTypes.punct = function(group) {
+    var node = new mathMLTree.MathNode(
+        "mo", [makeText(group.value, group.mode)]);
+
+    node.setAttribute("separator", "true");
+
+    return node;
+};
+
+groupTypes.ordgroup = function(group, options) {
+    var inner = buildExpression(group.value, options);
+
+    var node = new mathMLTree.MathNode("mrow", inner);
+
+    return node;
+};
+
+groupTypes.text = function(group, options) {
+    var inner = buildExpression(group.value.body, options);
+
+    var node = new mathMLTree.MathNode("mtext", inner);
+
+    return node;
+};
+
+groupTypes.color = function(group, options) {
+    var inner = buildExpression(group.value.value, options);
+
+    var node = new mathMLTree.MathNode("mstyle", inner);
+
+    node.setAttribute("mathcolor", group.value.color);
+
+    return node;
+};
+
+groupTypes.supsub = function(group, options) {
+    var children = [buildGroup(group.value.base, options)];
+
+    if (group.value.sub) {
+        children.push(buildGroup(group.value.sub, options));
+    }
+
+    if (group.value.sup) {
+        children.push(buildGroup(group.value.sup, options));
+    }
+
+    var nodeType;
+    if (!group.value.sub) {
+        nodeType = "msup";
+    } else if (!group.value.sup) {
+        nodeType = "msub";
+    } else {
+        nodeType = "msubsup";
+    }
+
+    var node = new mathMLTree.MathNode(nodeType, children);
+
+    return node;
+};
+
+groupTypes.genfrac = function(group, options) {
+    var node = new mathMLTree.MathNode(
+        "mfrac",
+        [buildGroup(group.value.numer, options),
+         buildGroup(group.value.denom, options)]);
+
+    if (!group.value.hasBarLine) {
+        node.setAttribute("linethickness", "0px");
+    }
+
+    if (group.value.leftDelim != null || group.value.rightDelim != null) {
+        var withDelims = [];
+
+        if (group.value.leftDelim != null) {
+            var leftOp = new mathMLTree.MathNode(
+                "mo", [new mathMLTree.TextNode(group.value.leftDelim)]);
+
+            leftOp.setAttribute("fence", "true");
+
+            withDelims.push(leftOp);
         }
 
-        return node;
-    },
+        withDelims.push(node);
 
-    bin: function(group) {
-        var node = new mathMLTree.MathNode(
-            "mo", [makeText(group.value, group.mode)]);
+        if (group.value.rightDelim != null) {
+            var rightOp = new mathMLTree.MathNode(
+                "mo", [new mathMLTree.TextNode(group.value.rightDelim)]);
 
-        return node;
-    },
+            rightOp.setAttribute("fence", "true");
 
-    rel: function(group) {
-        var node = new mathMLTree.MathNode(
-            "mo", [makeText(group.value, group.mode)]);
-
-        return node;
-    },
-
-    open: function(group) {
-        var node = new mathMLTree.MathNode(
-            "mo", [makeText(group.value, group.mode)]);
-
-        return node;
-    },
-
-    close: function(group) {
-        var node = new mathMLTree.MathNode(
-            "mo", [makeText(group.value, group.mode)]);
-
-        return node;
-    },
-
-    inner: function(group) {
-        var node = new mathMLTree.MathNode(
-            "mo", [makeText(group.value, group.mode)]);
-
-        return node;
-    },
-
-    punct: function(group) {
-        var node = new mathMLTree.MathNode(
-            "mo", [makeText(group.value, group.mode)]);
-
-        node.setAttribute("separator", "true");
-
-        return node;
-    },
-
-    ordgroup: function(group, options) {
-        var inner = buildExpression(group.value, options);
-
-        var node = new mathMLTree.MathNode("mrow", inner);
-
-        return node;
-    },
-
-    text: function(group, options) {
-        var inner = buildExpression(group.value.body, options);
-
-        var node = new mathMLTree.MathNode("mtext", inner);
-
-        return node;
-    },
-
-    color: function(group, options) {
-        var inner = buildExpression(group.value.value, options);
-
-        var node = new mathMLTree.MathNode("mstyle", inner);
-
-        node.setAttribute("mathcolor", group.value.color);
-
-        return node;
-    },
-
-    supsub: function(group, options) {
-        var children = [buildGroup(group.value.base, options)];
-
-        if (group.value.sub) {
-            children.push(buildGroup(group.value.sub, options));
+            withDelims.push(rightOp);
         }
 
-        if (group.value.sup) {
-            children.push(buildGroup(group.value.sup, options));
-        }
-
-        var nodeType;
-        if (!group.value.sub) {
-            nodeType = "msup";
-        } else if (!group.value.sup) {
-            nodeType = "msub";
-        } else {
-            nodeType = "msubsup";
-        }
-
-        var node = new mathMLTree.MathNode(nodeType, children);
-
-        return node;
-    },
-
-    genfrac: function(group, options) {
-        var node = new mathMLTree.MathNode(
-            "mfrac",
-            [buildGroup(group.value.numer, options),
-             buildGroup(group.value.denom, options)]);
-
-        if (!group.value.hasBarLine) {
-            node.setAttribute("linethickness", "0px");
-        }
-
-        if (group.value.leftDelim != null || group.value.rightDelim != null) {
-            var withDelims = [];
-
-            if (group.value.leftDelim != null) {
-                var leftOp = new mathMLTree.MathNode(
-                    "mo", [new mathMLTree.TextNode(group.value.leftDelim)]);
-
-                leftOp.setAttribute("fence", "true");
-
-                withDelims.push(leftOp);
-            }
-
-            withDelims.push(node);
-
-            if (group.value.rightDelim != null) {
-                var rightOp = new mathMLTree.MathNode(
-                    "mo", [new mathMLTree.TextNode(group.value.rightDelim)]);
-
-                rightOp.setAttribute("fence", "true");
-
-                withDelims.push(rightOp);
-            }
-
-            var outerNode = new mathMLTree.MathNode("mrow", withDelims);
-
-            return outerNode;
-        }
-
-        return node;
-    },
-
-    array: function(group, options) {
-        return new mathMLTree.MathNode(
-            "mtable", group.value.body.map(function(row) {
-                return new mathMLTree.MathNode(
-                    "mtr", row.map(function(cell) {
-                        return new mathMLTree.MathNode(
-                            "mtd", [buildGroup(cell, options)]);
-                    }));
-            }));
-    },
-
-    sqrt: function(group, options) {
-        var node;
-        if (group.value.index) {
-            node = new mathMLTree.MathNode(
-                "mroot", [
-                    buildGroup(group.value.body, options),
-                    buildGroup(group.value.index, options)
-                ]);
-        } else {
-            node = new mathMLTree.MathNode(
-                "msqrt", [buildGroup(group.value.body, options)]);
-        }
-
-        return node;
-    },
-
-    leftright: function(group, options) {
-        var inner = buildExpression(group.value.body, options);
-
-        if (group.value.left !== ".") {
-            var leftNode = new mathMLTree.MathNode(
-                "mo", [makeText(group.value.left, group.mode)]);
-
-            leftNode.setAttribute("fence", "true");
-
-            inner.unshift(leftNode);
-        }
-
-        if (group.value.right !== ".") {
-            var rightNode = new mathMLTree.MathNode(
-                "mo", [makeText(group.value.right, group.mode)]);
-
-            rightNode.setAttribute("fence", "true");
-
-            inner.push(rightNode);
-        }
-
-        var outerNode = new mathMLTree.MathNode("mrow", inner);
+        var outerNode = new mathMLTree.MathNode("mrow", withDelims);
 
         return outerNode;
-    },
-
-    accent: function(group, options) {
-        var accentNode = new mathMLTree.MathNode(
-            "mo", [makeText(group.value.accent, group.mode)]);
-
-        var node = new mathMLTree.MathNode(
-            "mover",
-            [buildGroup(group.value.base, options),
-             accentNode]);
-
-        node.setAttribute("accent", "true");
-
-        return node;
-    },
-
-    spacing: function(group) {
-        var node;
-
-        if (group.value === "\\ " || group.value === "\\space" ||
-            group.value === " " || group.value === "~") {
-            node = new mathMLTree.MathNode(
-                "mtext", [new mathMLTree.TextNode("\u00a0")]);
-        } else {
-            node = new mathMLTree.MathNode("mspace");
-
-            node.setAttribute(
-                "width", buildCommon.spacingFunctions[group.value].size);
-        }
-
-        return node;
-    },
-
-    op: function(group) {
-        var node;
-
-        // TODO(emily): handle big operators using the `largeop` attribute
-
-        if (group.value.symbol) {
-            // This is a symbol. Just add the symbol.
-            node = new mathMLTree.MathNode(
-                "mo", [makeText(group.value.body, group.mode)]);
-        } else {
-            // This is a text operator. Add all of the characters from the
-            // operator's name.
-            // TODO(emily): Add a space in the middle of some of these
-            // operators, like \limsup.
-            node = new mathMLTree.MathNode(
-                "mi", [new mathMLTree.TextNode(group.value.body.slice(1))]);
-        }
-
-        return node;
-    },
-
-    katex: function(group) {
-        var node = new mathMLTree.MathNode(
-            "mtext", [new mathMLTree.TextNode("KaTeX")]);
-
-        return node;
-    },
-
-    font: function(group, options) {
-        var font = group.value.font;
-        return buildGroup(group.value.body, options.withFont(font));
-    },
-
-    delimsizing: function(group) {
-        var children = [];
-
-        if (group.value.value !== ".") {
-            children.push(makeText(group.value.value, group.mode));
-        }
-
-        var node = new mathMLTree.MathNode("mo", children);
-
-        if (group.value.delimType === "open" ||
-            group.value.delimType === "close") {
-            // Only some of the delimsizing functions act as fences, and they
-            // return "open" or "close" delimTypes.
-            node.setAttribute("fence", "true");
-        } else {
-            // Explicitly disable fencing if it's not a fence, to override the
-            // defaults.
-            node.setAttribute("fence", "false");
-        }
-
-        return node;
-    },
-
-    styling: function(group, options) {
-        var inner = buildExpression(group.value.value, options);
-
-        var node = new mathMLTree.MathNode("mstyle", inner);
-
-        var styleAttributes = {
-            "display": ["0", "true"],
-            "text": ["0", "false"],
-            "script": ["1", "false"],
-            "scriptscript": ["2", "false"]
-        };
-
-        var attr = styleAttributes[group.value.style];
-
-        node.setAttribute("scriptlevel", attr[0]);
-        node.setAttribute("displaystyle", attr[1]);
-
-        return node;
-    },
-
-    sizing: function(group, options) {
-        var inner = buildExpression(group.value.value, options);
-
-        var node = new mathMLTree.MathNode("mstyle", inner);
-
-        // TODO(emily): This doesn't produce the correct size for nested size
-        // changes, because we don't keep state of what style we're currently
-        // in, so we can't reset the size to normal before changing it.  Now
-        // that we're passing an options parameter we should be able to fix
-        // this.
-        node.setAttribute(
-            "mathsize", buildCommon.sizingMultiplier[group.value.size] + "em");
-
-        return node;
-    },
-
-    overline: function(group, options) {
-        var operator = new mathMLTree.MathNode(
-            "mo", [new mathMLTree.TextNode("\u203e")]);
-        operator.setAttribute("stretchy", "true");
-
-        var node = new mathMLTree.MathNode(
-            "mover",
-            [buildGroup(group.value.body, options),
-             operator]);
-        node.setAttribute("accent", "true");
-
-        return node;
-    },
-
-    rule: function(group) {
-        // TODO(emily): Figure out if there's an actual way to draw black boxes
-        // in MathML.
-        var node = new mathMLTree.MathNode("mrow");
-
-        return node;
-    },
-
-    llap: function(group, options) {
-        var node = new mathMLTree.MathNode(
-            "mpadded", [buildGroup(group.value.body, options)]);
-
-        node.setAttribute("lspace", "-1width");
-        node.setAttribute("width", "0px");
-
-        return node;
-    },
-
-    rlap: function(group, options) {
-        var node = new mathMLTree.MathNode(
-            "mpadded", [buildGroup(group.value.body, options)]);
-
-        node.setAttribute("width", "0px");
-
-        return node;
-    },
-
-    phantom: function(group, options, prev) {
-        var inner = buildExpression(group.value.value, options);
-        return new mathMLTree.MathNode("mphantom", inner);
     }
+
+    return node;
+};
+
+groupTypes.array = function(group, options) {
+    return new mathMLTree.MathNode(
+        "mtable", group.value.body.map(function(row) {
+            return new mathMLTree.MathNode(
+                "mtr", row.map(function(cell) {
+                    return new mathMLTree.MathNode(
+                        "mtd", [buildGroup(cell, options)]);
+                }));
+        }));
+};
+
+groupTypes.sqrt = function(group, options) {
+    var node;
+    if (group.value.index) {
+        node = new mathMLTree.MathNode(
+            "mroot", [
+                buildGroup(group.value.body, options),
+                buildGroup(group.value.index, options),
+            ]);
+    } else {
+        node = new mathMLTree.MathNode(
+            "msqrt", [buildGroup(group.value.body, options)]);
+    }
+
+    return node;
+};
+
+groupTypes.leftright = function(group, options) {
+    var inner = buildExpression(group.value.body, options);
+
+    if (group.value.left !== ".") {
+        var leftNode = new mathMLTree.MathNode(
+            "mo", [makeText(group.value.left, group.mode)]);
+
+        leftNode.setAttribute("fence", "true");
+
+        inner.unshift(leftNode);
+    }
+
+    if (group.value.right !== ".") {
+        var rightNode = new mathMLTree.MathNode(
+            "mo", [makeText(group.value.right, group.mode)]);
+
+        rightNode.setAttribute("fence", "true");
+
+        inner.push(rightNode);
+    }
+
+    var outerNode = new mathMLTree.MathNode("mrow", inner);
+
+    return outerNode;
+};
+
+groupTypes.accent = function(group, options) {
+    var accentNode = new mathMLTree.MathNode(
+        "mo", [makeText(group.value.accent, group.mode)]);
+
+    var node = new mathMLTree.MathNode(
+        "mover",
+        [buildGroup(group.value.base, options),
+         accentNode]);
+
+    node.setAttribute("accent", "true");
+
+    return node;
+};
+
+groupTypes.spacing = function(group) {
+    var node;
+
+    if (group.value === "\\ " || group.value === "\\space" ||
+        group.value === " " || group.value === "~") {
+        node = new mathMLTree.MathNode(
+            "mtext", [new mathMLTree.TextNode("\u00a0")]);
+    } else {
+        node = new mathMLTree.MathNode("mspace");
+
+        node.setAttribute(
+            "width", buildCommon.spacingFunctions[group.value].size);
+    }
+
+    return node;
+};
+
+groupTypes.op = function(group) {
+    var node;
+
+    // TODO(emily): handle big operators using the `largeop` attribute
+
+    if (group.value.symbol) {
+        // This is a symbol. Just add the symbol.
+        node = new mathMLTree.MathNode(
+            "mo", [makeText(group.value.body, group.mode)]);
+    } else {
+        // This is a text operator. Add all of the characters from the
+        // operator's name.
+        // TODO(emily): Add a space in the middle of some of these
+        // operators, like \limsup.
+        node = new mathMLTree.MathNode(
+            "mi", [new mathMLTree.TextNode(group.value.body.slice(1))]);
+    }
+
+    return node;
+};
+
+groupTypes.katex = function(group) {
+    var node = new mathMLTree.MathNode(
+        "mtext", [new mathMLTree.TextNode("KaTeX")]);
+
+    return node;
+};
+
+groupTypes.font = function(group, options) {
+    var font = group.value.font;
+    return buildGroup(group.value.body, options.withFont(font));
+};
+
+groupTypes.delimsizing = function(group) {
+    var children = [];
+
+    if (group.value.value !== ".") {
+        children.push(makeText(group.value.value, group.mode));
+    }
+
+    var node = new mathMLTree.MathNode("mo", children);
+
+    if (group.value.delimType === "open" ||
+        group.value.delimType === "close") {
+        // Only some of the delimsizing functions act as fences, and they
+        // return "open" or "close" delimTypes.
+        node.setAttribute("fence", "true");
+    } else {
+        // Explicitly disable fencing if it's not a fence, to override the
+        // defaults.
+        node.setAttribute("fence", "false");
+    }
+
+    return node;
+};
+
+groupTypes.styling = function(group, options) {
+    var inner = buildExpression(group.value.value, options);
+
+    var node = new mathMLTree.MathNode("mstyle", inner);
+
+    var styleAttributes = {
+        "display": ["0", "true"],
+        "text": ["0", "false"],
+        "script": ["1", "false"],
+        "scriptscript": ["2", "false"],
+    };
+
+    var attr = styleAttributes[group.value.style];
+
+    node.setAttribute("scriptlevel", attr[0]);
+    node.setAttribute("displaystyle", attr[1]);
+
+    return node;
+};
+
+groupTypes.sizing = function(group, options) {
+    var inner = buildExpression(group.value.value, options);
+
+    var node = new mathMLTree.MathNode("mstyle", inner);
+
+    // TODO(emily): This doesn't produce the correct size for nested size
+    // changes, because we don't keep state of what style we're currently
+    // in, so we can't reset the size to normal before changing it.  Now
+    // that we're passing an options parameter we should be able to fix
+    // this.
+    node.setAttribute(
+        "mathsize", buildCommon.sizingMultiplier[group.value.size] + "em");
+
+    return node;
+};
+
+groupTypes.overline = function(group, options) {
+    var operator = new mathMLTree.MathNode(
+        "mo", [new mathMLTree.TextNode("\u203e")]);
+    operator.setAttribute("stretchy", "true");
+
+    var node = new mathMLTree.MathNode(
+        "mover",
+        [buildGroup(group.value.body, options),
+         operator]);
+    node.setAttribute("accent", "true");
+
+    return node;
+};
+
+groupTypes.underline = function(group, options) {
+    var operator = new mathMLTree.MathNode(
+        "mo", [new mathMLTree.TextNode("\u203e")]);
+    operator.setAttribute("stretchy", "true");
+
+    var node = new mathMLTree.MathNode(
+        "munder",
+        [buildGroup(group.value.body, options),
+         operator]);
+    node.setAttribute("accentunder", "true");
+
+    return node;
+};
+
+groupTypes.rule = function(group) {
+    // TODO(emily): Figure out if there's an actual way to draw black boxes
+    // in MathML.
+    var node = new mathMLTree.MathNode("mrow");
+
+    return node;
+};
+
+groupTypes.llap = function(group, options) {
+    var node = new mathMLTree.MathNode(
+        "mpadded", [buildGroup(group.value.body, options)]);
+
+    node.setAttribute("lspace", "-1width");
+    node.setAttribute("width", "0px");
+
+    return node;
+};
+
+groupTypes.rlap = function(group, options) {
+    var node = new mathMLTree.MathNode(
+        "mpadded", [buildGroup(group.value.body, options)]);
+
+    node.setAttribute("width", "0px");
+
+    return node;
+};
+
+groupTypes.phantom = function(group, options, prev) {
+    var inner = buildExpression(group.value.value, options);
+    return new mathMLTree.MathNode("mphantom", inner);
 };
 
 /**
@@ -6543,7 +6923,7 @@ var buildMathML = function(tree, texExpression, options) {
 
 module.exports = buildMathML;
 
-},{"./ParseError":16,"./buildCommon":20,"./fontMetrics":27,"./mathMLTree":30,"./symbols":33,"./utils":34}],23:[function(require,module,exports){
+},{"./ParseError":18,"./buildCommon":22,"./fontMetrics":29,"./mathMLTree":32,"./symbols":35,"./utils":36}],25:[function(require,module,exports){
 var buildHTML = require("./buildHTML");
 var buildMathML = require("./buildMathML");
 var buildCommon = require("./buildCommon");
@@ -6564,7 +6944,7 @@ var buildTree = function(tree, expression, settings) {
     // Setup the default options
     var options = new Options({
         style: startStyle,
-        size: "size5"
+        size: "size5",
     });
 
     // `buildHTML` sometimes messes with the parse tree (like turning bins ->
@@ -6573,7 +6953,7 @@ var buildTree = function(tree, expression, settings) {
     var htmlNode = buildHTML(tree, options);
 
     var katexNode = makeSpan(["katex"], [
-        mathMLNode, htmlNode
+        mathMLNode, htmlNode,
     ]);
 
     if (settings.displayMode) {
@@ -6585,7 +6965,7 @@ var buildTree = function(tree, expression, settings) {
 
 module.exports = buildTree;
 
-},{"./Options":15,"./Settings":18,"./Style":19,"./buildCommon":20,"./buildHTML":21,"./buildMathML":22}],24:[function(require,module,exports){
+},{"./Options":17,"./Settings":20,"./Style":21,"./buildCommon":22,"./buildHTML":23,"./buildMathML":24}],26:[function(require,module,exports){
 /**
  * This file deals with creating delimiters of various sizes. The TeXbook
  * discusses these routines on page 441-442, in the "Another subroutine sets box
@@ -6732,7 +7112,10 @@ var makeInner = function(symbol, font, mode) {
 var makeStackedDelim = function(delim, heightTotal, center, options, mode) {
     // There are four parts, the top, an optional middle, a repeated part, and a
     // bottom.
-    var top, middle, repeat, bottom;
+    var top;
+    var middle;
+    var repeat;
+    var bottom;
     top = repeat = bottom = delim;
     middle = null;
     // Also keep track of what font the delimiters are in
@@ -6913,7 +7296,7 @@ var stackLargeDelimiters = [
     "(", ")", "[", "\\lbrack", "]", "\\rbrack",
     "\\{", "\\lbrace", "\\}", "\\rbrace",
     "\\lfloor", "\\rfloor", "\\lceil", "\\rceil",
-    "\\surd"
+    "\\surd",
 ];
 
 // delimiters that always stack
@@ -6922,12 +7305,12 @@ var stackAlwaysDelimiters = [
     "\\Uparrow", "\\Downarrow", "\\Updownarrow",
     "|", "\\|", "\\vert", "\\Vert",
     "\\lvert", "\\rvert", "\\lVert", "\\rVert",
-    "\\lgroup", "\\rgroup", "\\lmoustache", "\\rmoustache"
+    "\\lgroup", "\\rgroup", "\\lmoustache", "\\rmoustache",
 ];
 
 // and delimiters that never stack
 var stackNeverDelimiters = [
-    "<", ">", "\\langle", "\\rangle", "/", "\\backslash"
+    "<", ">", "\\langle", "\\rangle", "/", "\\backslash", "\\lt", "\\gt",
 ];
 
 // Metrics of the different sizes. Found by looking at TeX's output of
@@ -6940,9 +7323,9 @@ var sizeToMaxHeight = [0, 1.2, 1.8, 2.4, 3.0];
  */
 var makeSizedDelim = function(delim, size, options, mode) {
     // < and > turn into \langle and \rangle in delimiters
-    if (delim === "<") {
+    if (delim === "<" || delim === "\\lt") {
         delim = "\\langle";
-    } else if (delim === ">") {
+    } else if (delim === ">" || delim === "\\gt") {
         delim = "\\rangle";
     }
 
@@ -6978,7 +7361,7 @@ var stackNeverDelimiterSequence = [
     {type: "large", size: 1},
     {type: "large", size: 2},
     {type: "large", size: 3},
-    {type: "large", size: 4}
+    {type: "large", size: 4},
 ];
 
 // Delimiters that always stack try the small delimiters first, then stack
@@ -6986,7 +7369,7 @@ var stackAlwaysDelimiterSequence = [
     {type: "small", style: Style.SCRIPTSCRIPT},
     {type: "small", style: Style.SCRIPT},
     {type: "small", style: Style.TEXT},
-    {type: "stack"}
+    {type: "stack"},
 ];
 
 // Delimiters that stack when large try the small and then large delimiters, and
@@ -6999,7 +7382,7 @@ var stackLargeDelimiterSequence = [
     {type: "large", size: 2},
     {type: "large", size: 3},
     {type: "large", size: 4},
-    {type: "stack"}
+    {type: "stack"},
 ];
 
 /**
@@ -7056,9 +7439,9 @@ var traverseSequence = function(delim, height, sequence, options) {
  * traverse the sequences, and create a delimiter that the sequence tells us to.
  */
 var makeCustomSizedDelim = function(delim, height, center, options, mode) {
-    if (delim === "<") {
+    if (delim === "<" || delim === "\\lt") {
         delim = "\\langle";
-    } else if (delim === ">") {
+    } else if (delim === ">" || delim === "\\gt") {
         delim = "\\rangle";
     }
 
@@ -7123,10 +7506,10 @@ var makeLeftRightDelim = function(delim, height, depth, options, mode) {
 module.exports = {
     sizedDelim: makeSizedDelim,
     customSizedDelim: makeCustomSizedDelim,
-    leftRightDelim: makeLeftRightDelim
+    leftRightDelim: makeLeftRightDelim,
 };
 
-},{"./ParseError":16,"./Style":19,"./buildCommon":20,"./fontMetrics":27,"./symbols":33,"./utils":34}],25:[function(require,module,exports){
+},{"./ParseError":18,"./Style":21,"./buildCommon":22,"./fontMetrics":29,"./symbols":35,"./utils":36}],27:[function(require,module,exports){
 /**
  * These objects store the data about the DOM nodes we create, as well as some
  * extra data. They can then be transformed into real DOM nodes with the
@@ -7394,191 +7777,234 @@ symbolNode.prototype.toMarkup = function() {
 module.exports = {
     span: span,
     documentFragment: documentFragment,
-    symbolNode: symbolNode
+    symbolNode: symbolNode,
 };
 
-},{"./utils":34}],26:[function(require,module,exports){
+},{"./utils":36}],28:[function(require,module,exports){
+/* eslint no-constant-condition:0 */
 var fontMetrics = require("./fontMetrics");
 var parseData = require("./parseData");
 var ParseError = require("./ParseError");
 
 var ParseNode = parseData.ParseNode;
-var ParseResult = parseData.ParseResult;
 
 /**
  * Parse the body of the environment, with rows delimited by \\ and
  * columns delimited by &, and create a nested list in row-major order
  * with one group per cell.
  */
-function parseArray(parser, pos, mode, result) {
-    var row = [], body = [row], rowGaps = [];
+function parseArray(parser, result) {
+    var row = [];
+    var body = [row];
+    var rowGaps = [];
     while (true) {
-        var cell = parser.parseExpression(pos, mode, false, null);
-        row.push(new ParseNode("ordgroup", cell.result, mode));
-        pos = cell.position;
-        var next = cell.peek.text;
+        var cell = parser.parseExpression(false, null);
+        row.push(new ParseNode("ordgroup", cell, parser.mode));
+        var next = parser.nextToken.text;
         if (next === "&") {
-            pos = cell.peek.position;
+            parser.consume();
         } else if (next === "\\end") {
             break;
         } else if (next === "\\\\" || next === "\\cr") {
-            var cr = parser.parseFunction(pos, mode);
-            rowGaps.push(cr.result.value.size);
-            pos = cr.position;
+            var cr = parser.parseFunction();
+            rowGaps.push(cr.value.size);
             row = [];
             body.push(row);
         } else {
+            // TODO: Clean up the following hack once #385 got merged
+            var pos = Math.min(parser.pos + 1, parser.lexer._input.length);
             throw new ParseError("Expected & or \\\\ or \\end",
-                                 parser.lexer, cell.peek.position);
+                                 parser.lexer, pos);
         }
     }
     result.body = body;
     result.rowGaps = rowGaps;
-    return new ParseResult(new ParseNode(result.type, result, mode), pos);
+    return new ParseNode(result.type, result, parser.mode);
 }
 
 /*
- * An environment definition is very similar to a function definition.
- * Each element of the following array may contain
- *  - names: The names associated with a function. This can be used to
- *           share one implementation between several similar environments.
+ * An environment definition is very similar to a function definition:
+ * it is declared with a name or a list of names, a set of properties
+ * and a handler containing the actual implementation.
+ *
+ * The properties include:
  *  - numArgs: The number of arguments after the \begin{name} function.
  *  - argTypes: (optional) Just like for a function
  *  - allowedInText: (optional) Whether or not the environment is allowed inside
  *                   text mode (default false) (not enforced yet)
  *  - numOptionalArgs: (optional) Just like for a function
- *  - handler: The function that is called to handle this environment.
- *             It will receive the following arguments:
- *             - pos: the current position of the parser.
- *             - mode: the current parsing mode.
- *             - envName: the name of the environment, one of the listed names.
- *             - [args]: the arguments passed to \begin.
- *             - positions: the positions associated with these arguments.
+ * A bare number instead of that object indicates the numArgs value.
+ *
+ * The handler function will receive two arguments
+ *  - context: information and references provided by the parser
+ *  - args: an array of arguments passed to \begin{name}
+ * The context contains the following properties:
+ *  - envName: the name of the environment, one of the listed names.
+ *  - parser: the parser object
+ *  - lexer: the lexer object
+ *  - positions: the positions associated with these arguments from args.
+ * The handler must return a ParseResult.
  */
 
-var environmentDefinitions = [
-
-    // Arrays are part of LaTeX, defined in lttab.dtx so its documentation
-    // is part of the source2e.pdf file of LaTeX2e source documentation.
-    {
-        names: ["array"],
-        numArgs: 1,
-        handler: function(pos, mode, envName, colalign, positions) {
-            var parser = this;
-            colalign = colalign.value.map ? colalign.value : [colalign];
-            var cols = colalign.map(function(node) {
-                var ca = node.value;
-                if ("lcr".indexOf(ca) !== -1) {
-                    return {
-                        type: "align",
-                        align: ca
-                    };
-                } else if (ca === "|") {
-                    return {
-                        type: "separator",
-                        separator: "|"
-                    };
-                }
-                throw new ParseError(
-                    "Unknown column alignment: " + node.value,
-                    parser.lexer, positions[1]);
-            });
-            var res = {
-                type: "array",
-                cols: cols,
-                hskipBeforeAndAfter: true // \@preamble in lttab.dtx
-            };
-            res = parseArray(parser, pos, mode, res);
-            return res;
-        }
-    },
-
-    // The matrix environments of amsmath builds on the array environment
-    // of LaTeX, which is discussed above.
-    {
-        names: [
-            "matrix",
-            "pmatrix",
-            "bmatrix",
-            "Bmatrix",
-            "vmatrix",
-            "Vmatrix"
-        ],
-        handler: function(pos, mode, envName) {
-            var delimiters = {
-                "matrix": null,
-                "pmatrix": ["(", ")"],
-                "bmatrix": ["[", "]"],
-                "Bmatrix": ["\\{", "\\}"],
-                "vmatrix": ["|", "|"],
-                "Vmatrix": ["\\Vert", "\\Vert"]
-            }[envName];
-            var res = {
-                type: "array",
-                hskipBeforeAndAfter: false // \hskip -\arraycolsep in amsmath
-            };
-            res = parseArray(this, pos, mode, res);
-            if (delimiters) {
-                res.result = new ParseNode("leftright", {
-                    body: [res.result],
-                    left: delimiters[0],
-                    right: delimiters[1]
-                }, mode);
-            }
-            return res;
-        }
-    },
-
-    // A cases environment (in amsmath.sty) is almost equivalent to
-    // \def\arraystretch{1.2}%
-    // \left\{\begin{array}{@{}l@{\quad}l@{}} … \end{array}\right.
-    {
-        names: ["cases"],
-        handler: function(pos, mode, envName) {
-            var res = {
-                type: "array",
-                arraystretch: 1.2,
-                cols: [{
-                    type: "align",
-                    align: "l",
-                    pregap: 0,
-                    postgap: fontMetrics.metrics.quad
-                }, {
-                    type: "align",
-                    align: "l",
-                    pregap: 0,
-                    postgap: 0
-                }]
-            };
-            res = parseArray(this, pos, mode, res);
-            res.result = new ParseNode("leftright", {
-                body: [res.result],
-                left: "\\{",
-                right: "."
-            }, mode);
-            return res;
-        }
+function defineEnvironment(names, props, handler) {
+    if (typeof names === "string") {
+        names = [names];
     }
-];
-
-module.exports = (function() {
-    // nested function so we don't leak i and j into the module scope
-    var exports = {};
-    for (var i = 0; i < environmentDefinitions.length; ++i) {
-        var def = environmentDefinitions[i];
-        def.greediness = 1;
-        def.allowedInText = !!def.allowedInText;
-        def.numArgs = def.numArgs || 0;
-        def.numOptionalArgs = def.numOptionalArgs || 0;
-        for (var j = 0; j < def.names.length; ++j) {
-            exports[def.names[j]] = def;
-        }
+    if (typeof props === "number") {
+        props = { numArgs: props };
     }
-    return exports;
-})();
+    // Set default values of environments
+    var data = {
+        numArgs: props.numArgs || 0,
+        argTypes: props.argTypes,
+        greediness: 1,
+        allowedInText: !!props.allowedInText,
+        numOptionalArgs: props.numOptionalArgs || 0,
+        handler: handler,
+    };
+    for (var i = 0; i < names.length; ++i) {
+        module.exports[names[i]] = data;
+    }
+}
 
-},{"./ParseError":16,"./fontMetrics":27,"./parseData":31}],27:[function(require,module,exports){
-/* jshint unused:false */
+// Arrays are part of LaTeX, defined in lttab.dtx so its documentation
+// is part of the source2e.pdf file of LaTeX2e source documentation.
+defineEnvironment("array", {
+    numArgs: 1,
+}, function(context, args) {
+    var colalign = args[0];
+    colalign = colalign.value.map ? colalign.value : [colalign];
+    var cols = colalign.map(function(node) {
+        var ca = node.value;
+        if ("lcr".indexOf(ca) !== -1) {
+            return {
+                type: "align",
+                align: ca,
+            };
+        } else if (ca === "|") {
+            return {
+                type: "separator",
+                separator: "|",
+            };
+        }
+        throw new ParseError(
+            "Unknown column alignment: " + node.value,
+            context.lexer, context.positions[1]);
+    });
+    var res = {
+        type: "array",
+        cols: cols,
+        hskipBeforeAndAfter: true, // \@preamble in lttab.dtx
+    };
+    res = parseArray(context.parser, res);
+    return res;
+});
+
+// The matrix environments of amsmath builds on the array environment
+// of LaTeX, which is discussed above.
+defineEnvironment([
+    "matrix",
+    "pmatrix",
+    "bmatrix",
+    "Bmatrix",
+    "vmatrix",
+    "Vmatrix",
+], {
+}, function(context) {
+    var delimiters = {
+        "matrix": null,
+        "pmatrix": ["(", ")"],
+        "bmatrix": ["[", "]"],
+        "Bmatrix": ["\\{", "\\}"],
+        "vmatrix": ["|", "|"],
+        "Vmatrix": ["\\Vert", "\\Vert"],
+    }[context.envName];
+    var res = {
+        type: "array",
+        hskipBeforeAndAfter: false, // \hskip -\arraycolsep in amsmath
+    };
+    res = parseArray(context.parser, res);
+    if (delimiters) {
+        res = new ParseNode("leftright", {
+            body: [res],
+            left: delimiters[0],
+            right: delimiters[1],
+        }, context.mode);
+    }
+    return res;
+});
+
+// A cases environment (in amsmath.sty) is almost equivalent to
+// \def\arraystretch{1.2}%
+// \left\{\begin{array}{@{}l@{\quad}l@{}} … \end{array}\right.
+defineEnvironment("cases", {
+}, function(context) {
+    var res = {
+        type: "array",
+        arraystretch: 1.2,
+        cols: [{
+            type: "align",
+            align: "l",
+            pregap: 0,
+            postgap: fontMetrics.metrics.quad,
+        }, {
+            type: "align",
+            align: "l",
+            pregap: 0,
+            postgap: 0,
+        }],
+    };
+    res = parseArray(context.parser, res);
+    res = new ParseNode("leftright", {
+        body: [res],
+        left: "\\{",
+        right: ".",
+    }, context.mode);
+    return res;
+});
+
+// An aligned environment is like the align* environment
+// except it operates within math mode.
+// Note that we assume \nomallineskiplimit to be zero,
+// so that \strut@ is the same as \strut.
+defineEnvironment("aligned", {
+}, function(context) {
+    var res = {
+        type: "array",
+        cols: [],
+    };
+    res = parseArray(context.parser, res);
+    var emptyGroup = new ParseNode("ordgroup", [], context.mode);
+    var numCols = 0;
+    res.value.body.forEach(function(row) {
+        var i;
+        for (i = 1; i < row.length; i += 2) {
+            row[i].value.unshift(emptyGroup);
+        }
+        if (numCols < row.length) {
+            numCols = row.length;
+        }
+    });
+    for (var i = 0; i < numCols; ++i) {
+        var align = "r";
+        var pregap = 0;
+        if (i % 2 === 1) {
+            align = "l";
+        } else if (i > 0) {
+            pregap = 2; // one \qquad between columns
+        }
+        res.value.cols[i] = {
+            type: "align",
+            align: align,
+            pregap: pregap,
+            postgap: 0,
+        };
+    }
+    return res;
+});
+
+},{"./ParseError":18,"./fontMetrics":29,"./parseData":33}],29:[function(require,module,exports){
+/* eslint no-unused-vars:0 */
 
 var Style = require("./Style");
 
@@ -7692,7 +8118,7 @@ var metrics = {
             return sigma21ScriptScript;
         }
         throw new Error("Unexpected style size: " + style.size);
-    }
+    },
 };
 
 // This map contains a mapping from font name and character code to character
@@ -7702,1782 +8128,1800 @@ var metrics = {
 var metricMap = require("./fontMetricsData");
 
 /**
- * This function is a convience function for looking up information in the
- * metricMap table. It takes a character as a string, and a style
+ * This function is a convenience function for looking up information in the
+ * metricMap table. It takes a character as a string, and a style.
+ *
+ * Note: the `width` property may be undefined if fontMetricsData.js wasn't
+ * built using `Make extended_metrics`.
  */
 var getCharacterMetrics = function(character, style) {
-    return metricMap[style][character.charCodeAt(0)];
+    var metrics = metricMap[style][character.charCodeAt(0)];
+    if (metrics) {
+        return {
+            depth: metrics[0],
+            height: metrics[1],
+            italic: metrics[2],
+            skew: metrics[3],
+            width: metrics[4],
+        };
+    }
 };
 
 module.exports = {
     metrics: metrics,
-    getCharacterMetrics: getCharacterMetrics
+    getCharacterMetrics: getCharacterMetrics,
 };
 
-},{"./Style":19,"./fontMetricsData":28}],28:[function(require,module,exports){
+},{"./Style":21,"./fontMetricsData":30}],30:[function(require,module,exports){
 module.exports = {
-"AMS-Regular": {
-  "65": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "66": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "67": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "68": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "69": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "70": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "71": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "72": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "73": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "74": {"depth": 0.16667, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "75": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "76": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "77": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "78": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "79": {"depth": 0.16667, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "80": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "81": {"depth": 0.16667, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "82": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "83": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "84": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "86": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "89": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "165": {"depth": 0.0, "height": 0.675, "italic": 0.025, "skew": 0.0},
-  "174": {"depth": 0.15559, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "240": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "295": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "710": {"depth": 0.0, "height": 0.825, "italic": 0.0, "skew": 0.0},
-  "732": {"depth": 0.0, "height": 0.9, "italic": 0.0, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.825, "italic": 0.0, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.9, "italic": 0.0, "skew": 0.0},
-  "989": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "1008": {"depth": 0.0, "height": 0.43056, "italic": 0.04028, "skew": 0.0},
-  "8245": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8463": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8487": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8498": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8502": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8503": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8504": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8513": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8592": {"depth": -0.03598, "height": 0.46402, "italic": 0.0, "skew": 0.0},
-  "8594": {"depth": -0.03598, "height": 0.46402, "italic": 0.0, "skew": 0.0},
-  "8602": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8603": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8606": {"depth": 0.01354, "height": 0.52239, "italic": 0.0, "skew": 0.0},
-  "8608": {"depth": 0.01354, "height": 0.52239, "italic": 0.0, "skew": 0.0},
-  "8610": {"depth": 0.01354, "height": 0.52239, "italic": 0.0, "skew": 0.0},
-  "8611": {"depth": 0.01354, "height": 0.52239, "italic": 0.0, "skew": 0.0},
-  "8619": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8620": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8621": {"depth": -0.13313, "height": 0.37788, "italic": 0.0, "skew": 0.0},
-  "8622": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8624": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8625": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8630": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "8631": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "8634": {"depth": 0.08198, "height": 0.58198, "italic": 0.0, "skew": 0.0},
-  "8635": {"depth": 0.08198, "height": 0.58198, "italic": 0.0, "skew": 0.0},
-  "8638": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8639": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8642": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8643": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8644": {"depth": 0.1808, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8646": {"depth": 0.1808, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8647": {"depth": 0.1808, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8648": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8649": {"depth": 0.1808, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8650": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8651": {"depth": 0.01354, "height": 0.52239, "italic": 0.0, "skew": 0.0},
-  "8652": {"depth": 0.01354, "height": 0.52239, "italic": 0.0, "skew": 0.0},
-  "8653": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8654": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8655": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8666": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "8667": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "8669": {"depth": -0.13313, "height": 0.37788, "italic": 0.0, "skew": 0.0},
-  "8672": {"depth": -0.064, "height": 0.437, "italic": 0, "skew": 0},
-  "8674": {"depth": -0.064, "height": 0.437, "italic": 0, "skew": 0},
-  "8705": {"depth": 0.0, "height": 0.825, "italic": 0.0, "skew": 0.0},
-  "8708": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8709": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "8717": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "8722": {"depth": -0.03598, "height": 0.46402, "italic": 0.0, "skew": 0.0},
-  "8724": {"depth": 0.08198, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8726": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "8733": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8736": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8737": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8738": {"depth": 0.03517, "height": 0.52239, "italic": 0.0, "skew": 0.0},
-  "8739": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "8740": {"depth": 0.25142, "height": 0.74111, "italic": 0.0, "skew": 0.0},
-  "8741": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "8742": {"depth": 0.25142, "height": 0.74111, "italic": 0.0, "skew": 0.0},
-  "8756": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8757": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8764": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8765": {"depth": -0.13313, "height": 0.37788, "italic": 0.0, "skew": 0.0},
-  "8769": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8770": {"depth": -0.03625, "height": 0.46375, "italic": 0.0, "skew": 0.0},
-  "8774": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "8776": {"depth": -0.01688, "height": 0.48312, "italic": 0.0, "skew": 0.0},
-  "8778": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "8782": {"depth": 0.06062, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8783": {"depth": 0.06062, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8785": {"depth": 0.08198, "height": 0.58198, "italic": 0.0, "skew": 0.0},
-  "8786": {"depth": 0.08198, "height": 0.58198, "italic": 0.0, "skew": 0.0},
-  "8787": {"depth": 0.08198, "height": 0.58198, "italic": 0.0, "skew": 0.0},
-  "8790": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8791": {"depth": 0.22958, "height": 0.72958, "italic": 0.0, "skew": 0.0},
-  "8796": {"depth": 0.08198, "height": 0.91667, "italic": 0.0, "skew": 0.0},
-  "8806": {"depth": 0.25583, "height": 0.75583, "italic": 0.0, "skew": 0.0},
-  "8807": {"depth": 0.25583, "height": 0.75583, "italic": 0.0, "skew": 0.0},
-  "8808": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "8809": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "8812": {"depth": 0.25583, "height": 0.75583, "italic": 0.0, "skew": 0.0},
-  "8814": {"depth": 0.20576, "height": 0.70576, "italic": 0.0, "skew": 0.0},
-  "8815": {"depth": 0.20576, "height": 0.70576, "italic": 0.0, "skew": 0.0},
-  "8816": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "8817": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "8818": {"depth": 0.22958, "height": 0.72958, "italic": 0.0, "skew": 0.0},
-  "8819": {"depth": 0.22958, "height": 0.72958, "italic": 0.0, "skew": 0.0},
-  "8822": {"depth": 0.1808, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8823": {"depth": 0.1808, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8828": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "8829": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "8830": {"depth": 0.22958, "height": 0.72958, "italic": 0.0, "skew": 0.0},
-  "8831": {"depth": 0.22958, "height": 0.72958, "italic": 0.0, "skew": 0.0},
-  "8832": {"depth": 0.20576, "height": 0.70576, "italic": 0.0, "skew": 0.0},
-  "8833": {"depth": 0.20576, "height": 0.70576, "italic": 0.0, "skew": 0.0},
-  "8840": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "8841": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "8842": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "8843": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "8847": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8848": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8858": {"depth": 0.08198, "height": 0.58198, "italic": 0.0, "skew": 0.0},
-  "8859": {"depth": 0.08198, "height": 0.58198, "italic": 0.0, "skew": 0.0},
-  "8861": {"depth": 0.08198, "height": 0.58198, "italic": 0.0, "skew": 0.0},
-  "8862": {"depth": 0.0, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8863": {"depth": 0.0, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8864": {"depth": 0.0, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8865": {"depth": 0.0, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "8872": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8873": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8874": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8876": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8877": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8878": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8879": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8882": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8883": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8884": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "8885": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "8888": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8890": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "8891": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8892": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8901": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8903": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "8905": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "8906": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "8907": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8908": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8909": {"depth": -0.03598, "height": 0.46402, "italic": 0.0, "skew": 0.0},
-  "8910": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8911": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8912": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8913": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8914": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8915": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8916": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8918": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8919": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8920": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8921": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "8922": {"depth": 0.38569, "height": 0.88569, "italic": 0.0, "skew": 0.0},
-  "8923": {"depth": 0.38569, "height": 0.88569, "italic": 0.0, "skew": 0.0},
-  "8926": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "8927": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "8928": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "8929": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "8934": {"depth": 0.23222, "height": 0.74111, "italic": 0.0, "skew": 0.0},
-  "8935": {"depth": 0.23222, "height": 0.74111, "italic": 0.0, "skew": 0.0},
-  "8936": {"depth": 0.23222, "height": 0.74111, "italic": 0.0, "skew": 0.0},
-  "8937": {"depth": 0.23222, "height": 0.74111, "italic": 0.0, "skew": 0.0},
-  "8938": {"depth": 0.20576, "height": 0.70576, "italic": 0.0, "skew": 0.0},
-  "8939": {"depth": 0.20576, "height": 0.70576, "italic": 0.0, "skew": 0.0},
-  "8940": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "8941": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "8994": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8995": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "9416": {"depth": 0.15559, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "9484": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "9488": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "9492": {"depth": 0.0, "height": 0.37788, "italic": 0.0, "skew": 0.0},
-  "9496": {"depth": 0.0, "height": 0.37788, "italic": 0.0, "skew": 0.0},
-  "9585": {"depth": 0.19444, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "9586": {"depth": 0.19444, "height": 0.74111, "italic": 0.0, "skew": 0.0},
-  "9632": {"depth": 0.0, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "9633": {"depth": 0.0, "height": 0.675, "italic": 0.0, "skew": 0.0},
-  "9650": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "9651": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "9654": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "9660": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "9661": {"depth": 0.0, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "9664": {"depth": 0.03517, "height": 0.54986, "italic": 0.0, "skew": 0.0},
-  "9674": {"depth": 0.11111, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "9733": {"depth": 0.19444, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "10003": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "10016": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "10731": {"depth": 0.11111, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "10846": {"depth": 0.19444, "height": 0.75583, "italic": 0.0, "skew": 0.0},
-  "10877": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "10878": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "10885": {"depth": 0.25583, "height": 0.75583, "italic": 0.0, "skew": 0.0},
-  "10886": {"depth": 0.25583, "height": 0.75583, "italic": 0.0, "skew": 0.0},
-  "10887": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "10888": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "10889": {"depth": 0.26167, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "10890": {"depth": 0.26167, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "10891": {"depth": 0.48256, "height": 0.98256, "italic": 0.0, "skew": 0.0},
-  "10892": {"depth": 0.48256, "height": 0.98256, "italic": 0.0, "skew": 0.0},
-  "10901": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "10902": {"depth": 0.13667, "height": 0.63667, "italic": 0.0, "skew": 0.0},
-  "10933": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "10934": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "10935": {"depth": 0.26167, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "10936": {"depth": 0.26167, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "10937": {"depth": 0.26167, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "10938": {"depth": 0.26167, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "10949": {"depth": 0.25583, "height": 0.75583, "italic": 0.0, "skew": 0.0},
-  "10950": {"depth": 0.25583, "height": 0.75583, "italic": 0.0, "skew": 0.0},
-  "10955": {"depth": 0.28481, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "10956": {"depth": 0.28481, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "57350": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "57351": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "57352": {"depth": 0.08167, "height": 0.58167, "italic": 0.0, "skew": 0.0},
-  "57353": {"depth": 0.0, "height": 0.43056, "italic": 0.04028, "skew": 0.0},
-  "57356": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "57357": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "57358": {"depth": 0.41951, "height": 0.91951, "italic": 0.0, "skew": 0.0},
-  "57359": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "57360": {"depth": 0.30274, "height": 0.79383, "italic": 0.0, "skew": 0.0},
-  "57361": {"depth": 0.41951, "height": 0.91951, "italic": 0.0, "skew": 0.0},
-  "57366": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "57367": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "57368": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "57369": {"depth": 0.25142, "height": 0.75726, "italic": 0.0, "skew": 0.0},
-  "57370": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "57371": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0}
-},
-"Caligraphic-Regular": {
-  "48": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "49": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "50": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "51": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "52": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "53": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "54": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "55": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "56": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "57": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "65": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.19445},
-  "66": {"depth": 0.0, "height": 0.68333, "italic": 0.03041, "skew": 0.13889},
-  "67": {"depth": 0.0, "height": 0.68333, "italic": 0.05834, "skew": 0.13889},
-  "68": {"depth": 0.0, "height": 0.68333, "italic": 0.02778, "skew": 0.08334},
-  "69": {"depth": 0.0, "height": 0.68333, "italic": 0.08944, "skew": 0.11111},
-  "70": {"depth": 0.0, "height": 0.68333, "italic": 0.09931, "skew": 0.11111},
-  "71": {"depth": 0.09722, "height": 0.68333, "italic": 0.0593, "skew": 0.11111},
-  "72": {"depth": 0.0, "height": 0.68333, "italic": 0.00965, "skew": 0.11111},
-  "73": {"depth": 0.0, "height": 0.68333, "italic": 0.07382, "skew": 0.0},
-  "74": {"depth": 0.09722, "height": 0.68333, "italic": 0.18472, "skew": 0.16667},
-  "75": {"depth": 0.0, "height": 0.68333, "italic": 0.01445, "skew": 0.05556},
-  "76": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.13889},
-  "77": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.13889},
-  "78": {"depth": 0.0, "height": 0.68333, "italic": 0.14736, "skew": 0.08334},
-  "79": {"depth": 0.0, "height": 0.68333, "italic": 0.02778, "skew": 0.11111},
-  "80": {"depth": 0.0, "height": 0.68333, "italic": 0.08222, "skew": 0.08334},
-  "81": {"depth": 0.09722, "height": 0.68333, "italic": 0.0, "skew": 0.11111},
-  "82": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.08334},
-  "83": {"depth": 0.0, "height": 0.68333, "italic": 0.075, "skew": 0.13889},
-  "84": {"depth": 0.0, "height": 0.68333, "italic": 0.25417, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.68333, "italic": 0.09931, "skew": 0.08334},
-  "86": {"depth": 0.0, "height": 0.68333, "italic": 0.08222, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.68333, "italic": 0.08222, "skew": 0.08334},
-  "88": {"depth": 0.0, "height": 0.68333, "italic": 0.14643, "skew": 0.13889},
-  "89": {"depth": 0.09722, "height": 0.68333, "italic": 0.08222, "skew": 0.08334},
-  "90": {"depth": 0.0, "height": 0.68333, "italic": 0.07944, "skew": 0.13889}
-},
-"Fraktur-Regular": {
-  "33": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "34": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "38": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "39": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "40": {"depth": 0.24982, "height": 0.74947, "italic": 0.0, "skew": 0.0},
-  "41": {"depth": 0.24982, "height": 0.74947, "italic": 0.0, "skew": 0.0},
-  "42": {"depth": 0.0, "height": 0.62119, "italic": 0.0, "skew": 0.0},
-  "43": {"depth": 0.08319, "height": 0.58283, "italic": 0.0, "skew": 0.0},
-  "44": {"depth": 0.0, "height": 0.10803, "italic": 0.0, "skew": 0.0},
-  "45": {"depth": 0.08319, "height": 0.58283, "italic": 0.0, "skew": 0.0},
-  "46": {"depth": 0.0, "height": 0.10803, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 0.24982, "height": 0.74947, "italic": 0.0, "skew": 0.0},
-  "48": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "49": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "50": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "51": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "52": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "53": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "54": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "55": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "56": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "57": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "58": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "59": {"depth": 0.12604, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "61": {"depth": -0.13099, "height": 0.36866, "italic": 0.0, "skew": 0.0},
-  "63": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "65": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "66": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "67": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "68": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "69": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "70": {"depth": 0.12604, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "71": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "72": {"depth": 0.06302, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "73": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "74": {"depth": 0.12604, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "75": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "76": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "77": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "78": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "79": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "80": {"depth": 0.18906, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "81": {"depth": 0.03781, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "82": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "83": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "84": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "86": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "89": {"depth": 0.18906, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "90": {"depth": 0.12604, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "91": {"depth": 0.24982, "height": 0.74947, "italic": 0.0, "skew": 0.0},
-  "93": {"depth": 0.24982, "height": 0.74947, "italic": 0.0, "skew": 0.0},
-  "94": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "97": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "98": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "99": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "100": {"depth": 0.0, "height": 0.62119, "italic": 0.0, "skew": 0.0},
-  "101": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "102": {"depth": 0.18906, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "103": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "104": {"depth": 0.18906, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "105": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "106": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "108": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "109": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "110": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "111": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "112": {"depth": 0.18906, "height": 0.52396, "italic": 0.0, "skew": 0.0},
-  "113": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "114": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "115": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "116": {"depth": 0.0, "height": 0.62119, "italic": 0.0, "skew": 0.0},
-  "117": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "118": {"depth": 0.0, "height": 0.52396, "italic": 0.0, "skew": 0.0},
-  "119": {"depth": 0.0, "height": 0.52396, "italic": 0.0, "skew": 0.0},
-  "120": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "121": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "122": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "8216": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "8217": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "58112": {"depth": 0.0, "height": 0.62119, "italic": 0.0, "skew": 0.0},
-  "58113": {"depth": 0.0, "height": 0.62119, "italic": 0.0, "skew": 0.0},
-  "58114": {"depth": 0.18906, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "58115": {"depth": 0.18906, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "58116": {"depth": 0.18906, "height": 0.47534, "italic": 0.0, "skew": 0.0},
-  "58117": {"depth": 0.0, "height": 0.69141, "italic": 0.0, "skew": 0.0},
-  "58118": {"depth": 0.0, "height": 0.62119, "italic": 0.0, "skew": 0.0},
-  "58119": {"depth": 0.0, "height": 0.47534, "italic": 0.0, "skew": 0.0}
-},
-"Main-Bold": {
-  "33": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "34": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "35": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "36": {"depth": 0.05556, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "37": {"depth": 0.05556, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "38": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "39": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "40": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "41": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "42": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "43": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "44": {"depth": 0.19444, "height": 0.15556, "italic": 0.0, "skew": 0.0},
-  "45": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "46": {"depth": 0.0, "height": 0.15556, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "48": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "49": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "50": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "51": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "52": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "53": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "54": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "55": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "56": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "57": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "58": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "59": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "60": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "61": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "62": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "63": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "64": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "65": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "66": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "67": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "68": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "69": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "70": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "71": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "72": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "73": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "74": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "75": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "76": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "77": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "78": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "79": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "80": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "81": {"depth": 0.19444, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "82": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "83": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "84": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "86": {"depth": 0.0, "height": 0.68611, "italic": 0.01597, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.68611, "italic": 0.01597, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "89": {"depth": 0.0, "height": 0.68611, "italic": 0.02875, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "91": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "92": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "93": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "94": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "95": {"depth": 0.31, "height": 0.13444, "italic": 0.03194, "skew": 0.0},
-  "96": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "97": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "98": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "99": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "100": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "101": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "102": {"depth": 0.0, "height": 0.69444, "italic": 0.10903, "skew": 0.0},
-  "103": {"depth": 0.19444, "height": 0.44444, "italic": 0.01597, "skew": 0.0},
-  "104": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "105": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "106": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "108": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "109": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "110": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "111": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "112": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "113": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "114": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "115": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "116": {"depth": 0.0, "height": 0.63492, "italic": 0.0, "skew": 0.0},
-  "117": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "118": {"depth": 0.0, "height": 0.44444, "italic": 0.01597, "skew": 0.0},
-  "119": {"depth": 0.0, "height": 0.44444, "italic": 0.01597, "skew": 0.0},
-  "120": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "121": {"depth": 0.19444, "height": 0.44444, "italic": 0.01597, "skew": 0.0},
-  "122": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "123": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "124": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "125": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "126": {"depth": 0.35, "height": 0.34444, "italic": 0.0, "skew": 0.0},
-  "168": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "172": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "175": {"depth": 0.0, "height": 0.59611, "italic": 0.0, "skew": 0.0},
-  "176": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "177": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "180": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "215": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "247": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "305": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "567": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "710": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "711": {"depth": 0.0, "height": 0.63194, "italic": 0.0, "skew": 0.0},
-  "713": {"depth": 0.0, "height": 0.59611, "italic": 0.0, "skew": 0.0},
-  "714": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "715": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "728": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "729": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "730": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "732": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "768": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "769": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "772": {"depth": 0.0, "height": 0.59611, "italic": 0.0, "skew": 0.0},
-  "774": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "775": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "776": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "778": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "779": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "780": {"depth": 0.0, "height": 0.63194, "italic": 0.0, "skew": 0.0},
-  "824": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "915": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "916": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "920": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "923": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "926": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "928": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "931": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "933": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "934": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "936": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "937": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "8211": {"depth": 0.0, "height": 0.44444, "italic": 0.03194, "skew": 0.0},
-  "8212": {"depth": 0.0, "height": 0.44444, "italic": 0.03194, "skew": 0.0},
-  "8216": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8217": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8220": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8221": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8224": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8225": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8242": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8407": {"depth": 0.0, "height": 0.72444, "italic": 0.15486, "skew": 0.0},
-  "8463": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8465": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8467": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8472": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "8476": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8501": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8592": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8593": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8594": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8595": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8596": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8597": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8598": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8599": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8600": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8601": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8636": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8637": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8640": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8641": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8656": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8657": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8658": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8659": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8660": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8661": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8704": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8706": {"depth": 0.0, "height": 0.69444, "italic": 0.06389, "skew": 0.0},
-  "8707": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8709": {"depth": 0.05556, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8711": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "8712": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "8715": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "8722": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "8723": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "8725": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8726": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8727": {"depth": -0.02778, "height": 0.47222, "italic": 0.0, "skew": 0.0},
-  "8728": {"depth": -0.02639, "height": 0.47361, "italic": 0.0, "skew": 0.0},
-  "8729": {"depth": -0.02639, "height": 0.47361, "italic": 0.0, "skew": 0.0},
-  "8730": {"depth": 0.18, "height": 0.82, "italic": 0.0, "skew": 0.0},
-  "8733": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "8734": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "8736": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8739": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8741": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8743": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8744": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8745": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8746": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8747": {"depth": 0.19444, "height": 0.69444, "italic": 0.12778, "skew": 0.0},
-  "8764": {"depth": -0.10889, "height": 0.39111, "italic": 0.0, "skew": 0.0},
-  "8768": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8771": {"depth": 0.00222, "height": 0.50222, "italic": 0.0, "skew": 0.0},
-  "8776": {"depth": 0.02444, "height": 0.52444, "italic": 0.0, "skew": 0.0},
-  "8781": {"depth": 0.00222, "height": 0.50222, "italic": 0.0, "skew": 0.0},
-  "8801": {"depth": 0.00222, "height": 0.50222, "italic": 0.0, "skew": 0.0},
-  "8804": {"depth": 0.19667, "height": 0.69667, "italic": 0.0, "skew": 0.0},
-  "8805": {"depth": 0.19667, "height": 0.69667, "italic": 0.0, "skew": 0.0},
-  "8810": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "8811": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "8826": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "8827": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "8834": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "8835": {"depth": 0.08556, "height": 0.58556, "italic": 0.0, "skew": 0.0},
-  "8838": {"depth": 0.19667, "height": 0.69667, "italic": 0.0, "skew": 0.0},
-  "8839": {"depth": 0.19667, "height": 0.69667, "italic": 0.0, "skew": 0.0},
-  "8846": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8849": {"depth": 0.19667, "height": 0.69667, "italic": 0.0, "skew": 0.0},
-  "8850": {"depth": 0.19667, "height": 0.69667, "italic": 0.0, "skew": 0.0},
-  "8851": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8852": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8853": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "8854": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "8855": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "8856": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "8857": {"depth": 0.13333, "height": 0.63333, "italic": 0.0, "skew": 0.0},
-  "8866": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8867": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8868": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8869": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8900": {"depth": -0.02639, "height": 0.47361, "italic": 0.0, "skew": 0.0},
-  "8901": {"depth": -0.02639, "height": 0.47361, "italic": 0.0, "skew": 0.0},
-  "8902": {"depth": -0.02778, "height": 0.47222, "italic": 0.0, "skew": 0.0},
-  "8968": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8969": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8970": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8971": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8994": {"depth": -0.13889, "height": 0.36111, "italic": 0.0, "skew": 0.0},
-  "8995": {"depth": -0.13889, "height": 0.36111, "italic": 0.0, "skew": 0.0},
-  "9651": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9657": {"depth": -0.02778, "height": 0.47222, "italic": 0.0, "skew": 0.0},
-  "9661": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9667": {"depth": -0.02778, "height": 0.47222, "italic": 0.0, "skew": 0.0},
-  "9711": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9824": {"depth": 0.12963, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9825": {"depth": 0.12963, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9826": {"depth": 0.12963, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9827": {"depth": 0.12963, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9837": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "9838": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9839": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "10216": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "10217": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "10815": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "10927": {"depth": 0.19667, "height": 0.69667, "italic": 0.0, "skew": 0.0},
-  "10928": {"depth": 0.19667, "height": 0.69667, "italic": 0.0, "skew": 0.0}
-},
-"Main-Italic": {
-  "33": {"depth": 0.0, "height": 0.69444, "italic": 0.12417, "skew": 0.0},
-  "34": {"depth": 0.0, "height": 0.69444, "italic": 0.06961, "skew": 0.0},
-  "35": {"depth": 0.19444, "height": 0.69444, "italic": 0.06616, "skew": 0.0},
-  "37": {"depth": 0.05556, "height": 0.75, "italic": 0.13639, "skew": 0.0},
-  "38": {"depth": 0.0, "height": 0.69444, "italic": 0.09694, "skew": 0.0},
-  "39": {"depth": 0.0, "height": 0.69444, "italic": 0.12417, "skew": 0.0},
-  "40": {"depth": 0.25, "height": 0.75, "italic": 0.16194, "skew": 0.0},
-  "41": {"depth": 0.25, "height": 0.75, "italic": 0.03694, "skew": 0.0},
-  "42": {"depth": 0.0, "height": 0.75, "italic": 0.14917, "skew": 0.0},
-  "43": {"depth": 0.05667, "height": 0.56167, "italic": 0.03694, "skew": 0.0},
-  "44": {"depth": 0.19444, "height": 0.10556, "italic": 0.0, "skew": 0.0},
-  "45": {"depth": 0.0, "height": 0.43056, "italic": 0.02826, "skew": 0.0},
-  "46": {"depth": 0.0, "height": 0.10556, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 0.25, "height": 0.75, "italic": 0.16194, "skew": 0.0},
-  "48": {"depth": 0.0, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "49": {"depth": 0.0, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "50": {"depth": 0.0, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "51": {"depth": 0.0, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "52": {"depth": 0.19444, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "53": {"depth": 0.0, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "54": {"depth": 0.0, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "55": {"depth": 0.19444, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "56": {"depth": 0.0, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "57": {"depth": 0.0, "height": 0.64444, "italic": 0.13556, "skew": 0.0},
-  "58": {"depth": 0.0, "height": 0.43056, "italic": 0.0582, "skew": 0.0},
-  "59": {"depth": 0.19444, "height": 0.43056, "italic": 0.0582, "skew": 0.0},
-  "61": {"depth": -0.13313, "height": 0.36687, "italic": 0.06616, "skew": 0.0},
-  "63": {"depth": 0.0, "height": 0.69444, "italic": 0.1225, "skew": 0.0},
-  "64": {"depth": 0.0, "height": 0.69444, "italic": 0.09597, "skew": 0.0},
-  "65": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "66": {"depth": 0.0, "height": 0.68333, "italic": 0.10257, "skew": 0.0},
-  "67": {"depth": 0.0, "height": 0.68333, "italic": 0.14528, "skew": 0.0},
-  "68": {"depth": 0.0, "height": 0.68333, "italic": 0.09403, "skew": 0.0},
-  "69": {"depth": 0.0, "height": 0.68333, "italic": 0.12028, "skew": 0.0},
-  "70": {"depth": 0.0, "height": 0.68333, "italic": 0.13305, "skew": 0.0},
-  "71": {"depth": 0.0, "height": 0.68333, "italic": 0.08722, "skew": 0.0},
-  "72": {"depth": 0.0, "height": 0.68333, "italic": 0.16389, "skew": 0.0},
-  "73": {"depth": 0.0, "height": 0.68333, "italic": 0.15806, "skew": 0.0},
-  "74": {"depth": 0.0, "height": 0.68333, "italic": 0.14028, "skew": 0.0},
-  "75": {"depth": 0.0, "height": 0.68333, "italic": 0.14528, "skew": 0.0},
-  "76": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "77": {"depth": 0.0, "height": 0.68333, "italic": 0.16389, "skew": 0.0},
-  "78": {"depth": 0.0, "height": 0.68333, "italic": 0.16389, "skew": 0.0},
-  "79": {"depth": 0.0, "height": 0.68333, "italic": 0.09403, "skew": 0.0},
-  "80": {"depth": 0.0, "height": 0.68333, "italic": 0.10257, "skew": 0.0},
-  "81": {"depth": 0.19444, "height": 0.68333, "italic": 0.09403, "skew": 0.0},
-  "82": {"depth": 0.0, "height": 0.68333, "italic": 0.03868, "skew": 0.0},
-  "83": {"depth": 0.0, "height": 0.68333, "italic": 0.11972, "skew": 0.0},
-  "84": {"depth": 0.0, "height": 0.68333, "italic": 0.13305, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.68333, "italic": 0.16389, "skew": 0.0},
-  "86": {"depth": 0.0, "height": 0.68333, "italic": 0.18361, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.68333, "italic": 0.18361, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.68333, "italic": 0.15806, "skew": 0.0},
-  "89": {"depth": 0.0, "height": 0.68333, "italic": 0.19383, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.68333, "italic": 0.14528, "skew": 0.0},
-  "91": {"depth": 0.25, "height": 0.75, "italic": 0.1875, "skew": 0.0},
-  "93": {"depth": 0.25, "height": 0.75, "italic": 0.10528, "skew": 0.0},
-  "94": {"depth": 0.0, "height": 0.69444, "italic": 0.06646, "skew": 0.0},
-  "95": {"depth": 0.31, "height": 0.12056, "italic": 0.09208, "skew": 0.0},
-  "97": {"depth": 0.0, "height": 0.43056, "italic": 0.07671, "skew": 0.0},
-  "98": {"depth": 0.0, "height": 0.69444, "italic": 0.06312, "skew": 0.0},
-  "99": {"depth": 0.0, "height": 0.43056, "italic": 0.05653, "skew": 0.0},
-  "100": {"depth": 0.0, "height": 0.69444, "italic": 0.10333, "skew": 0.0},
-  "101": {"depth": 0.0, "height": 0.43056, "italic": 0.07514, "skew": 0.0},
-  "102": {"depth": 0.19444, "height": 0.69444, "italic": 0.21194, "skew": 0.0},
-  "103": {"depth": 0.19444, "height": 0.43056, "italic": 0.08847, "skew": 0.0},
-  "104": {"depth": 0.0, "height": 0.69444, "italic": 0.07671, "skew": 0.0},
-  "105": {"depth": 0.0, "height": 0.65536, "italic": 0.1019, "skew": 0.0},
-  "106": {"depth": 0.19444, "height": 0.65536, "italic": 0.14467, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.69444, "italic": 0.10764, "skew": 0.0},
-  "108": {"depth": 0.0, "height": 0.69444, "italic": 0.10333, "skew": 0.0},
-  "109": {"depth": 0.0, "height": 0.43056, "italic": 0.07671, "skew": 0.0},
-  "110": {"depth": 0.0, "height": 0.43056, "italic": 0.07671, "skew": 0.0},
-  "111": {"depth": 0.0, "height": 0.43056, "italic": 0.06312, "skew": 0.0},
-  "112": {"depth": 0.19444, "height": 0.43056, "italic": 0.06312, "skew": 0.0},
-  "113": {"depth": 0.19444, "height": 0.43056, "italic": 0.08847, "skew": 0.0},
-  "114": {"depth": 0.0, "height": 0.43056, "italic": 0.10764, "skew": 0.0},
-  "115": {"depth": 0.0, "height": 0.43056, "italic": 0.08208, "skew": 0.0},
-  "116": {"depth": 0.0, "height": 0.61508, "italic": 0.09486, "skew": 0.0},
-  "117": {"depth": 0.0, "height": 0.43056, "italic": 0.07671, "skew": 0.0},
-  "118": {"depth": 0.0, "height": 0.43056, "italic": 0.10764, "skew": 0.0},
-  "119": {"depth": 0.0, "height": 0.43056, "italic": 0.10764, "skew": 0.0},
-  "120": {"depth": 0.0, "height": 0.43056, "italic": 0.12042, "skew": 0.0},
-  "121": {"depth": 0.19444, "height": 0.43056, "italic": 0.08847, "skew": 0.0},
-  "122": {"depth": 0.0, "height": 0.43056, "italic": 0.12292, "skew": 0.0},
-  "126": {"depth": 0.35, "height": 0.31786, "italic": 0.11585, "skew": 0.0},
-  "163": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "305": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.02778},
-  "567": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "768": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "769": {"depth": 0.0, "height": 0.69444, "italic": 0.09694, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.69444, "italic": 0.06646, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.66786, "italic": 0.11585, "skew": 0.0},
-  "772": {"depth": 0.0, "height": 0.56167, "italic": 0.10333, "skew": 0.0},
-  "774": {"depth": 0.0, "height": 0.69444, "italic": 0.10806, "skew": 0.0},
-  "775": {"depth": 0.0, "height": 0.66786, "italic": 0.11752, "skew": 0.0},
-  "776": {"depth": 0.0, "height": 0.66786, "italic": 0.10474, "skew": 0.0},
-  "778": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "779": {"depth": 0.0, "height": 0.69444, "italic": 0.1225, "skew": 0.0},
-  "780": {"depth": 0.0, "height": 0.62847, "italic": 0.08295, "skew": 0.0},
-  "915": {"depth": 0.0, "height": 0.68333, "italic": 0.13305, "skew": 0.0},
-  "916": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "920": {"depth": 0.0, "height": 0.68333, "italic": 0.09403, "skew": 0.0},
-  "923": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "926": {"depth": 0.0, "height": 0.68333, "italic": 0.15294, "skew": 0.0},
-  "928": {"depth": 0.0, "height": 0.68333, "italic": 0.16389, "skew": 0.0},
-  "931": {"depth": 0.0, "height": 0.68333, "italic": 0.12028, "skew": 0.0},
-  "933": {"depth": 0.0, "height": 0.68333, "italic": 0.11111, "skew": 0.0},
-  "934": {"depth": 0.0, "height": 0.68333, "italic": 0.05986, "skew": 0.0},
-  "936": {"depth": 0.0, "height": 0.68333, "italic": 0.11111, "skew": 0.0},
-  "937": {"depth": 0.0, "height": 0.68333, "italic": 0.10257, "skew": 0.0},
-  "8211": {"depth": 0.0, "height": 0.43056, "italic": 0.09208, "skew": 0.0},
-  "8212": {"depth": 0.0, "height": 0.43056, "italic": 0.09208, "skew": 0.0},
-  "8216": {"depth": 0.0, "height": 0.69444, "italic": 0.12417, "skew": 0.0},
-  "8217": {"depth": 0.0, "height": 0.69444, "italic": 0.12417, "skew": 0.0},
-  "8220": {"depth": 0.0, "height": 0.69444, "italic": 0.1685, "skew": 0.0},
-  "8221": {"depth": 0.0, "height": 0.69444, "italic": 0.06961, "skew": 0.0},
-  "8463": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0}
-},
-"Main-Regular": {
-  "32": {"depth": 0.0, "height": 0.0, "italic": 0, "skew": 0},
-  "33": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "34": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "35": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "36": {"depth": 0.05556, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "37": {"depth": 0.05556, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "38": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "39": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "40": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "41": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "42": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "43": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "44": {"depth": 0.19444, "height": 0.10556, "italic": 0.0, "skew": 0.0},
-  "45": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "46": {"depth": 0.0, "height": 0.10556, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "48": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "49": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "50": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "51": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "52": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "53": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "54": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "55": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "56": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "57": {"depth": 0.0, "height": 0.64444, "italic": 0.0, "skew": 0.0},
-  "58": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "59": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "60": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "61": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "62": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "63": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "64": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "65": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "66": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "67": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "68": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "69": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "70": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "71": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "72": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "73": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "74": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "75": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "76": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "77": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "78": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "79": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "80": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "81": {"depth": 0.19444, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "82": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "83": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "84": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "86": {"depth": 0.0, "height": 0.68333, "italic": 0.01389, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.68333, "italic": 0.01389, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "89": {"depth": 0.0, "height": 0.68333, "italic": 0.025, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "91": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "92": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "93": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "94": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "95": {"depth": 0.31, "height": 0.12056, "italic": 0.02778, "skew": 0.0},
-  "96": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "97": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "98": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "99": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "100": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "101": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "102": {"depth": 0.0, "height": 0.69444, "italic": 0.07778, "skew": 0.0},
-  "103": {"depth": 0.19444, "height": 0.43056, "italic": 0.01389, "skew": 0.0},
-  "104": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "105": {"depth": 0.0, "height": 0.66786, "italic": 0.0, "skew": 0.0},
-  "106": {"depth": 0.19444, "height": 0.66786, "italic": 0.0, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "108": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "109": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "110": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "111": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "112": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "113": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "114": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "115": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "116": {"depth": 0.0, "height": 0.61508, "italic": 0.0, "skew": 0.0},
-  "117": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "118": {"depth": 0.0, "height": 0.43056, "italic": 0.01389, "skew": 0.0},
-  "119": {"depth": 0.0, "height": 0.43056, "italic": 0.01389, "skew": 0.0},
-  "120": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "121": {"depth": 0.19444, "height": 0.43056, "italic": 0.01389, "skew": 0.0},
-  "122": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "123": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "124": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "125": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "126": {"depth": 0.35, "height": 0.31786, "italic": 0.0, "skew": 0.0},
-  "160": {"depth": 0.0, "height": 0.0, "italic": 0, "skew": 0},
-  "168": {"depth": 0.0, "height": 0.66786, "italic": 0.0, "skew": 0.0},
-  "172": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "175": {"depth": 0.0, "height": 0.56778, "italic": 0.0, "skew": 0.0},
-  "176": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "177": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "180": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "215": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "247": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "305": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "567": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "710": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "711": {"depth": 0.0, "height": 0.62847, "italic": 0.0, "skew": 0.0},
-  "713": {"depth": 0.0, "height": 0.56778, "italic": 0.0, "skew": 0.0},
-  "714": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "715": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "728": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "729": {"depth": 0.0, "height": 0.66786, "italic": 0.0, "skew": 0.0},
-  "730": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "732": {"depth": 0.0, "height": 0.66786, "italic": 0.0, "skew": 0.0},
-  "768": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "769": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.66786, "italic": 0.0, "skew": 0.0},
-  "772": {"depth": 0.0, "height": 0.56778, "italic": 0.0, "skew": 0.0},
-  "774": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "775": {"depth": 0.0, "height": 0.66786, "italic": 0.0, "skew": 0.0},
-  "776": {"depth": 0.0, "height": 0.66786, "italic": 0.0, "skew": 0.0},
-  "778": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "779": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "780": {"depth": 0.0, "height": 0.62847, "italic": 0.0, "skew": 0.0},
-  "824": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "915": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "916": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "920": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "923": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "926": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "928": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "931": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "933": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "934": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "936": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "937": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "8211": {"depth": 0.0, "height": 0.43056, "italic": 0.02778, "skew": 0.0},
-  "8212": {"depth": 0.0, "height": 0.43056, "italic": 0.02778, "skew": 0.0},
-  "8216": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8217": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8220": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8221": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8224": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8225": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8230": {"depth": 0.0, "height": 0.12, "italic": 0, "skew": 0},
-  "8242": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8407": {"depth": 0.0, "height": 0.71444, "italic": 0.15382, "skew": 0.0},
-  "8463": {"depth": 0.0, "height": 0.68889, "italic": 0.0, "skew": 0.0},
-  "8465": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8467": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.11111},
-  "8472": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.11111},
-  "8476": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8501": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8592": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8593": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8594": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8595": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8596": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8597": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8598": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8599": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8600": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8601": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8614": {"depth": 0.011, "height": 0.511, "italic": 0, "skew": 0},
-  "8617": {"depth": 0.011, "height": 0.511, "italic": 0, "skew": 0},
-  "8618": {"depth": 0.011, "height": 0.511, "italic": 0, "skew": 0},
-  "8636": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8637": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8640": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8641": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8652": {"depth": 0.011, "height": 0.671, "italic": 0, "skew": 0},
-  "8656": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8657": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8658": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8659": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8660": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8661": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8704": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8706": {"depth": 0.0, "height": 0.69444, "italic": 0.05556, "skew": 0.08334},
-  "8707": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8709": {"depth": 0.05556, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8711": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "8712": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8715": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8722": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "8723": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "8725": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8726": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8727": {"depth": -0.03472, "height": 0.46528, "italic": 0.0, "skew": 0.0},
-  "8728": {"depth": -0.05555, "height": 0.44445, "italic": 0.0, "skew": 0.0},
-  "8729": {"depth": -0.05555, "height": 0.44445, "italic": 0.0, "skew": 0.0},
-  "8730": {"depth": 0.2, "height": 0.8, "italic": 0.0, "skew": 0.0},
-  "8733": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "8734": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "8736": {"depth": 0.0, "height": 0.69224, "italic": 0.0, "skew": 0.0},
-  "8739": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8741": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8743": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8744": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8745": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8746": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8747": {"depth": 0.19444, "height": 0.69444, "italic": 0.11111, "skew": 0.0},
-  "8764": {"depth": -0.13313, "height": 0.36687, "italic": 0.0, "skew": 0.0},
-  "8768": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8771": {"depth": -0.03625, "height": 0.46375, "italic": 0.0, "skew": 0.0},
-  "8773": {"depth": -0.022, "height": 0.589, "italic": 0, "skew": 0},
-  "8776": {"depth": -0.01688, "height": 0.48312, "italic": 0.0, "skew": 0.0},
-  "8781": {"depth": -0.03625, "height": 0.46375, "italic": 0.0, "skew": 0.0},
-  "8784": {"depth": -0.133, "height": 0.67, "italic": 0, "skew": 0},
-  "8800": {"depth": 0.215, "height": 0.716, "italic": 0, "skew": 0},
-  "8801": {"depth": -0.03625, "height": 0.46375, "italic": 0.0, "skew": 0.0},
-  "8804": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "8805": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "8810": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8811": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8826": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8827": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8834": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8835": {"depth": 0.0391, "height": 0.5391, "italic": 0.0, "skew": 0.0},
-  "8838": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "8839": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "8846": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8849": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "8850": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "8851": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8852": {"depth": 0.0, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "8853": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "8854": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "8855": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "8856": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "8857": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "8866": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8867": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8868": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8869": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8872": {"depth": 0.249, "height": 0.75, "italic": 0, "skew": 0},
-  "8900": {"depth": -0.05555, "height": 0.44445, "italic": 0.0, "skew": 0.0},
-  "8901": {"depth": -0.05555, "height": 0.44445, "italic": 0.0, "skew": 0.0},
-  "8902": {"depth": -0.03472, "height": 0.46528, "italic": 0.0, "skew": 0.0},
-  "8904": {"depth": 0.005, "height": 0.505, "italic": 0, "skew": 0},
-  "8942": {"depth": 0.03, "height": 0.9, "italic": 0, "skew": 0},
-  "8943": {"depth": -0.19, "height": 0.31, "italic": 0, "skew": 0},
-  "8945": {"depth": -0.1, "height": 0.82, "italic": 0, "skew": 0},
-  "8968": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8969": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8970": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8971": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8994": {"depth": -0.14236, "height": 0.35764, "italic": 0.0, "skew": 0.0},
-  "8995": {"depth": -0.14236, "height": 0.35764, "italic": 0.0, "skew": 0.0},
-  "9136": {"depth": 0.244, "height": 0.744, "italic": 0, "skew": 0},
-  "9137": {"depth": 0.244, "height": 0.744, "italic": 0, "skew": 0},
-  "9651": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9657": {"depth": -0.03472, "height": 0.46528, "italic": 0.0, "skew": 0.0},
-  "9661": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9667": {"depth": -0.03472, "height": 0.46528, "italic": 0.0, "skew": 0.0},
-  "9711": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9824": {"depth": 0.12963, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9825": {"depth": 0.12963, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9826": {"depth": 0.12963, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9827": {"depth": 0.12963, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9837": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "9838": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "9839": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "10216": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "10217": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "10222": {"depth": 0.244, "height": 0.744, "italic": 0, "skew": 0},
-  "10223": {"depth": 0.244, "height": 0.744, "italic": 0, "skew": 0},
-  "10229": {"depth": 0.011, "height": 0.511, "italic": 0, "skew": 0},
-  "10230": {"depth": 0.011, "height": 0.511, "italic": 0, "skew": 0},
-  "10231": {"depth": 0.011, "height": 0.511, "italic": 0, "skew": 0},
-  "10232": {"depth": 0.024, "height": 0.525, "italic": 0, "skew": 0},
-  "10233": {"depth": 0.024, "height": 0.525, "italic": 0, "skew": 0},
-  "10234": {"depth": 0.024, "height": 0.525, "italic": 0, "skew": 0},
-  "10236": {"depth": 0.011, "height": 0.511, "italic": 0, "skew": 0},
-  "10815": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.0},
-  "10927": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0},
-  "10928": {"depth": 0.13597, "height": 0.63597, "italic": 0.0, "skew": 0.0}
-},
-"Math-BoldItalic": {
-  "47": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "65": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "66": {"depth": 0.0, "height": 0.68611, "italic": 0.04835, "skew": 0.0},
-  "67": {"depth": 0.0, "height": 0.68611, "italic": 0.06979, "skew": 0.0},
-  "68": {"depth": 0.0, "height": 0.68611, "italic": 0.03194, "skew": 0.0},
-  "69": {"depth": 0.0, "height": 0.68611, "italic": 0.05451, "skew": 0.0},
-  "70": {"depth": 0.0, "height": 0.68611, "italic": 0.15972, "skew": 0.0},
-  "71": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "72": {"depth": 0.0, "height": 0.68611, "italic": 0.08229, "skew": 0.0},
-  "73": {"depth": 0.0, "height": 0.68611, "italic": 0.07778, "skew": 0.0},
-  "74": {"depth": 0.0, "height": 0.68611, "italic": 0.10069, "skew": 0.0},
-  "75": {"depth": 0.0, "height": 0.68611, "italic": 0.06979, "skew": 0.0},
-  "76": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "77": {"depth": 0.0, "height": 0.68611, "italic": 0.11424, "skew": 0.0},
-  "78": {"depth": 0.0, "height": 0.68611, "italic": 0.11424, "skew": 0.0},
-  "79": {"depth": 0.0, "height": 0.68611, "italic": 0.03194, "skew": 0.0},
-  "80": {"depth": 0.0, "height": 0.68611, "italic": 0.15972, "skew": 0.0},
-  "81": {"depth": 0.19444, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "82": {"depth": 0.0, "height": 0.68611, "italic": 0.00421, "skew": 0.0},
-  "83": {"depth": 0.0, "height": 0.68611, "italic": 0.05382, "skew": 0.0},
-  "84": {"depth": 0.0, "height": 0.68611, "italic": 0.15972, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.68611, "italic": 0.11424, "skew": 0.0},
-  "86": {"depth": 0.0, "height": 0.68611, "italic": 0.25555, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.68611, "italic": 0.15972, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.68611, "italic": 0.07778, "skew": 0.0},
-  "89": {"depth": 0.0, "height": 0.68611, "italic": 0.25555, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.68611, "italic": 0.06979, "skew": 0.0},
-  "97": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "98": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "99": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "100": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "101": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "102": {"depth": 0.19444, "height": 0.69444, "italic": 0.11042, "skew": 0.0},
-  "103": {"depth": 0.19444, "height": 0.44444, "italic": 0.03704, "skew": 0.0},
-  "104": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "105": {"depth": 0.0, "height": 0.69326, "italic": 0.0, "skew": 0.0},
-  "106": {"depth": 0.19444, "height": 0.69326, "italic": 0.0622, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.69444, "italic": 0.01852, "skew": 0.0},
-  "108": {"depth": 0.0, "height": 0.69444, "italic": 0.0088, "skew": 0.0},
-  "109": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "110": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "111": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "112": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "113": {"depth": 0.19444, "height": 0.44444, "italic": 0.03704, "skew": 0.0},
-  "114": {"depth": 0.0, "height": 0.44444, "italic": 0.03194, "skew": 0.0},
-  "115": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "116": {"depth": 0.0, "height": 0.63492, "italic": 0.0, "skew": 0.0},
-  "117": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "118": {"depth": 0.0, "height": 0.44444, "italic": 0.03704, "skew": 0.0},
-  "119": {"depth": 0.0, "height": 0.44444, "italic": 0.02778, "skew": 0.0},
-  "120": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "121": {"depth": 0.19444, "height": 0.44444, "italic": 0.03704, "skew": 0.0},
-  "122": {"depth": 0.0, "height": 0.44444, "italic": 0.04213, "skew": 0.0},
-  "915": {"depth": 0.0, "height": 0.68611, "italic": 0.15972, "skew": 0.0},
-  "916": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "920": {"depth": 0.0, "height": 0.68611, "italic": 0.03194, "skew": 0.0},
-  "923": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "926": {"depth": 0.0, "height": 0.68611, "italic": 0.07458, "skew": 0.0},
-  "928": {"depth": 0.0, "height": 0.68611, "italic": 0.08229, "skew": 0.0},
-  "931": {"depth": 0.0, "height": 0.68611, "italic": 0.05451, "skew": 0.0},
-  "933": {"depth": 0.0, "height": 0.68611, "italic": 0.15972, "skew": 0.0},
-  "934": {"depth": 0.0, "height": 0.68611, "italic": 0.0, "skew": 0.0},
-  "936": {"depth": 0.0, "height": 0.68611, "italic": 0.11653, "skew": 0.0},
-  "937": {"depth": 0.0, "height": 0.68611, "italic": 0.04835, "skew": 0.0},
-  "945": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "946": {"depth": 0.19444, "height": 0.69444, "italic": 0.03403, "skew": 0.0},
-  "947": {"depth": 0.19444, "height": 0.44444, "italic": 0.06389, "skew": 0.0},
-  "948": {"depth": 0.0, "height": 0.69444, "italic": 0.03819, "skew": 0.0},
-  "949": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "950": {"depth": 0.19444, "height": 0.69444, "italic": 0.06215, "skew": 0.0},
-  "951": {"depth": 0.19444, "height": 0.44444, "italic": 0.03704, "skew": 0.0},
-  "952": {"depth": 0.0, "height": 0.69444, "italic": 0.03194, "skew": 0.0},
-  "953": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "954": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "955": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "956": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "957": {"depth": 0.0, "height": 0.44444, "italic": 0.06898, "skew": 0.0},
-  "958": {"depth": 0.19444, "height": 0.69444, "italic": 0.03021, "skew": 0.0},
-  "959": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "960": {"depth": 0.0, "height": 0.44444, "italic": 0.03704, "skew": 0.0},
-  "961": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "962": {"depth": 0.09722, "height": 0.44444, "italic": 0.07917, "skew": 0.0},
-  "963": {"depth": 0.0, "height": 0.44444, "italic": 0.03704, "skew": 0.0},
-  "964": {"depth": 0.0, "height": 0.44444, "italic": 0.13472, "skew": 0.0},
-  "965": {"depth": 0.0, "height": 0.44444, "italic": 0.03704, "skew": 0.0},
-  "966": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "967": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "968": {"depth": 0.19444, "height": 0.69444, "italic": 0.03704, "skew": 0.0},
-  "969": {"depth": 0.0, "height": 0.44444, "italic": 0.03704, "skew": 0.0},
-  "977": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "981": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "982": {"depth": 0.0, "height": 0.44444, "italic": 0.03194, "skew": 0.0},
-  "1009": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "1013": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0}
-},
-"Math-Italic": {
-  "47": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "65": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.13889},
-  "66": {"depth": 0.0, "height": 0.68333, "italic": 0.05017, "skew": 0.08334},
-  "67": {"depth": 0.0, "height": 0.68333, "italic": 0.07153, "skew": 0.08334},
-  "68": {"depth": 0.0, "height": 0.68333, "italic": 0.02778, "skew": 0.05556},
-  "69": {"depth": 0.0, "height": 0.68333, "italic": 0.05764, "skew": 0.08334},
-  "70": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.08334},
-  "71": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.08334},
-  "72": {"depth": 0.0, "height": 0.68333, "italic": 0.08125, "skew": 0.05556},
-  "73": {"depth": 0.0, "height": 0.68333, "italic": 0.07847, "skew": 0.11111},
-  "74": {"depth": 0.0, "height": 0.68333, "italic": 0.09618, "skew": 0.16667},
-  "75": {"depth": 0.0, "height": 0.68333, "italic": 0.07153, "skew": 0.05556},
-  "76": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.02778},
-  "77": {"depth": 0.0, "height": 0.68333, "italic": 0.10903, "skew": 0.08334},
-  "78": {"depth": 0.0, "height": 0.68333, "italic": 0.10903, "skew": 0.08334},
-  "79": {"depth": 0.0, "height": 0.68333, "italic": 0.02778, "skew": 0.08334},
-  "80": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.08334},
-  "81": {"depth": 0.19444, "height": 0.68333, "italic": 0.0, "skew": 0.08334},
-  "82": {"depth": 0.0, "height": 0.68333, "italic": 0.00773, "skew": 0.08334},
-  "83": {"depth": 0.0, "height": 0.68333, "italic": 0.05764, "skew": 0.08334},
-  "84": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.08334},
-  "85": {"depth": 0.0, "height": 0.68333, "italic": 0.10903, "skew": 0.02778},
-  "86": {"depth": 0.0, "height": 0.68333, "italic": 0.22222, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.68333, "italic": 0.07847, "skew": 0.08334},
-  "89": {"depth": 0.0, "height": 0.68333, "italic": 0.22222, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.68333, "italic": 0.07153, "skew": 0.08334},
-  "97": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "98": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "99": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "100": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.16667},
-  "101": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "102": {"depth": 0.19444, "height": 0.69444, "italic": 0.10764, "skew": 0.16667},
-  "103": {"depth": 0.19444, "height": 0.43056, "italic": 0.03588, "skew": 0.02778},
-  "104": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "105": {"depth": 0.0, "height": 0.65952, "italic": 0.0, "skew": 0.0},
-  "106": {"depth": 0.19444, "height": 0.65952, "italic": 0.05724, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.69444, "italic": 0.03148, "skew": 0.0},
-  "108": {"depth": 0.0, "height": 0.69444, "italic": 0.01968, "skew": 0.08334},
-  "109": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "110": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "111": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "112": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "113": {"depth": 0.19444, "height": 0.43056, "italic": 0.03588, "skew": 0.08334},
-  "114": {"depth": 0.0, "height": 0.43056, "italic": 0.02778, "skew": 0.05556},
-  "115": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "116": {"depth": 0.0, "height": 0.61508, "italic": 0.0, "skew": 0.08334},
-  "117": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.02778},
-  "118": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.02778},
-  "119": {"depth": 0.0, "height": 0.43056, "italic": 0.02691, "skew": 0.08334},
-  "120": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.02778},
-  "121": {"depth": 0.19444, "height": 0.43056, "italic": 0.03588, "skew": 0.05556},
-  "122": {"depth": 0.0, "height": 0.43056, "italic": 0.04398, "skew": 0.05556},
-  "915": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.08334},
-  "916": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.16667},
-  "920": {"depth": 0.0, "height": 0.68333, "italic": 0.02778, "skew": 0.08334},
-  "923": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.16667},
-  "926": {"depth": 0.0, "height": 0.68333, "italic": 0.07569, "skew": 0.08334},
-  "928": {"depth": 0.0, "height": 0.68333, "italic": 0.08125, "skew": 0.05556},
-  "931": {"depth": 0.0, "height": 0.68333, "italic": 0.05764, "skew": 0.08334},
-  "933": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.05556},
-  "934": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.08334},
-  "936": {"depth": 0.0, "height": 0.68333, "italic": 0.11, "skew": 0.05556},
-  "937": {"depth": 0.0, "height": 0.68333, "italic": 0.05017, "skew": 0.08334},
-  "945": {"depth": 0.0, "height": 0.43056, "italic": 0.0037, "skew": 0.02778},
-  "946": {"depth": 0.19444, "height": 0.69444, "italic": 0.05278, "skew": 0.08334},
-  "947": {"depth": 0.19444, "height": 0.43056, "italic": 0.05556, "skew": 0.0},
-  "948": {"depth": 0.0, "height": 0.69444, "italic": 0.03785, "skew": 0.05556},
-  "949": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "950": {"depth": 0.19444, "height": 0.69444, "italic": 0.07378, "skew": 0.08334},
-  "951": {"depth": 0.19444, "height": 0.43056, "italic": 0.03588, "skew": 0.05556},
-  "952": {"depth": 0.0, "height": 0.69444, "italic": 0.02778, "skew": 0.08334},
-  "953": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "954": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "955": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "956": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.02778},
-  "957": {"depth": 0.0, "height": 0.43056, "italic": 0.06366, "skew": 0.02778},
-  "958": {"depth": 0.19444, "height": 0.69444, "italic": 0.04601, "skew": 0.11111},
-  "959": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "960": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.0},
-  "961": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "962": {"depth": 0.09722, "height": 0.43056, "italic": 0.07986, "skew": 0.08334},
-  "963": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.0},
-  "964": {"depth": 0.0, "height": 0.43056, "italic": 0.1132, "skew": 0.02778},
-  "965": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.02778},
-  "966": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "967": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "968": {"depth": 0.19444, "height": 0.69444, "italic": 0.03588, "skew": 0.11111},
-  "969": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.0},
-  "977": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.08334},
-  "981": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.08334},
-  "982": {"depth": 0.0, "height": 0.43056, "italic": 0.02778, "skew": 0.0},
-  "1009": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "1013": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556}
-},
-"Math-Regular": {
-  "65": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.13889},
-  "66": {"depth": 0.0, "height": 0.68333, "italic": 0.05017, "skew": 0.08334},
-  "67": {"depth": 0.0, "height": 0.68333, "italic": 0.07153, "skew": 0.08334},
-  "68": {"depth": 0.0, "height": 0.68333, "italic": 0.02778, "skew": 0.05556},
-  "69": {"depth": 0.0, "height": 0.68333, "italic": 0.05764, "skew": 0.08334},
-  "70": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.08334},
-  "71": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.08334},
-  "72": {"depth": 0.0, "height": 0.68333, "italic": 0.08125, "skew": 0.05556},
-  "73": {"depth": 0.0, "height": 0.68333, "italic": 0.07847, "skew": 0.11111},
-  "74": {"depth": 0.0, "height": 0.68333, "italic": 0.09618, "skew": 0.16667},
-  "75": {"depth": 0.0, "height": 0.68333, "italic": 0.07153, "skew": 0.05556},
-  "76": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.02778},
-  "77": {"depth": 0.0, "height": 0.68333, "italic": 0.10903, "skew": 0.08334},
-  "78": {"depth": 0.0, "height": 0.68333, "italic": 0.10903, "skew": 0.08334},
-  "79": {"depth": 0.0, "height": 0.68333, "italic": 0.02778, "skew": 0.08334},
-  "80": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.08334},
-  "81": {"depth": 0.19444, "height": 0.68333, "italic": 0.0, "skew": 0.08334},
-  "82": {"depth": 0.0, "height": 0.68333, "italic": 0.00773, "skew": 0.08334},
-  "83": {"depth": 0.0, "height": 0.68333, "italic": 0.05764, "skew": 0.08334},
-  "84": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.08334},
-  "85": {"depth": 0.0, "height": 0.68333, "italic": 0.10903, "skew": 0.02778},
-  "86": {"depth": 0.0, "height": 0.68333, "italic": 0.22222, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.68333, "italic": 0.07847, "skew": 0.08334},
-  "89": {"depth": 0.0, "height": 0.68333, "italic": 0.22222, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.68333, "italic": 0.07153, "skew": 0.08334},
-  "97": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "98": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "99": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "100": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.16667},
-  "101": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "102": {"depth": 0.19444, "height": 0.69444, "italic": 0.10764, "skew": 0.16667},
-  "103": {"depth": 0.19444, "height": 0.43056, "italic": 0.03588, "skew": 0.02778},
-  "104": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "105": {"depth": 0.0, "height": 0.65952, "italic": 0.0, "skew": 0.0},
-  "106": {"depth": 0.19444, "height": 0.65952, "italic": 0.05724, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.69444, "italic": 0.03148, "skew": 0.0},
-  "108": {"depth": 0.0, "height": 0.69444, "italic": 0.01968, "skew": 0.08334},
-  "109": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "110": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "111": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "112": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "113": {"depth": 0.19444, "height": 0.43056, "italic": 0.03588, "skew": 0.08334},
-  "114": {"depth": 0.0, "height": 0.43056, "italic": 0.02778, "skew": 0.05556},
-  "115": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "116": {"depth": 0.0, "height": 0.61508, "italic": 0.0, "skew": 0.08334},
-  "117": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.02778},
-  "118": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.02778},
-  "119": {"depth": 0.0, "height": 0.43056, "italic": 0.02691, "skew": 0.08334},
-  "120": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.02778},
-  "121": {"depth": 0.19444, "height": 0.43056, "italic": 0.03588, "skew": 0.05556},
-  "122": {"depth": 0.0, "height": 0.43056, "italic": 0.04398, "skew": 0.05556},
-  "915": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.08334},
-  "916": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.16667},
-  "920": {"depth": 0.0, "height": 0.68333, "italic": 0.02778, "skew": 0.08334},
-  "923": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.16667},
-  "926": {"depth": 0.0, "height": 0.68333, "italic": 0.07569, "skew": 0.08334},
-  "928": {"depth": 0.0, "height": 0.68333, "italic": 0.08125, "skew": 0.05556},
-  "931": {"depth": 0.0, "height": 0.68333, "italic": 0.05764, "skew": 0.08334},
-  "933": {"depth": 0.0, "height": 0.68333, "italic": 0.13889, "skew": 0.05556},
-  "934": {"depth": 0.0, "height": 0.68333, "italic": 0.0, "skew": 0.08334},
-  "936": {"depth": 0.0, "height": 0.68333, "italic": 0.11, "skew": 0.05556},
-  "937": {"depth": 0.0, "height": 0.68333, "italic": 0.05017, "skew": 0.08334},
-  "945": {"depth": 0.0, "height": 0.43056, "italic": 0.0037, "skew": 0.02778},
-  "946": {"depth": 0.19444, "height": 0.69444, "italic": 0.05278, "skew": 0.08334},
-  "947": {"depth": 0.19444, "height": 0.43056, "italic": 0.05556, "skew": 0.0},
-  "948": {"depth": 0.0, "height": 0.69444, "italic": 0.03785, "skew": 0.05556},
-  "949": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "950": {"depth": 0.19444, "height": 0.69444, "italic": 0.07378, "skew": 0.08334},
-  "951": {"depth": 0.19444, "height": 0.43056, "italic": 0.03588, "skew": 0.05556},
-  "952": {"depth": 0.0, "height": 0.69444, "italic": 0.02778, "skew": 0.08334},
-  "953": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "954": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "955": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "956": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.02778},
-  "957": {"depth": 0.0, "height": 0.43056, "italic": 0.06366, "skew": 0.02778},
-  "958": {"depth": 0.19444, "height": 0.69444, "italic": 0.04601, "skew": 0.11111},
-  "959": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "960": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.0},
-  "961": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "962": {"depth": 0.09722, "height": 0.43056, "italic": 0.07986, "skew": 0.08334},
-  "963": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.0},
-  "964": {"depth": 0.0, "height": 0.43056, "italic": 0.1132, "skew": 0.02778},
-  "965": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.02778},
-  "966": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "967": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.05556},
-  "968": {"depth": 0.19444, "height": 0.69444, "italic": 0.03588, "skew": 0.11111},
-  "969": {"depth": 0.0, "height": 0.43056, "italic": 0.03588, "skew": 0.0},
-  "977": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.08334},
-  "981": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.08334},
-  "982": {"depth": 0.0, "height": 0.43056, "italic": 0.02778, "skew": 0.0},
-  "1009": {"depth": 0.19444, "height": 0.43056, "italic": 0.0, "skew": 0.08334},
-  "1013": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.05556}
-},
-"SansSerif-Regular": {
-  "33": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "34": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "35": {"depth": 0.19444, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "36": {"depth": 0.05556, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "37": {"depth": 0.05556, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "38": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "39": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "40": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "41": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "42": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "43": {"depth": 0.08333, "height": 0.58333, "italic": 0.0, "skew": 0.0},
-  "44": {"depth": 0.125, "height": 0.08333, "italic": 0.0, "skew": 0.0},
-  "45": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "46": {"depth": 0.0, "height": 0.08333, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "48": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "49": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "50": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "51": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "52": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "53": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "54": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "55": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "56": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "57": {"depth": 0.0, "height": 0.65556, "italic": 0.0, "skew": 0.0},
-  "58": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "59": {"depth": 0.125, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "61": {"depth": -0.13, "height": 0.37, "italic": 0.0, "skew": 0.0},
-  "63": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "64": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "65": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "66": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "67": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "68": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "69": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "70": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "71": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "72": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "73": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "74": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "75": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "76": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "77": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "78": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "79": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "80": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "81": {"depth": 0.125, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "82": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "83": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "84": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "86": {"depth": 0.0, "height": 0.69444, "italic": 0.01389, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.69444, "italic": 0.01389, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "89": {"depth": 0.0, "height": 0.69444, "italic": 0.025, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "91": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "93": {"depth": 0.25, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "94": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "95": {"depth": 0.35, "height": 0.09444, "italic": 0.02778, "skew": 0.0},
-  "97": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "98": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "99": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "100": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "101": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "102": {"depth": 0.0, "height": 0.69444, "italic": 0.06944, "skew": 0.0},
-  "103": {"depth": 0.19444, "height": 0.44444, "italic": 0.01389, "skew": 0.0},
-  "104": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "105": {"depth": 0.0, "height": 0.67937, "italic": 0.0, "skew": 0.0},
-  "106": {"depth": 0.19444, "height": 0.67937, "italic": 0.0, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "108": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "109": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "110": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "111": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "112": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "113": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "114": {"depth": 0.0, "height": 0.44444, "italic": 0.01389, "skew": 0.0},
-  "115": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "116": {"depth": 0.0, "height": 0.57143, "italic": 0.0, "skew": 0.0},
-  "117": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "118": {"depth": 0.0, "height": 0.44444, "italic": 0.01389, "skew": 0.0},
-  "119": {"depth": 0.0, "height": 0.44444, "italic": 0.01389, "skew": 0.0},
-  "120": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "121": {"depth": 0.19444, "height": 0.44444, "italic": 0.01389, "skew": 0.0},
-  "122": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "126": {"depth": 0.35, "height": 0.32659, "italic": 0.0, "skew": 0.0},
-  "305": {"depth": 0.0, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "567": {"depth": 0.19444, "height": 0.44444, "italic": 0.0, "skew": 0.0},
-  "768": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "769": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.67659, "italic": 0.0, "skew": 0.0},
-  "772": {"depth": 0.0, "height": 0.60889, "italic": 0.0, "skew": 0.0},
-  "774": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "775": {"depth": 0.0, "height": 0.67937, "italic": 0.0, "skew": 0.0},
-  "776": {"depth": 0.0, "height": 0.67937, "italic": 0.0, "skew": 0.0},
-  "778": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "779": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "780": {"depth": 0.0, "height": 0.63194, "italic": 0.0, "skew": 0.0},
-  "915": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "916": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "920": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "923": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "926": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "928": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "931": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "933": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "934": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "936": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "937": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8211": {"depth": 0.0, "height": 0.44444, "italic": 0.02778, "skew": 0.0},
-  "8212": {"depth": 0.0, "height": 0.44444, "italic": 0.02778, "skew": 0.0},
-  "8216": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8217": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8220": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "8221": {"depth": 0.0, "height": 0.69444, "italic": 0.0, "skew": 0.0}
-},
-"Script-Regular": {
-  "65": {"depth": 0.0, "height": 0.7, "italic": 0.22925, "skew": 0.0},
-  "66": {"depth": 0.0, "height": 0.7, "italic": 0.04087, "skew": 0.0},
-  "67": {"depth": 0.0, "height": 0.7, "italic": 0.1689, "skew": 0.0},
-  "68": {"depth": 0.0, "height": 0.7, "italic": 0.09371, "skew": 0.0},
-  "69": {"depth": 0.0, "height": 0.7, "italic": 0.18583, "skew": 0.0},
-  "70": {"depth": 0.0, "height": 0.7, "italic": 0.13634, "skew": 0.0},
-  "71": {"depth": 0.0, "height": 0.7, "italic": 0.17322, "skew": 0.0},
-  "72": {"depth": 0.0, "height": 0.7, "italic": 0.29694, "skew": 0.0},
-  "73": {"depth": 0.0, "height": 0.7, "italic": 0.19189, "skew": 0.0},
-  "74": {"depth": 0.27778, "height": 0.7, "italic": 0.19189, "skew": 0.0},
-  "75": {"depth": 0.0, "height": 0.7, "italic": 0.31259, "skew": 0.0},
-  "76": {"depth": 0.0, "height": 0.7, "italic": 0.19189, "skew": 0.0},
-  "77": {"depth": 0.0, "height": 0.7, "italic": 0.15981, "skew": 0.0},
-  "78": {"depth": 0.0, "height": 0.7, "italic": 0.3525, "skew": 0.0},
-  "79": {"depth": 0.0, "height": 0.7, "italic": 0.08078, "skew": 0.0},
-  "80": {"depth": 0.0, "height": 0.7, "italic": 0.08078, "skew": 0.0},
-  "81": {"depth": 0.0, "height": 0.7, "italic": 0.03305, "skew": 0.0},
-  "82": {"depth": 0.0, "height": 0.7, "italic": 0.06259, "skew": 0.0},
-  "83": {"depth": 0.0, "height": 0.7, "italic": 0.19189, "skew": 0.0},
-  "84": {"depth": 0.0, "height": 0.7, "italic": 0.29087, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.7, "italic": 0.25815, "skew": 0.0},
-  "86": {"depth": 0.0, "height": 0.7, "italic": 0.27523, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.7, "italic": 0.27523, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.7, "italic": 0.26006, "skew": 0.0},
-  "89": {"depth": 0.0, "height": 0.7, "italic": 0.2939, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.7, "italic": 0.24037, "skew": 0.0}
-},
-"Size1-Regular": {
-  "40": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "41": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "91": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "92": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "93": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "123": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "125": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "710": {"depth": 0.0, "height": 0.72222, "italic": 0.0, "skew": 0.0},
-  "732": {"depth": 0.0, "height": 0.72222, "italic": 0.0, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.72222, "italic": 0.0, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.72222, "italic": 0.0, "skew": 0.0},
-  "8214": {"depth": -0.00099, "height": 0.601, "italic": 0.0, "skew": 0.0},
-  "8593": {"depth": 1e-05, "height": 0.6, "italic": 0.0, "skew": 0.0},
-  "8595": {"depth": 1e-05, "height": 0.6, "italic": 0.0, "skew": 0.0},
-  "8657": {"depth": 1e-05, "height": 0.6, "italic": 0.0, "skew": 0.0},
-  "8659": {"depth": 1e-05, "height": 0.6, "italic": 0.0, "skew": 0.0},
-  "8719": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8720": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8721": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8730": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "8739": {"depth": -0.00599, "height": 0.606, "italic": 0.0, "skew": 0.0},
-  "8741": {"depth": -0.00599, "height": 0.606, "italic": 0.0, "skew": 0.0},
-  "8747": {"depth": 0.30612, "height": 0.805, "italic": 0.19445, "skew": 0.0},
-  "8748": {"depth": 0.306, "height": 0.805, "italic": 0.19445, "skew": 0.0},
-  "8749": {"depth": 0.306, "height": 0.805, "italic": 0.19445, "skew": 0.0},
-  "8750": {"depth": 0.30612, "height": 0.805, "italic": 0.19445, "skew": 0.0},
-  "8896": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8897": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8898": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8899": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8968": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "8969": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "8970": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "8971": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "9168": {"depth": -0.00099, "height": 0.601, "italic": 0.0, "skew": 0.0},
-  "10216": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "10217": {"depth": 0.35001, "height": 0.85, "italic": 0.0, "skew": 0.0},
-  "10752": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "10753": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "10754": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "10756": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "10758": {"depth": 0.25001, "height": 0.75, "italic": 0.0, "skew": 0.0}
-},
-"Size2-Regular": {
-  "40": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "41": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "91": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "92": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "93": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "123": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "125": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "710": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "732": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8719": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "8720": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "8721": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "8730": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "8747": {"depth": 0.86225, "height": 1.36, "italic": 0.44445, "skew": 0.0},
-  "8748": {"depth": 0.862, "height": 1.36, "italic": 0.44445, "skew": 0.0},
-  "8749": {"depth": 0.862, "height": 1.36, "italic": 0.44445, "skew": 0.0},
-  "8750": {"depth": 0.86225, "height": 1.36, "italic": 0.44445, "skew": 0.0},
-  "8896": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "8897": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "8898": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "8899": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "8968": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "8969": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "8970": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "8971": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "10216": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "10217": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "10752": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "10753": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "10754": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "10756": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0},
-  "10758": {"depth": 0.55001, "height": 1.05, "italic": 0.0, "skew": 0.0}
-},
-"Size3-Regular": {
-  "40": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "41": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "91": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "92": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "93": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "123": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "125": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "710": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "732": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.75, "italic": 0.0, "skew": 0.0},
-  "8730": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "8968": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "8969": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "8970": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "8971": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "10216": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0},
-  "10217": {"depth": 0.95003, "height": 1.45, "italic": 0.0, "skew": 0.0}
-},
-"Size4-Regular": {
-  "40": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "41": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "91": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "92": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "93": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "123": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "125": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "710": {"depth": 0.0, "height": 0.825, "italic": 0.0, "skew": 0.0},
-  "732": {"depth": 0.0, "height": 0.825, "italic": 0.0, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.825, "italic": 0.0, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.825, "italic": 0.0, "skew": 0.0},
-  "8730": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "8968": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "8969": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "8970": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "8971": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "9115": {"depth": 0.64502, "height": 1.155, "italic": 0.0, "skew": 0.0},
-  "9116": {"depth": 1e-05, "height": 0.6, "italic": 0.0, "skew": 0.0},
-  "9117": {"depth": 0.64502, "height": 1.155, "italic": 0.0, "skew": 0.0},
-  "9118": {"depth": 0.64502, "height": 1.155, "italic": 0.0, "skew": 0.0},
-  "9119": {"depth": 1e-05, "height": 0.6, "italic": 0.0, "skew": 0.0},
-  "9120": {"depth": 0.64502, "height": 1.155, "italic": 0.0, "skew": 0.0},
-  "9121": {"depth": 0.64502, "height": 1.155, "italic": 0.0, "skew": 0.0},
-  "9122": {"depth": -0.00099, "height": 0.601, "italic": 0.0, "skew": 0.0},
-  "9123": {"depth": 0.64502, "height": 1.155, "italic": 0.0, "skew": 0.0},
-  "9124": {"depth": 0.64502, "height": 1.155, "italic": 0.0, "skew": 0.0},
-  "9125": {"depth": -0.00099, "height": 0.601, "italic": 0.0, "skew": 0.0},
-  "9126": {"depth": 0.64502, "height": 1.155, "italic": 0.0, "skew": 0.0},
-  "9127": {"depth": 1e-05, "height": 0.9, "italic": 0.0, "skew": 0.0},
-  "9128": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "9129": {"depth": 0.90001, "height": 0.0, "italic": 0.0, "skew": 0.0},
-  "9130": {"depth": 0.0, "height": 0.3, "italic": 0.0, "skew": 0.0},
-  "9131": {"depth": 1e-05, "height": 0.9, "italic": 0.0, "skew": 0.0},
-  "9132": {"depth": 0.65002, "height": 1.15, "italic": 0.0, "skew": 0.0},
-  "9133": {"depth": 0.90001, "height": 0.0, "italic": 0.0, "skew": 0.0},
-  "9143": {"depth": 0.88502, "height": 0.915, "italic": 0.0, "skew": 0.0},
-  "10216": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "10217": {"depth": 1.25003, "height": 1.75, "italic": 0.0, "skew": 0.0},
-  "57344": {"depth": -0.00499, "height": 0.605, "italic": 0.0, "skew": 0.0},
-  "57345": {"depth": -0.00499, "height": 0.605, "italic": 0.0, "skew": 0.0},
-  "57680": {"depth": 0.0, "height": 0.12, "italic": 0.0, "skew": 0.0},
-  "57681": {"depth": 0.0, "height": 0.12, "italic": 0.0, "skew": 0.0},
-  "57682": {"depth": 0.0, "height": 0.12, "italic": 0.0, "skew": 0.0},
-  "57683": {"depth": 0.0, "height": 0.12, "italic": 0.0, "skew": 0.0}
-},
-"Typewriter-Regular": {
-  "33": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "34": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "35": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "36": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "37": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "38": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "39": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "40": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "41": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "42": {"depth": 0.0, "height": 0.52083, "italic": 0.0, "skew": 0.0},
-  "43": {"depth": -0.08056, "height": 0.53055, "italic": 0.0, "skew": 0.0},
-  "44": {"depth": 0.13889, "height": 0.125, "italic": 0.0, "skew": 0.0},
-  "45": {"depth": -0.08056, "height": 0.53055, "italic": 0.0, "skew": 0.0},
-  "46": {"depth": 0.0, "height": 0.125, "italic": 0.0, "skew": 0.0},
-  "47": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "48": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "49": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "50": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "51": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "52": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "53": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "54": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "55": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "56": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "57": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "58": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "59": {"depth": 0.13889, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "60": {"depth": -0.05556, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "61": {"depth": -0.19549, "height": 0.41562, "italic": 0.0, "skew": 0.0},
-  "62": {"depth": -0.05556, "height": 0.55556, "italic": 0.0, "skew": 0.0},
-  "63": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "64": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "65": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "66": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "67": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "68": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "69": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "70": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "71": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "72": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "73": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "74": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "75": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "76": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "77": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "78": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "79": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "80": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "81": {"depth": 0.13889, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "82": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "83": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "84": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "85": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "86": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "87": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "88": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "89": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "90": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "91": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "92": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "93": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "94": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "95": {"depth": 0.09514, "height": 0.0, "italic": 0.0, "skew": 0.0},
-  "96": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "97": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "98": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "99": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "100": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "101": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "102": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "103": {"depth": 0.22222, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "104": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "105": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "106": {"depth": 0.22222, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "107": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "108": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "109": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "110": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "111": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "112": {"depth": 0.22222, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "113": {"depth": 0.22222, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "114": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "115": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "116": {"depth": 0.0, "height": 0.55358, "italic": 0.0, "skew": 0.0},
-  "117": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "118": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "119": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "120": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "121": {"depth": 0.22222, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "122": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "123": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "124": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "125": {"depth": 0.08333, "height": 0.69444, "italic": 0.0, "skew": 0.0},
-  "126": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "127": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "305": {"depth": 0.0, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "567": {"depth": 0.22222, "height": 0.43056, "italic": 0.0, "skew": 0.0},
-  "768": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "769": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "770": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "771": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "772": {"depth": 0.0, "height": 0.56555, "italic": 0.0, "skew": 0.0},
-  "774": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "776": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "778": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "780": {"depth": 0.0, "height": 0.56597, "italic": 0.0, "skew": 0.0},
-  "915": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "916": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "920": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "923": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "926": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "928": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "931": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "933": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "934": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "936": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "937": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "2018": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "2019": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0},
-  "8242": {"depth": 0.0, "height": 0.61111, "italic": 0.0, "skew": 0.0}
-}};
+    "AMS-Regular": {
+        "65": [0, 0.68889, 0, 0],
+        "66": [0, 0.68889, 0, 0],
+        "67": [0, 0.68889, 0, 0],
+        "68": [0, 0.68889, 0, 0],
+        "69": [0, 0.68889, 0, 0],
+        "70": [0, 0.68889, 0, 0],
+        "71": [0, 0.68889, 0, 0],
+        "72": [0, 0.68889, 0, 0],
+        "73": [0, 0.68889, 0, 0],
+        "74": [0.16667, 0.68889, 0, 0],
+        "75": [0, 0.68889, 0, 0],
+        "76": [0, 0.68889, 0, 0],
+        "77": [0, 0.68889, 0, 0],
+        "78": [0, 0.68889, 0, 0],
+        "79": [0.16667, 0.68889, 0, 0],
+        "80": [0, 0.68889, 0, 0],
+        "81": [0.16667, 0.68889, 0, 0],
+        "82": [0, 0.68889, 0, 0],
+        "83": [0, 0.68889, 0, 0],
+        "84": [0, 0.68889, 0, 0],
+        "85": [0, 0.68889, 0, 0],
+        "86": [0, 0.68889, 0, 0],
+        "87": [0, 0.68889, 0, 0],
+        "88": [0, 0.68889, 0, 0],
+        "89": [0, 0.68889, 0, 0],
+        "90": [0, 0.68889, 0, 0],
+        "107": [0, 0.68889, 0, 0],
+        "165": [0, 0.675, 0.025, 0],
+        "174": [0.15559, 0.69224, 0, 0],
+        "240": [0, 0.68889, 0, 0],
+        "295": [0, 0.68889, 0, 0],
+        "710": [0, 0.825, 0, 0],
+        "732": [0, 0.9, 0, 0],
+        "770": [0, 0.825, 0, 0],
+        "771": [0, 0.9, 0, 0],
+        "989": [0.08167, 0.58167, 0, 0],
+        "1008": [0, 0.43056, 0.04028, 0],
+        "8245": [0, 0.54986, 0, 0],
+        "8463": [0, 0.68889, 0, 0],
+        "8487": [0, 0.68889, 0, 0],
+        "8498": [0, 0.68889, 0, 0],
+        "8502": [0, 0.68889, 0, 0],
+        "8503": [0, 0.68889, 0, 0],
+        "8504": [0, 0.68889, 0, 0],
+        "8513": [0, 0.68889, 0, 0],
+        "8592": [-0.03598, 0.46402, 0, 0],
+        "8594": [-0.03598, 0.46402, 0, 0],
+        "8602": [-0.13313, 0.36687, 0, 0],
+        "8603": [-0.13313, 0.36687, 0, 0],
+        "8606": [0.01354, 0.52239, 0, 0],
+        "8608": [0.01354, 0.52239, 0, 0],
+        "8610": [0.01354, 0.52239, 0, 0],
+        "8611": [0.01354, 0.52239, 0, 0],
+        "8619": [0, 0.54986, 0, 0],
+        "8620": [0, 0.54986, 0, 0],
+        "8621": [-0.13313, 0.37788, 0, 0],
+        "8622": [-0.13313, 0.36687, 0, 0],
+        "8624": [0, 0.69224, 0, 0],
+        "8625": [0, 0.69224, 0, 0],
+        "8630": [0, 0.43056, 0, 0],
+        "8631": [0, 0.43056, 0, 0],
+        "8634": [0.08198, 0.58198, 0, 0],
+        "8635": [0.08198, 0.58198, 0, 0],
+        "8638": [0.19444, 0.69224, 0, 0],
+        "8639": [0.19444, 0.69224, 0, 0],
+        "8642": [0.19444, 0.69224, 0, 0],
+        "8643": [0.19444, 0.69224, 0, 0],
+        "8644": [0.1808, 0.675, 0, 0],
+        "8646": [0.1808, 0.675, 0, 0],
+        "8647": [0.1808, 0.675, 0, 0],
+        "8648": [0.19444, 0.69224, 0, 0],
+        "8649": [0.1808, 0.675, 0, 0],
+        "8650": [0.19444, 0.69224, 0, 0],
+        "8651": [0.01354, 0.52239, 0, 0],
+        "8652": [0.01354, 0.52239, 0, 0],
+        "8653": [-0.13313, 0.36687, 0, 0],
+        "8654": [-0.13313, 0.36687, 0, 0],
+        "8655": [-0.13313, 0.36687, 0, 0],
+        "8666": [0.13667, 0.63667, 0, 0],
+        "8667": [0.13667, 0.63667, 0, 0],
+        "8669": [-0.13313, 0.37788, 0, 0],
+        "8672": [-0.064, 0.437, 0, 0],
+        "8674": [-0.064, 0.437, 0, 0],
+        "8705": [0, 0.825, 0, 0],
+        "8708": [0, 0.68889, 0, 0],
+        "8709": [0.08167, 0.58167, 0, 0],
+        "8717": [0, 0.43056, 0, 0],
+        "8722": [-0.03598, 0.46402, 0, 0],
+        "8724": [0.08198, 0.69224, 0, 0],
+        "8726": [0.08167, 0.58167, 0, 0],
+        "8733": [0, 0.69224, 0, 0],
+        "8736": [0, 0.69224, 0, 0],
+        "8737": [0, 0.69224, 0, 0],
+        "8738": [0.03517, 0.52239, 0, 0],
+        "8739": [0.08167, 0.58167, 0, 0],
+        "8740": [0.25142, 0.74111, 0, 0],
+        "8741": [0.08167, 0.58167, 0, 0],
+        "8742": [0.25142, 0.74111, 0, 0],
+        "8756": [0, 0.69224, 0, 0],
+        "8757": [0, 0.69224, 0, 0],
+        "8764": [-0.13313, 0.36687, 0, 0],
+        "8765": [-0.13313, 0.37788, 0, 0],
+        "8769": [-0.13313, 0.36687, 0, 0],
+        "8770": [-0.03625, 0.46375, 0, 0],
+        "8774": [0.30274, 0.79383, 0, 0],
+        "8776": [-0.01688, 0.48312, 0, 0],
+        "8778": [0.08167, 0.58167, 0, 0],
+        "8782": [0.06062, 0.54986, 0, 0],
+        "8783": [0.06062, 0.54986, 0, 0],
+        "8785": [0.08198, 0.58198, 0, 0],
+        "8786": [0.08198, 0.58198, 0, 0],
+        "8787": [0.08198, 0.58198, 0, 0],
+        "8790": [0, 0.69224, 0, 0],
+        "8791": [0.22958, 0.72958, 0, 0],
+        "8796": [0.08198, 0.91667, 0, 0],
+        "8806": [0.25583, 0.75583, 0, 0],
+        "8807": [0.25583, 0.75583, 0, 0],
+        "8808": [0.25142, 0.75726, 0, 0],
+        "8809": [0.25142, 0.75726, 0, 0],
+        "8812": [0.25583, 0.75583, 0, 0],
+        "8814": [0.20576, 0.70576, 0, 0],
+        "8815": [0.20576, 0.70576, 0, 0],
+        "8816": [0.30274, 0.79383, 0, 0],
+        "8817": [0.30274, 0.79383, 0, 0],
+        "8818": [0.22958, 0.72958, 0, 0],
+        "8819": [0.22958, 0.72958, 0, 0],
+        "8822": [0.1808, 0.675, 0, 0],
+        "8823": [0.1808, 0.675, 0, 0],
+        "8828": [0.13667, 0.63667, 0, 0],
+        "8829": [0.13667, 0.63667, 0, 0],
+        "8830": [0.22958, 0.72958, 0, 0],
+        "8831": [0.22958, 0.72958, 0, 0],
+        "8832": [0.20576, 0.70576, 0, 0],
+        "8833": [0.20576, 0.70576, 0, 0],
+        "8840": [0.30274, 0.79383, 0, 0],
+        "8841": [0.30274, 0.79383, 0, 0],
+        "8842": [0.13597, 0.63597, 0, 0],
+        "8843": [0.13597, 0.63597, 0, 0],
+        "8847": [0.03517, 0.54986, 0, 0],
+        "8848": [0.03517, 0.54986, 0, 0],
+        "8858": [0.08198, 0.58198, 0, 0],
+        "8859": [0.08198, 0.58198, 0, 0],
+        "8861": [0.08198, 0.58198, 0, 0],
+        "8862": [0, 0.675, 0, 0],
+        "8863": [0, 0.675, 0, 0],
+        "8864": [0, 0.675, 0, 0],
+        "8865": [0, 0.675, 0, 0],
+        "8872": [0, 0.69224, 0, 0],
+        "8873": [0, 0.69224, 0, 0],
+        "8874": [0, 0.69224, 0, 0],
+        "8876": [0, 0.68889, 0, 0],
+        "8877": [0, 0.68889, 0, 0],
+        "8878": [0, 0.68889, 0, 0],
+        "8879": [0, 0.68889, 0, 0],
+        "8882": [0.03517, 0.54986, 0, 0],
+        "8883": [0.03517, 0.54986, 0, 0],
+        "8884": [0.13667, 0.63667, 0, 0],
+        "8885": [0.13667, 0.63667, 0, 0],
+        "8888": [0, 0.54986, 0, 0],
+        "8890": [0.19444, 0.43056, 0, 0],
+        "8891": [0.19444, 0.69224, 0, 0],
+        "8892": [0.19444, 0.69224, 0, 0],
+        "8901": [0, 0.54986, 0, 0],
+        "8903": [0.08167, 0.58167, 0, 0],
+        "8905": [0.08167, 0.58167, 0, 0],
+        "8906": [0.08167, 0.58167, 0, 0],
+        "8907": [0, 0.69224, 0, 0],
+        "8908": [0, 0.69224, 0, 0],
+        "8909": [-0.03598, 0.46402, 0, 0],
+        "8910": [0, 0.54986, 0, 0],
+        "8911": [0, 0.54986, 0, 0],
+        "8912": [0.03517, 0.54986, 0, 0],
+        "8913": [0.03517, 0.54986, 0, 0],
+        "8914": [0, 0.54986, 0, 0],
+        "8915": [0, 0.54986, 0, 0],
+        "8916": [0, 0.69224, 0, 0],
+        "8918": [0.0391, 0.5391, 0, 0],
+        "8919": [0.0391, 0.5391, 0, 0],
+        "8920": [0.03517, 0.54986, 0, 0],
+        "8921": [0.03517, 0.54986, 0, 0],
+        "8922": [0.38569, 0.88569, 0, 0],
+        "8923": [0.38569, 0.88569, 0, 0],
+        "8926": [0.13667, 0.63667, 0, 0],
+        "8927": [0.13667, 0.63667, 0, 0],
+        "8928": [0.30274, 0.79383, 0, 0],
+        "8929": [0.30274, 0.79383, 0, 0],
+        "8934": [0.23222, 0.74111, 0, 0],
+        "8935": [0.23222, 0.74111, 0, 0],
+        "8936": [0.23222, 0.74111, 0, 0],
+        "8937": [0.23222, 0.74111, 0, 0],
+        "8938": [0.20576, 0.70576, 0, 0],
+        "8939": [0.20576, 0.70576, 0, 0],
+        "8940": [0.30274, 0.79383, 0, 0],
+        "8941": [0.30274, 0.79383, 0, 0],
+        "8994": [0.19444, 0.69224, 0, 0],
+        "8995": [0.19444, 0.69224, 0, 0],
+        "9416": [0.15559, 0.69224, 0, 0],
+        "9484": [0, 0.69224, 0, 0],
+        "9488": [0, 0.69224, 0, 0],
+        "9492": [0, 0.37788, 0, 0],
+        "9496": [0, 0.37788, 0, 0],
+        "9585": [0.19444, 0.68889, 0, 0],
+        "9586": [0.19444, 0.74111, 0, 0],
+        "9632": [0, 0.675, 0, 0],
+        "9633": [0, 0.675, 0, 0],
+        "9650": [0, 0.54986, 0, 0],
+        "9651": [0, 0.54986, 0, 0],
+        "9654": [0.03517, 0.54986, 0, 0],
+        "9660": [0, 0.54986, 0, 0],
+        "9661": [0, 0.54986, 0, 0],
+        "9664": [0.03517, 0.54986, 0, 0],
+        "9674": [0.11111, 0.69224, 0, 0],
+        "9733": [0.19444, 0.69224, 0, 0],
+        "10003": [0, 0.69224, 0, 0],
+        "10016": [0, 0.69224, 0, 0],
+        "10731": [0.11111, 0.69224, 0, 0],
+        "10846": [0.19444, 0.75583, 0, 0],
+        "10877": [0.13667, 0.63667, 0, 0],
+        "10878": [0.13667, 0.63667, 0, 0],
+        "10885": [0.25583, 0.75583, 0, 0],
+        "10886": [0.25583, 0.75583, 0, 0],
+        "10887": [0.13597, 0.63597, 0, 0],
+        "10888": [0.13597, 0.63597, 0, 0],
+        "10889": [0.26167, 0.75726, 0, 0],
+        "10890": [0.26167, 0.75726, 0, 0],
+        "10891": [0.48256, 0.98256, 0, 0],
+        "10892": [0.48256, 0.98256, 0, 0],
+        "10901": [0.13667, 0.63667, 0, 0],
+        "10902": [0.13667, 0.63667, 0, 0],
+        "10933": [0.25142, 0.75726, 0, 0],
+        "10934": [0.25142, 0.75726, 0, 0],
+        "10935": [0.26167, 0.75726, 0, 0],
+        "10936": [0.26167, 0.75726, 0, 0],
+        "10937": [0.26167, 0.75726, 0, 0],
+        "10938": [0.26167, 0.75726, 0, 0],
+        "10949": [0.25583, 0.75583, 0, 0],
+        "10950": [0.25583, 0.75583, 0, 0],
+        "10955": [0.28481, 0.79383, 0, 0],
+        "10956": [0.28481, 0.79383, 0, 0],
+        "57350": [0.08167, 0.58167, 0, 0],
+        "57351": [0.08167, 0.58167, 0, 0],
+        "57352": [0.08167, 0.58167, 0, 0],
+        "57353": [0, 0.43056, 0.04028, 0],
+        "57356": [0.25142, 0.75726, 0, 0],
+        "57357": [0.25142, 0.75726, 0, 0],
+        "57358": [0.41951, 0.91951, 0, 0],
+        "57359": [0.30274, 0.79383, 0, 0],
+        "57360": [0.30274, 0.79383, 0, 0],
+        "57361": [0.41951, 0.91951, 0, 0],
+        "57366": [0.25142, 0.75726, 0, 0],
+        "57367": [0.25142, 0.75726, 0, 0],
+        "57368": [0.25142, 0.75726, 0, 0],
+        "57369": [0.25142, 0.75726, 0, 0],
+        "57370": [0.13597, 0.63597, 0, 0],
+        "57371": [0.13597, 0.63597, 0, 0],
+    },
+    "Caligraphic-Regular": {
+        "48": [0, 0.43056, 0, 0],
+        "49": [0, 0.43056, 0, 0],
+        "50": [0, 0.43056, 0, 0],
+        "51": [0.19444, 0.43056, 0, 0],
+        "52": [0.19444, 0.43056, 0, 0],
+        "53": [0.19444, 0.43056, 0, 0],
+        "54": [0, 0.64444, 0, 0],
+        "55": [0.19444, 0.43056, 0, 0],
+        "56": [0, 0.64444, 0, 0],
+        "57": [0.19444, 0.43056, 0, 0],
+        "65": [0, 0.68333, 0, 0.19445],
+        "66": [0, 0.68333, 0.03041, 0.13889],
+        "67": [0, 0.68333, 0.05834, 0.13889],
+        "68": [0, 0.68333, 0.02778, 0.08334],
+        "69": [0, 0.68333, 0.08944, 0.11111],
+        "70": [0, 0.68333, 0.09931, 0.11111],
+        "71": [0.09722, 0.68333, 0.0593, 0.11111],
+        "72": [0, 0.68333, 0.00965, 0.11111],
+        "73": [0, 0.68333, 0.07382, 0],
+        "74": [0.09722, 0.68333, 0.18472, 0.16667],
+        "75": [0, 0.68333, 0.01445, 0.05556],
+        "76": [0, 0.68333, 0, 0.13889],
+        "77": [0, 0.68333, 0, 0.13889],
+        "78": [0, 0.68333, 0.14736, 0.08334],
+        "79": [0, 0.68333, 0.02778, 0.11111],
+        "80": [0, 0.68333, 0.08222, 0.08334],
+        "81": [0.09722, 0.68333, 0, 0.11111],
+        "82": [0, 0.68333, 0, 0.08334],
+        "83": [0, 0.68333, 0.075, 0.13889],
+        "84": [0, 0.68333, 0.25417, 0],
+        "85": [0, 0.68333, 0.09931, 0.08334],
+        "86": [0, 0.68333, 0.08222, 0],
+        "87": [0, 0.68333, 0.08222, 0.08334],
+        "88": [0, 0.68333, 0.14643, 0.13889],
+        "89": [0.09722, 0.68333, 0.08222, 0.08334],
+        "90": [0, 0.68333, 0.07944, 0.13889],
+    },
+    "Fraktur-Regular": {
+        "33": [0, 0.69141, 0, 0],
+        "34": [0, 0.69141, 0, 0],
+        "38": [0, 0.69141, 0, 0],
+        "39": [0, 0.69141, 0, 0],
+        "40": [0.24982, 0.74947, 0, 0],
+        "41": [0.24982, 0.74947, 0, 0],
+        "42": [0, 0.62119, 0, 0],
+        "43": [0.08319, 0.58283, 0, 0],
+        "44": [0, 0.10803, 0, 0],
+        "45": [0.08319, 0.58283, 0, 0],
+        "46": [0, 0.10803, 0, 0],
+        "47": [0.24982, 0.74947, 0, 0],
+        "48": [0, 0.47534, 0, 0],
+        "49": [0, 0.47534, 0, 0],
+        "50": [0, 0.47534, 0, 0],
+        "51": [0.18906, 0.47534, 0, 0],
+        "52": [0.18906, 0.47534, 0, 0],
+        "53": [0.18906, 0.47534, 0, 0],
+        "54": [0, 0.69141, 0, 0],
+        "55": [0.18906, 0.47534, 0, 0],
+        "56": [0, 0.69141, 0, 0],
+        "57": [0.18906, 0.47534, 0, 0],
+        "58": [0, 0.47534, 0, 0],
+        "59": [0.12604, 0.47534, 0, 0],
+        "61": [-0.13099, 0.36866, 0, 0],
+        "63": [0, 0.69141, 0, 0],
+        "65": [0, 0.69141, 0, 0],
+        "66": [0, 0.69141, 0, 0],
+        "67": [0, 0.69141, 0, 0],
+        "68": [0, 0.69141, 0, 0],
+        "69": [0, 0.69141, 0, 0],
+        "70": [0.12604, 0.69141, 0, 0],
+        "71": [0, 0.69141, 0, 0],
+        "72": [0.06302, 0.69141, 0, 0],
+        "73": [0, 0.69141, 0, 0],
+        "74": [0.12604, 0.69141, 0, 0],
+        "75": [0, 0.69141, 0, 0],
+        "76": [0, 0.69141, 0, 0],
+        "77": [0, 0.69141, 0, 0],
+        "78": [0, 0.69141, 0, 0],
+        "79": [0, 0.69141, 0, 0],
+        "80": [0.18906, 0.69141, 0, 0],
+        "81": [0.03781, 0.69141, 0, 0],
+        "82": [0, 0.69141, 0, 0],
+        "83": [0, 0.69141, 0, 0],
+        "84": [0, 0.69141, 0, 0],
+        "85": [0, 0.69141, 0, 0],
+        "86": [0, 0.69141, 0, 0],
+        "87": [0, 0.69141, 0, 0],
+        "88": [0, 0.69141, 0, 0],
+        "89": [0.18906, 0.69141, 0, 0],
+        "90": [0.12604, 0.69141, 0, 0],
+        "91": [0.24982, 0.74947, 0, 0],
+        "93": [0.24982, 0.74947, 0, 0],
+        "94": [0, 0.69141, 0, 0],
+        "97": [0, 0.47534, 0, 0],
+        "98": [0, 0.69141, 0, 0],
+        "99": [0, 0.47534, 0, 0],
+        "100": [0, 0.62119, 0, 0],
+        "101": [0, 0.47534, 0, 0],
+        "102": [0.18906, 0.69141, 0, 0],
+        "103": [0.18906, 0.47534, 0, 0],
+        "104": [0.18906, 0.69141, 0, 0],
+        "105": [0, 0.69141, 0, 0],
+        "106": [0, 0.69141, 0, 0],
+        "107": [0, 0.69141, 0, 0],
+        "108": [0, 0.69141, 0, 0],
+        "109": [0, 0.47534, 0, 0],
+        "110": [0, 0.47534, 0, 0],
+        "111": [0, 0.47534, 0, 0],
+        "112": [0.18906, 0.52396, 0, 0],
+        "113": [0.18906, 0.47534, 0, 0],
+        "114": [0, 0.47534, 0, 0],
+        "115": [0, 0.47534, 0, 0],
+        "116": [0, 0.62119, 0, 0],
+        "117": [0, 0.47534, 0, 0],
+        "118": [0, 0.52396, 0, 0],
+        "119": [0, 0.52396, 0, 0],
+        "120": [0.18906, 0.47534, 0, 0],
+        "121": [0.18906, 0.47534, 0, 0],
+        "122": [0.18906, 0.47534, 0, 0],
+        "8216": [0, 0.69141, 0, 0],
+        "8217": [0, 0.69141, 0, 0],
+        "58112": [0, 0.62119, 0, 0],
+        "58113": [0, 0.62119, 0, 0],
+        "58114": [0.18906, 0.69141, 0, 0],
+        "58115": [0.18906, 0.69141, 0, 0],
+        "58116": [0.18906, 0.47534, 0, 0],
+        "58117": [0, 0.69141, 0, 0],
+        "58118": [0, 0.62119, 0, 0],
+        "58119": [0, 0.47534, 0, 0],
+    },
+    "Main-Bold": {
+        "33": [0, 0.69444, 0, 0],
+        "34": [0, 0.69444, 0, 0],
+        "35": [0.19444, 0.69444, 0, 0],
+        "36": [0.05556, 0.75, 0, 0],
+        "37": [0.05556, 0.75, 0, 0],
+        "38": [0, 0.69444, 0, 0],
+        "39": [0, 0.69444, 0, 0],
+        "40": [0.25, 0.75, 0, 0],
+        "41": [0.25, 0.75, 0, 0],
+        "42": [0, 0.75, 0, 0],
+        "43": [0.13333, 0.63333, 0, 0],
+        "44": [0.19444, 0.15556, 0, 0],
+        "45": [0, 0.44444, 0, 0],
+        "46": [0, 0.15556, 0, 0],
+        "47": [0.25, 0.75, 0, 0],
+        "48": [0, 0.64444, 0, 0],
+        "49": [0, 0.64444, 0, 0],
+        "50": [0, 0.64444, 0, 0],
+        "51": [0, 0.64444, 0, 0],
+        "52": [0, 0.64444, 0, 0],
+        "53": [0, 0.64444, 0, 0],
+        "54": [0, 0.64444, 0, 0],
+        "55": [0, 0.64444, 0, 0],
+        "56": [0, 0.64444, 0, 0],
+        "57": [0, 0.64444, 0, 0],
+        "58": [0, 0.44444, 0, 0],
+        "59": [0.19444, 0.44444, 0, 0],
+        "60": [0.08556, 0.58556, 0, 0],
+        "61": [-0.10889, 0.39111, 0, 0],
+        "62": [0.08556, 0.58556, 0, 0],
+        "63": [0, 0.69444, 0, 0],
+        "64": [0, 0.69444, 0, 0],
+        "65": [0, 0.68611, 0, 0],
+        "66": [0, 0.68611, 0, 0],
+        "67": [0, 0.68611, 0, 0],
+        "68": [0, 0.68611, 0, 0],
+        "69": [0, 0.68611, 0, 0],
+        "70": [0, 0.68611, 0, 0],
+        "71": [0, 0.68611, 0, 0],
+        "72": [0, 0.68611, 0, 0],
+        "73": [0, 0.68611, 0, 0],
+        "74": [0, 0.68611, 0, 0],
+        "75": [0, 0.68611, 0, 0],
+        "76": [0, 0.68611, 0, 0],
+        "77": [0, 0.68611, 0, 0],
+        "78": [0, 0.68611, 0, 0],
+        "79": [0, 0.68611, 0, 0],
+        "80": [0, 0.68611, 0, 0],
+        "81": [0.19444, 0.68611, 0, 0],
+        "82": [0, 0.68611, 0, 0],
+        "83": [0, 0.68611, 0, 0],
+        "84": [0, 0.68611, 0, 0],
+        "85": [0, 0.68611, 0, 0],
+        "86": [0, 0.68611, 0.01597, 0],
+        "87": [0, 0.68611, 0.01597, 0],
+        "88": [0, 0.68611, 0, 0],
+        "89": [0, 0.68611, 0.02875, 0],
+        "90": [0, 0.68611, 0, 0],
+        "91": [0.25, 0.75, 0, 0],
+        "92": [0.25, 0.75, 0, 0],
+        "93": [0.25, 0.75, 0, 0],
+        "94": [0, 0.69444, 0, 0],
+        "95": [0.31, 0.13444, 0.03194, 0],
+        "96": [0, 0.69444, 0, 0],
+        "97": [0, 0.44444, 0, 0],
+        "98": [0, 0.69444, 0, 0],
+        "99": [0, 0.44444, 0, 0],
+        "100": [0, 0.69444, 0, 0],
+        "101": [0, 0.44444, 0, 0],
+        "102": [0, 0.69444, 0.10903, 0],
+        "103": [0.19444, 0.44444, 0.01597, 0],
+        "104": [0, 0.69444, 0, 0],
+        "105": [0, 0.69444, 0, 0],
+        "106": [0.19444, 0.69444, 0, 0],
+        "107": [0, 0.69444, 0, 0],
+        "108": [0, 0.69444, 0, 0],
+        "109": [0, 0.44444, 0, 0],
+        "110": [0, 0.44444, 0, 0],
+        "111": [0, 0.44444, 0, 0],
+        "112": [0.19444, 0.44444, 0, 0],
+        "113": [0.19444, 0.44444, 0, 0],
+        "114": [0, 0.44444, 0, 0],
+        "115": [0, 0.44444, 0, 0],
+        "116": [0, 0.63492, 0, 0],
+        "117": [0, 0.44444, 0, 0],
+        "118": [0, 0.44444, 0.01597, 0],
+        "119": [0, 0.44444, 0.01597, 0],
+        "120": [0, 0.44444, 0, 0],
+        "121": [0.19444, 0.44444, 0.01597, 0],
+        "122": [0, 0.44444, 0, 0],
+        "123": [0.25, 0.75, 0, 0],
+        "124": [0.25, 0.75, 0, 0],
+        "125": [0.25, 0.75, 0, 0],
+        "126": [0.35, 0.34444, 0, 0],
+        "168": [0, 0.69444, 0, 0],
+        "172": [0, 0.44444, 0, 0],
+        "175": [0, 0.59611, 0, 0],
+        "176": [0, 0.69444, 0, 0],
+        "177": [0.13333, 0.63333, 0, 0],
+        "180": [0, 0.69444, 0, 0],
+        "215": [0.13333, 0.63333, 0, 0],
+        "247": [0.13333, 0.63333, 0, 0],
+        "305": [0, 0.44444, 0, 0],
+        "567": [0.19444, 0.44444, 0, 0],
+        "710": [0, 0.69444, 0, 0],
+        "711": [0, 0.63194, 0, 0],
+        "713": [0, 0.59611, 0, 0],
+        "714": [0, 0.69444, 0, 0],
+        "715": [0, 0.69444, 0, 0],
+        "728": [0, 0.69444, 0, 0],
+        "729": [0, 0.69444, 0, 0],
+        "730": [0, 0.69444, 0, 0],
+        "732": [0, 0.69444, 0, 0],
+        "768": [0, 0.69444, 0, 0],
+        "769": [0, 0.69444, 0, 0],
+        "770": [0, 0.69444, 0, 0],
+        "771": [0, 0.69444, 0, 0],
+        "772": [0, 0.59611, 0, 0],
+        "774": [0, 0.69444, 0, 0],
+        "775": [0, 0.69444, 0, 0],
+        "776": [0, 0.69444, 0, 0],
+        "778": [0, 0.69444, 0, 0],
+        "779": [0, 0.69444, 0, 0],
+        "780": [0, 0.63194, 0, 0],
+        "824": [0.19444, 0.69444, 0, 0],
+        "915": [0, 0.68611, 0, 0],
+        "916": [0, 0.68611, 0, 0],
+        "920": [0, 0.68611, 0, 0],
+        "923": [0, 0.68611, 0, 0],
+        "926": [0, 0.68611, 0, 0],
+        "928": [0, 0.68611, 0, 0],
+        "931": [0, 0.68611, 0, 0],
+        "933": [0, 0.68611, 0, 0],
+        "934": [0, 0.68611, 0, 0],
+        "936": [0, 0.68611, 0, 0],
+        "937": [0, 0.68611, 0, 0],
+        "8211": [0, 0.44444, 0.03194, 0],
+        "8212": [0, 0.44444, 0.03194, 0],
+        "8216": [0, 0.69444, 0, 0],
+        "8217": [0, 0.69444, 0, 0],
+        "8220": [0, 0.69444, 0, 0],
+        "8221": [0, 0.69444, 0, 0],
+        "8224": [0.19444, 0.69444, 0, 0],
+        "8225": [0.19444, 0.69444, 0, 0],
+        "8242": [0, 0.55556, 0, 0],
+        "8407": [0, 0.72444, 0.15486, 0],
+        "8463": [0, 0.69444, 0, 0],
+        "8465": [0, 0.69444, 0, 0],
+        "8467": [0, 0.69444, 0, 0],
+        "8472": [0.19444, 0.44444, 0, 0],
+        "8476": [0, 0.69444, 0, 0],
+        "8501": [0, 0.69444, 0, 0],
+        "8592": [-0.10889, 0.39111, 0, 0],
+        "8593": [0.19444, 0.69444, 0, 0],
+        "8594": [-0.10889, 0.39111, 0, 0],
+        "8595": [0.19444, 0.69444, 0, 0],
+        "8596": [-0.10889, 0.39111, 0, 0],
+        "8597": [0.25, 0.75, 0, 0],
+        "8598": [0.19444, 0.69444, 0, 0],
+        "8599": [0.19444, 0.69444, 0, 0],
+        "8600": [0.19444, 0.69444, 0, 0],
+        "8601": [0.19444, 0.69444, 0, 0],
+        "8636": [-0.10889, 0.39111, 0, 0],
+        "8637": [-0.10889, 0.39111, 0, 0],
+        "8640": [-0.10889, 0.39111, 0, 0],
+        "8641": [-0.10889, 0.39111, 0, 0],
+        "8656": [-0.10889, 0.39111, 0, 0],
+        "8657": [0.19444, 0.69444, 0, 0],
+        "8658": [-0.10889, 0.39111, 0, 0],
+        "8659": [0.19444, 0.69444, 0, 0],
+        "8660": [-0.10889, 0.39111, 0, 0],
+        "8661": [0.25, 0.75, 0, 0],
+        "8704": [0, 0.69444, 0, 0],
+        "8706": [0, 0.69444, 0.06389, 0],
+        "8707": [0, 0.69444, 0, 0],
+        "8709": [0.05556, 0.75, 0, 0],
+        "8711": [0, 0.68611, 0, 0],
+        "8712": [0.08556, 0.58556, 0, 0],
+        "8715": [0.08556, 0.58556, 0, 0],
+        "8722": [0.13333, 0.63333, 0, 0],
+        "8723": [0.13333, 0.63333, 0, 0],
+        "8725": [0.25, 0.75, 0, 0],
+        "8726": [0.25, 0.75, 0, 0],
+        "8727": [-0.02778, 0.47222, 0, 0],
+        "8728": [-0.02639, 0.47361, 0, 0],
+        "8729": [-0.02639, 0.47361, 0, 0],
+        "8730": [0.18, 0.82, 0, 0],
+        "8733": [0, 0.44444, 0, 0],
+        "8734": [0, 0.44444, 0, 0],
+        "8736": [0, 0.69224, 0, 0],
+        "8739": [0.25, 0.75, 0, 0],
+        "8741": [0.25, 0.75, 0, 0],
+        "8743": [0, 0.55556, 0, 0],
+        "8744": [0, 0.55556, 0, 0],
+        "8745": [0, 0.55556, 0, 0],
+        "8746": [0, 0.55556, 0, 0],
+        "8747": [0.19444, 0.69444, 0.12778, 0],
+        "8764": [-0.10889, 0.39111, 0, 0],
+        "8768": [0.19444, 0.69444, 0, 0],
+        "8771": [0.00222, 0.50222, 0, 0],
+        "8776": [0.02444, 0.52444, 0, 0],
+        "8781": [0.00222, 0.50222, 0, 0],
+        "8801": [0.00222, 0.50222, 0, 0],
+        "8804": [0.19667, 0.69667, 0, 0],
+        "8805": [0.19667, 0.69667, 0, 0],
+        "8810": [0.08556, 0.58556, 0, 0],
+        "8811": [0.08556, 0.58556, 0, 0],
+        "8826": [0.08556, 0.58556, 0, 0],
+        "8827": [0.08556, 0.58556, 0, 0],
+        "8834": [0.08556, 0.58556, 0, 0],
+        "8835": [0.08556, 0.58556, 0, 0],
+        "8838": [0.19667, 0.69667, 0, 0],
+        "8839": [0.19667, 0.69667, 0, 0],
+        "8846": [0, 0.55556, 0, 0],
+        "8849": [0.19667, 0.69667, 0, 0],
+        "8850": [0.19667, 0.69667, 0, 0],
+        "8851": [0, 0.55556, 0, 0],
+        "8852": [0, 0.55556, 0, 0],
+        "8853": [0.13333, 0.63333, 0, 0],
+        "8854": [0.13333, 0.63333, 0, 0],
+        "8855": [0.13333, 0.63333, 0, 0],
+        "8856": [0.13333, 0.63333, 0, 0],
+        "8857": [0.13333, 0.63333, 0, 0],
+        "8866": [0, 0.69444, 0, 0],
+        "8867": [0, 0.69444, 0, 0],
+        "8868": [0, 0.69444, 0, 0],
+        "8869": [0, 0.69444, 0, 0],
+        "8900": [-0.02639, 0.47361, 0, 0],
+        "8901": [-0.02639, 0.47361, 0, 0],
+        "8902": [-0.02778, 0.47222, 0, 0],
+        "8968": [0.25, 0.75, 0, 0],
+        "8969": [0.25, 0.75, 0, 0],
+        "8970": [0.25, 0.75, 0, 0],
+        "8971": [0.25, 0.75, 0, 0],
+        "8994": [-0.13889, 0.36111, 0, 0],
+        "8995": [-0.13889, 0.36111, 0, 0],
+        "9651": [0.19444, 0.69444, 0, 0],
+        "9657": [-0.02778, 0.47222, 0, 0],
+        "9661": [0.19444, 0.69444, 0, 0],
+        "9667": [-0.02778, 0.47222, 0, 0],
+        "9711": [0.19444, 0.69444, 0, 0],
+        "9824": [0.12963, 0.69444, 0, 0],
+        "9825": [0.12963, 0.69444, 0, 0],
+        "9826": [0.12963, 0.69444, 0, 0],
+        "9827": [0.12963, 0.69444, 0, 0],
+        "9837": [0, 0.75, 0, 0],
+        "9838": [0.19444, 0.69444, 0, 0],
+        "9839": [0.19444, 0.69444, 0, 0],
+        "10216": [0.25, 0.75, 0, 0],
+        "10217": [0.25, 0.75, 0, 0],
+        "10815": [0, 0.68611, 0, 0],
+        "10927": [0.19667, 0.69667, 0, 0],
+        "10928": [0.19667, 0.69667, 0, 0],
+    },
+    "Main-Italic": {
+        "33": [0, 0.69444, 0.12417, 0],
+        "34": [0, 0.69444, 0.06961, 0],
+        "35": [0.19444, 0.69444, 0.06616, 0],
+        "37": [0.05556, 0.75, 0.13639, 0],
+        "38": [0, 0.69444, 0.09694, 0],
+        "39": [0, 0.69444, 0.12417, 0],
+        "40": [0.25, 0.75, 0.16194, 0],
+        "41": [0.25, 0.75, 0.03694, 0],
+        "42": [0, 0.75, 0.14917, 0],
+        "43": [0.05667, 0.56167, 0.03694, 0],
+        "44": [0.19444, 0.10556, 0, 0],
+        "45": [0, 0.43056, 0.02826, 0],
+        "46": [0, 0.10556, 0, 0],
+        "47": [0.25, 0.75, 0.16194, 0],
+        "48": [0, 0.64444, 0.13556, 0],
+        "49": [0, 0.64444, 0.13556, 0],
+        "50": [0, 0.64444, 0.13556, 0],
+        "51": [0, 0.64444, 0.13556, 0],
+        "52": [0.19444, 0.64444, 0.13556, 0],
+        "53": [0, 0.64444, 0.13556, 0],
+        "54": [0, 0.64444, 0.13556, 0],
+        "55": [0.19444, 0.64444, 0.13556, 0],
+        "56": [0, 0.64444, 0.13556, 0],
+        "57": [0, 0.64444, 0.13556, 0],
+        "58": [0, 0.43056, 0.0582, 0],
+        "59": [0.19444, 0.43056, 0.0582, 0],
+        "61": [-0.13313, 0.36687, 0.06616, 0],
+        "63": [0, 0.69444, 0.1225, 0],
+        "64": [0, 0.69444, 0.09597, 0],
+        "65": [0, 0.68333, 0, 0],
+        "66": [0, 0.68333, 0.10257, 0],
+        "67": [0, 0.68333, 0.14528, 0],
+        "68": [0, 0.68333, 0.09403, 0],
+        "69": [0, 0.68333, 0.12028, 0],
+        "70": [0, 0.68333, 0.13305, 0],
+        "71": [0, 0.68333, 0.08722, 0],
+        "72": [0, 0.68333, 0.16389, 0],
+        "73": [0, 0.68333, 0.15806, 0],
+        "74": [0, 0.68333, 0.14028, 0],
+        "75": [0, 0.68333, 0.14528, 0],
+        "76": [0, 0.68333, 0, 0],
+        "77": [0, 0.68333, 0.16389, 0],
+        "78": [0, 0.68333, 0.16389, 0],
+        "79": [0, 0.68333, 0.09403, 0],
+        "80": [0, 0.68333, 0.10257, 0],
+        "81": [0.19444, 0.68333, 0.09403, 0],
+        "82": [0, 0.68333, 0.03868, 0],
+        "83": [0, 0.68333, 0.11972, 0],
+        "84": [0, 0.68333, 0.13305, 0],
+        "85": [0, 0.68333, 0.16389, 0],
+        "86": [0, 0.68333, 0.18361, 0],
+        "87": [0, 0.68333, 0.18361, 0],
+        "88": [0, 0.68333, 0.15806, 0],
+        "89": [0, 0.68333, 0.19383, 0],
+        "90": [0, 0.68333, 0.14528, 0],
+        "91": [0.25, 0.75, 0.1875, 0],
+        "93": [0.25, 0.75, 0.10528, 0],
+        "94": [0, 0.69444, 0.06646, 0],
+        "95": [0.31, 0.12056, 0.09208, 0],
+        "97": [0, 0.43056, 0.07671, 0],
+        "98": [0, 0.69444, 0.06312, 0],
+        "99": [0, 0.43056, 0.05653, 0],
+        "100": [0, 0.69444, 0.10333, 0],
+        "101": [0, 0.43056, 0.07514, 0],
+        "102": [0.19444, 0.69444, 0.21194, 0],
+        "103": [0.19444, 0.43056, 0.08847, 0],
+        "104": [0, 0.69444, 0.07671, 0],
+        "105": [0, 0.65536, 0.1019, 0],
+        "106": [0.19444, 0.65536, 0.14467, 0],
+        "107": [0, 0.69444, 0.10764, 0],
+        "108": [0, 0.69444, 0.10333, 0],
+        "109": [0, 0.43056, 0.07671, 0],
+        "110": [0, 0.43056, 0.07671, 0],
+        "111": [0, 0.43056, 0.06312, 0],
+        "112": [0.19444, 0.43056, 0.06312, 0],
+        "113": [0.19444, 0.43056, 0.08847, 0],
+        "114": [0, 0.43056, 0.10764, 0],
+        "115": [0, 0.43056, 0.08208, 0],
+        "116": [0, 0.61508, 0.09486, 0],
+        "117": [0, 0.43056, 0.07671, 0],
+        "118": [0, 0.43056, 0.10764, 0],
+        "119": [0, 0.43056, 0.10764, 0],
+        "120": [0, 0.43056, 0.12042, 0],
+        "121": [0.19444, 0.43056, 0.08847, 0],
+        "122": [0, 0.43056, 0.12292, 0],
+        "126": [0.35, 0.31786, 0.11585, 0],
+        "163": [0, 0.69444, 0, 0],
+        "305": [0, 0.43056, 0, 0.02778],
+        "567": [0.19444, 0.43056, 0, 0.08334],
+        "768": [0, 0.69444, 0, 0],
+        "769": [0, 0.69444, 0.09694, 0],
+        "770": [0, 0.69444, 0.06646, 0],
+        "771": [0, 0.66786, 0.11585, 0],
+        "772": [0, 0.56167, 0.10333, 0],
+        "774": [0, 0.69444, 0.10806, 0],
+        "775": [0, 0.66786, 0.11752, 0],
+        "776": [0, 0.66786, 0.10474, 0],
+        "778": [0, 0.69444, 0, 0],
+        "779": [0, 0.69444, 0.1225, 0],
+        "780": [0, 0.62847, 0.08295, 0],
+        "915": [0, 0.68333, 0.13305, 0],
+        "916": [0, 0.68333, 0, 0],
+        "920": [0, 0.68333, 0.09403, 0],
+        "923": [0, 0.68333, 0, 0],
+        "926": [0, 0.68333, 0.15294, 0],
+        "928": [0, 0.68333, 0.16389, 0],
+        "931": [0, 0.68333, 0.12028, 0],
+        "933": [0, 0.68333, 0.11111, 0],
+        "934": [0, 0.68333, 0.05986, 0],
+        "936": [0, 0.68333, 0.11111, 0],
+        "937": [0, 0.68333, 0.10257, 0],
+        "8211": [0, 0.43056, 0.09208, 0],
+        "8212": [0, 0.43056, 0.09208, 0],
+        "8216": [0, 0.69444, 0.12417, 0],
+        "8217": [0, 0.69444, 0.12417, 0],
+        "8220": [0, 0.69444, 0.1685, 0],
+        "8221": [0, 0.69444, 0.06961, 0],
+        "8463": [0, 0.68889, 0, 0],
+    },
+    "Main-Regular": {
+        "32": [0, 0, 0, 0],
+        "33": [0, 0.69444, 0, 0],
+        "34": [0, 0.69444, 0, 0],
+        "35": [0.19444, 0.69444, 0, 0],
+        "36": [0.05556, 0.75, 0, 0],
+        "37": [0.05556, 0.75, 0, 0],
+        "38": [0, 0.69444, 0, 0],
+        "39": [0, 0.69444, 0, 0],
+        "40": [0.25, 0.75, 0, 0],
+        "41": [0.25, 0.75, 0, 0],
+        "42": [0, 0.75, 0, 0],
+        "43": [0.08333, 0.58333, 0, 0],
+        "44": [0.19444, 0.10556, 0, 0],
+        "45": [0, 0.43056, 0, 0],
+        "46": [0, 0.10556, 0, 0],
+        "47": [0.25, 0.75, 0, 0],
+        "48": [0, 0.64444, 0, 0],
+        "49": [0, 0.64444, 0, 0],
+        "50": [0, 0.64444, 0, 0],
+        "51": [0, 0.64444, 0, 0],
+        "52": [0, 0.64444, 0, 0],
+        "53": [0, 0.64444, 0, 0],
+        "54": [0, 0.64444, 0, 0],
+        "55": [0, 0.64444, 0, 0],
+        "56": [0, 0.64444, 0, 0],
+        "57": [0, 0.64444, 0, 0],
+        "58": [0, 0.43056, 0, 0],
+        "59": [0.19444, 0.43056, 0, 0],
+        "60": [0.0391, 0.5391, 0, 0],
+        "61": [-0.13313, 0.36687, 0, 0],
+        "62": [0.0391, 0.5391, 0, 0],
+        "63": [0, 0.69444, 0, 0],
+        "64": [0, 0.69444, 0, 0],
+        "65": [0, 0.68333, 0, 0],
+        "66": [0, 0.68333, 0, 0],
+        "67": [0, 0.68333, 0, 0],
+        "68": [0, 0.68333, 0, 0],
+        "69": [0, 0.68333, 0, 0],
+        "70": [0, 0.68333, 0, 0],
+        "71": [0, 0.68333, 0, 0],
+        "72": [0, 0.68333, 0, 0],
+        "73": [0, 0.68333, 0, 0],
+        "74": [0, 0.68333, 0, 0],
+        "75": [0, 0.68333, 0, 0],
+        "76": [0, 0.68333, 0, 0],
+        "77": [0, 0.68333, 0, 0],
+        "78": [0, 0.68333, 0, 0],
+        "79": [0, 0.68333, 0, 0],
+        "80": [0, 0.68333, 0, 0],
+        "81": [0.19444, 0.68333, 0, 0],
+        "82": [0, 0.68333, 0, 0],
+        "83": [0, 0.68333, 0, 0],
+        "84": [0, 0.68333, 0, 0],
+        "85": [0, 0.68333, 0, 0],
+        "86": [0, 0.68333, 0.01389, 0],
+        "87": [0, 0.68333, 0.01389, 0],
+        "88": [0, 0.68333, 0, 0],
+        "89": [0, 0.68333, 0.025, 0],
+        "90": [0, 0.68333, 0, 0],
+        "91": [0.25, 0.75, 0, 0],
+        "92": [0.25, 0.75, 0, 0],
+        "93": [0.25, 0.75, 0, 0],
+        "94": [0, 0.69444, 0, 0],
+        "95": [0.31, 0.12056, 0.02778, 0],
+        "96": [0, 0.69444, 0, 0],
+        "97": [0, 0.43056, 0, 0],
+        "98": [0, 0.69444, 0, 0],
+        "99": [0, 0.43056, 0, 0],
+        "100": [0, 0.69444, 0, 0],
+        "101": [0, 0.43056, 0, 0],
+        "102": [0, 0.69444, 0.07778, 0],
+        "103": [0.19444, 0.43056, 0.01389, 0],
+        "104": [0, 0.69444, 0, 0],
+        "105": [0, 0.66786, 0, 0],
+        "106": [0.19444, 0.66786, 0, 0],
+        "107": [0, 0.69444, 0, 0],
+        "108": [0, 0.69444, 0, 0],
+        "109": [0, 0.43056, 0, 0],
+        "110": [0, 0.43056, 0, 0],
+        "111": [0, 0.43056, 0, 0],
+        "112": [0.19444, 0.43056, 0, 0],
+        "113": [0.19444, 0.43056, 0, 0],
+        "114": [0, 0.43056, 0, 0],
+        "115": [0, 0.43056, 0, 0],
+        "116": [0, 0.61508, 0, 0],
+        "117": [0, 0.43056, 0, 0],
+        "118": [0, 0.43056, 0.01389, 0],
+        "119": [0, 0.43056, 0.01389, 0],
+        "120": [0, 0.43056, 0, 0],
+        "121": [0.19444, 0.43056, 0.01389, 0],
+        "122": [0, 0.43056, 0, 0],
+        "123": [0.25, 0.75, 0, 0],
+        "124": [0.25, 0.75, 0, 0],
+        "125": [0.25, 0.75, 0, 0],
+        "126": [0.35, 0.31786, 0, 0],
+        "160": [0, 0, 0, 0],
+        "168": [0, 0.66786, 0, 0],
+        "172": [0, 0.43056, 0, 0],
+        "175": [0, 0.56778, 0, 0],
+        "176": [0, 0.69444, 0, 0],
+        "177": [0.08333, 0.58333, 0, 0],
+        "180": [0, 0.69444, 0, 0],
+        "215": [0.08333, 0.58333, 0, 0],
+        "247": [0.08333, 0.58333, 0, 0],
+        "305": [0, 0.43056, 0, 0],
+        "567": [0.19444, 0.43056, 0, 0],
+        "710": [0, 0.69444, 0, 0],
+        "711": [0, 0.62847, 0, 0],
+        "713": [0, 0.56778, 0, 0],
+        "714": [0, 0.69444, 0, 0],
+        "715": [0, 0.69444, 0, 0],
+        "728": [0, 0.69444, 0, 0],
+        "729": [0, 0.66786, 0, 0],
+        "730": [0, 0.69444, 0, 0],
+        "732": [0, 0.66786, 0, 0],
+        "768": [0, 0.69444, 0, 0],
+        "769": [0, 0.69444, 0, 0],
+        "770": [0, 0.69444, 0, 0],
+        "771": [0, 0.66786, 0, 0],
+        "772": [0, 0.56778, 0, 0],
+        "774": [0, 0.69444, 0, 0],
+        "775": [0, 0.66786, 0, 0],
+        "776": [0, 0.66786, 0, 0],
+        "778": [0, 0.69444, 0, 0],
+        "779": [0, 0.69444, 0, 0],
+        "780": [0, 0.62847, 0, 0],
+        "824": [0.19444, 0.69444, 0, 0],
+        "915": [0, 0.68333, 0, 0],
+        "916": [0, 0.68333, 0, 0],
+        "920": [0, 0.68333, 0, 0],
+        "923": [0, 0.68333, 0, 0],
+        "926": [0, 0.68333, 0, 0],
+        "928": [0, 0.68333, 0, 0],
+        "931": [0, 0.68333, 0, 0],
+        "933": [0, 0.68333, 0, 0],
+        "934": [0, 0.68333, 0, 0],
+        "936": [0, 0.68333, 0, 0],
+        "937": [0, 0.68333, 0, 0],
+        "8211": [0, 0.43056, 0.02778, 0],
+        "8212": [0, 0.43056, 0.02778, 0],
+        "8216": [0, 0.69444, 0, 0],
+        "8217": [0, 0.69444, 0, 0],
+        "8220": [0, 0.69444, 0, 0],
+        "8221": [0, 0.69444, 0, 0],
+        "8224": [0.19444, 0.69444, 0, 0],
+        "8225": [0.19444, 0.69444, 0, 0],
+        "8230": [0, 0.12, 0, 0],
+        "8242": [0, 0.55556, 0, 0],
+        "8407": [0, 0.71444, 0.15382, 0],
+        "8463": [0, 0.68889, 0, 0],
+        "8465": [0, 0.69444, 0, 0],
+        "8467": [0, 0.69444, 0, 0.11111],
+        "8472": [0.19444, 0.43056, 0, 0.11111],
+        "8476": [0, 0.69444, 0, 0],
+        "8501": [0, 0.69444, 0, 0],
+        "8592": [-0.13313, 0.36687, 0, 0],
+        "8593": [0.19444, 0.69444, 0, 0],
+        "8594": [-0.13313, 0.36687, 0, 0],
+        "8595": [0.19444, 0.69444, 0, 0],
+        "8596": [-0.13313, 0.36687, 0, 0],
+        "8597": [0.25, 0.75, 0, 0],
+        "8598": [0.19444, 0.69444, 0, 0],
+        "8599": [0.19444, 0.69444, 0, 0],
+        "8600": [0.19444, 0.69444, 0, 0],
+        "8601": [0.19444, 0.69444, 0, 0],
+        "8614": [0.011, 0.511, 0, 0],
+        "8617": [0.011, 0.511, 0, 0],
+        "8618": [0.011, 0.511, 0, 0],
+        "8636": [-0.13313, 0.36687, 0, 0],
+        "8637": [-0.13313, 0.36687, 0, 0],
+        "8640": [-0.13313, 0.36687, 0, 0],
+        "8641": [-0.13313, 0.36687, 0, 0],
+        "8652": [0.011, 0.671, 0, 0],
+        "8656": [-0.13313, 0.36687, 0, 0],
+        "8657": [0.19444, 0.69444, 0, 0],
+        "8658": [-0.13313, 0.36687, 0, 0],
+        "8659": [0.19444, 0.69444, 0, 0],
+        "8660": [-0.13313, 0.36687, 0, 0],
+        "8661": [0.25, 0.75, 0, 0],
+        "8704": [0, 0.69444, 0, 0],
+        "8706": [0, 0.69444, 0.05556, 0.08334],
+        "8707": [0, 0.69444, 0, 0],
+        "8709": [0.05556, 0.75, 0, 0],
+        "8711": [0, 0.68333, 0, 0],
+        "8712": [0.0391, 0.5391, 0, 0],
+        "8715": [0.0391, 0.5391, 0, 0],
+        "8722": [0.08333, 0.58333, 0, 0],
+        "8723": [0.08333, 0.58333, 0, 0],
+        "8725": [0.25, 0.75, 0, 0],
+        "8726": [0.25, 0.75, 0, 0],
+        "8727": [-0.03472, 0.46528, 0, 0],
+        "8728": [-0.05555, 0.44445, 0, 0],
+        "8729": [-0.05555, 0.44445, 0, 0],
+        "8730": [0.2, 0.8, 0, 0],
+        "8733": [0, 0.43056, 0, 0],
+        "8734": [0, 0.43056, 0, 0],
+        "8736": [0, 0.69224, 0, 0],
+        "8739": [0.25, 0.75, 0, 0],
+        "8741": [0.25, 0.75, 0, 0],
+        "8743": [0, 0.55556, 0, 0],
+        "8744": [0, 0.55556, 0, 0],
+        "8745": [0, 0.55556, 0, 0],
+        "8746": [0, 0.55556, 0, 0],
+        "8747": [0.19444, 0.69444, 0.11111, 0],
+        "8764": [-0.13313, 0.36687, 0, 0],
+        "8768": [0.19444, 0.69444, 0, 0],
+        "8771": [-0.03625, 0.46375, 0, 0],
+        "8773": [-0.022, 0.589, 0, 0],
+        "8776": [-0.01688, 0.48312, 0, 0],
+        "8781": [-0.03625, 0.46375, 0, 0],
+        "8784": [-0.133, 0.67, 0, 0],
+        "8800": [0.215, 0.716, 0, 0],
+        "8801": [-0.03625, 0.46375, 0, 0],
+        "8804": [0.13597, 0.63597, 0, 0],
+        "8805": [0.13597, 0.63597, 0, 0],
+        "8810": [0.0391, 0.5391, 0, 0],
+        "8811": [0.0391, 0.5391, 0, 0],
+        "8826": [0.0391, 0.5391, 0, 0],
+        "8827": [0.0391, 0.5391, 0, 0],
+        "8834": [0.0391, 0.5391, 0, 0],
+        "8835": [0.0391, 0.5391, 0, 0],
+        "8838": [0.13597, 0.63597, 0, 0],
+        "8839": [0.13597, 0.63597, 0, 0],
+        "8846": [0, 0.55556, 0, 0],
+        "8849": [0.13597, 0.63597, 0, 0],
+        "8850": [0.13597, 0.63597, 0, 0],
+        "8851": [0, 0.55556, 0, 0],
+        "8852": [0, 0.55556, 0, 0],
+        "8853": [0.08333, 0.58333, 0, 0],
+        "8854": [0.08333, 0.58333, 0, 0],
+        "8855": [0.08333, 0.58333, 0, 0],
+        "8856": [0.08333, 0.58333, 0, 0],
+        "8857": [0.08333, 0.58333, 0, 0],
+        "8866": [0, 0.69444, 0, 0],
+        "8867": [0, 0.69444, 0, 0],
+        "8868": [0, 0.69444, 0, 0],
+        "8869": [0, 0.69444, 0, 0],
+        "8872": [0.249, 0.75, 0, 0],
+        "8900": [-0.05555, 0.44445, 0, 0],
+        "8901": [-0.05555, 0.44445, 0, 0],
+        "8902": [-0.03472, 0.46528, 0, 0],
+        "8904": [0.005, 0.505, 0, 0],
+        "8942": [0.03, 0.9, 0, 0],
+        "8943": [-0.19, 0.31, 0, 0],
+        "8945": [-0.1, 0.82, 0, 0],
+        "8968": [0.25, 0.75, 0, 0],
+        "8969": [0.25, 0.75, 0, 0],
+        "8970": [0.25, 0.75, 0, 0],
+        "8971": [0.25, 0.75, 0, 0],
+        "8994": [-0.14236, 0.35764, 0, 0],
+        "8995": [-0.14236, 0.35764, 0, 0],
+        "9136": [0.244, 0.744, 0, 0],
+        "9137": [0.244, 0.744, 0, 0],
+        "9651": [0.19444, 0.69444, 0, 0],
+        "9657": [-0.03472, 0.46528, 0, 0],
+        "9661": [0.19444, 0.69444, 0, 0],
+        "9667": [-0.03472, 0.46528, 0, 0],
+        "9711": [0.19444, 0.69444, 0, 0],
+        "9824": [0.12963, 0.69444, 0, 0],
+        "9825": [0.12963, 0.69444, 0, 0],
+        "9826": [0.12963, 0.69444, 0, 0],
+        "9827": [0.12963, 0.69444, 0, 0],
+        "9837": [0, 0.75, 0, 0],
+        "9838": [0.19444, 0.69444, 0, 0],
+        "9839": [0.19444, 0.69444, 0, 0],
+        "10216": [0.25, 0.75, 0, 0],
+        "10217": [0.25, 0.75, 0, 0],
+        "10222": [0.244, 0.744, 0, 0],
+        "10223": [0.244, 0.744, 0, 0],
+        "10229": [0.011, 0.511, 0, 0],
+        "10230": [0.011, 0.511, 0, 0],
+        "10231": [0.011, 0.511, 0, 0],
+        "10232": [0.024, 0.525, 0, 0],
+        "10233": [0.024, 0.525, 0, 0],
+        "10234": [0.024, 0.525, 0, 0],
+        "10236": [0.011, 0.511, 0, 0],
+        "10815": [0, 0.68333, 0, 0],
+        "10927": [0.13597, 0.63597, 0, 0],
+        "10928": [0.13597, 0.63597, 0, 0],
+    },
+    "Math-BoldItalic": {
+        "47": [0.19444, 0.69444, 0, 0],
+        "65": [0, 0.68611, 0, 0],
+        "66": [0, 0.68611, 0.04835, 0],
+        "67": [0, 0.68611, 0.06979, 0],
+        "68": [0, 0.68611, 0.03194, 0],
+        "69": [0, 0.68611, 0.05451, 0],
+        "70": [0, 0.68611, 0.15972, 0],
+        "71": [0, 0.68611, 0, 0],
+        "72": [0, 0.68611, 0.08229, 0],
+        "73": [0, 0.68611, 0.07778, 0],
+        "74": [0, 0.68611, 0.10069, 0],
+        "75": [0, 0.68611, 0.06979, 0],
+        "76": [0, 0.68611, 0, 0],
+        "77": [0, 0.68611, 0.11424, 0],
+        "78": [0, 0.68611, 0.11424, 0],
+        "79": [0, 0.68611, 0.03194, 0],
+        "80": [0, 0.68611, 0.15972, 0],
+        "81": [0.19444, 0.68611, 0, 0],
+        "82": [0, 0.68611, 0.00421, 0],
+        "83": [0, 0.68611, 0.05382, 0],
+        "84": [0, 0.68611, 0.15972, 0],
+        "85": [0, 0.68611, 0.11424, 0],
+        "86": [0, 0.68611, 0.25555, 0],
+        "87": [0, 0.68611, 0.15972, 0],
+        "88": [0, 0.68611, 0.07778, 0],
+        "89": [0, 0.68611, 0.25555, 0],
+        "90": [0, 0.68611, 0.06979, 0],
+        "97": [0, 0.44444, 0, 0],
+        "98": [0, 0.69444, 0, 0],
+        "99": [0, 0.44444, 0, 0],
+        "100": [0, 0.69444, 0, 0],
+        "101": [0, 0.44444, 0, 0],
+        "102": [0.19444, 0.69444, 0.11042, 0],
+        "103": [0.19444, 0.44444, 0.03704, 0],
+        "104": [0, 0.69444, 0, 0],
+        "105": [0, 0.69326, 0, 0],
+        "106": [0.19444, 0.69326, 0.0622, 0],
+        "107": [0, 0.69444, 0.01852, 0],
+        "108": [0, 0.69444, 0.0088, 0],
+        "109": [0, 0.44444, 0, 0],
+        "110": [0, 0.44444, 0, 0],
+        "111": [0, 0.44444, 0, 0],
+        "112": [0.19444, 0.44444, 0, 0],
+        "113": [0.19444, 0.44444, 0.03704, 0],
+        "114": [0, 0.44444, 0.03194, 0],
+        "115": [0, 0.44444, 0, 0],
+        "116": [0, 0.63492, 0, 0],
+        "117": [0, 0.44444, 0, 0],
+        "118": [0, 0.44444, 0.03704, 0],
+        "119": [0, 0.44444, 0.02778, 0],
+        "120": [0, 0.44444, 0, 0],
+        "121": [0.19444, 0.44444, 0.03704, 0],
+        "122": [0, 0.44444, 0.04213, 0],
+        "915": [0, 0.68611, 0.15972, 0],
+        "916": [0, 0.68611, 0, 0],
+        "920": [0, 0.68611, 0.03194, 0],
+        "923": [0, 0.68611, 0, 0],
+        "926": [0, 0.68611, 0.07458, 0],
+        "928": [0, 0.68611, 0.08229, 0],
+        "931": [0, 0.68611, 0.05451, 0],
+        "933": [0, 0.68611, 0.15972, 0],
+        "934": [0, 0.68611, 0, 0],
+        "936": [0, 0.68611, 0.11653, 0],
+        "937": [0, 0.68611, 0.04835, 0],
+        "945": [0, 0.44444, 0, 0],
+        "946": [0.19444, 0.69444, 0.03403, 0],
+        "947": [0.19444, 0.44444, 0.06389, 0],
+        "948": [0, 0.69444, 0.03819, 0],
+        "949": [0, 0.44444, 0, 0],
+        "950": [0.19444, 0.69444, 0.06215, 0],
+        "951": [0.19444, 0.44444, 0.03704, 0],
+        "952": [0, 0.69444, 0.03194, 0],
+        "953": [0, 0.44444, 0, 0],
+        "954": [0, 0.44444, 0, 0],
+        "955": [0, 0.69444, 0, 0],
+        "956": [0.19444, 0.44444, 0, 0],
+        "957": [0, 0.44444, 0.06898, 0],
+        "958": [0.19444, 0.69444, 0.03021, 0],
+        "959": [0, 0.44444, 0, 0],
+        "960": [0, 0.44444, 0.03704, 0],
+        "961": [0.19444, 0.44444, 0, 0],
+        "962": [0.09722, 0.44444, 0.07917, 0],
+        "963": [0, 0.44444, 0.03704, 0],
+        "964": [0, 0.44444, 0.13472, 0],
+        "965": [0, 0.44444, 0.03704, 0],
+        "966": [0.19444, 0.44444, 0, 0],
+        "967": [0.19444, 0.44444, 0, 0],
+        "968": [0.19444, 0.69444, 0.03704, 0],
+        "969": [0, 0.44444, 0.03704, 0],
+        "977": [0, 0.69444, 0, 0],
+        "981": [0.19444, 0.69444, 0, 0],
+        "982": [0, 0.44444, 0.03194, 0],
+        "1009": [0.19444, 0.44444, 0, 0],
+        "1013": [0, 0.44444, 0, 0],
+    },
+    "Math-Italic": {
+        "47": [0.19444, 0.69444, 0, 0],
+        "65": [0, 0.68333, 0, 0.13889],
+        "66": [0, 0.68333, 0.05017, 0.08334],
+        "67": [0, 0.68333, 0.07153, 0.08334],
+        "68": [0, 0.68333, 0.02778, 0.05556],
+        "69": [0, 0.68333, 0.05764, 0.08334],
+        "70": [0, 0.68333, 0.13889, 0.08334],
+        "71": [0, 0.68333, 0, 0.08334],
+        "72": [0, 0.68333, 0.08125, 0.05556],
+        "73": [0, 0.68333, 0.07847, 0.11111],
+        "74": [0, 0.68333, 0.09618, 0.16667],
+        "75": [0, 0.68333, 0.07153, 0.05556],
+        "76": [0, 0.68333, 0, 0.02778],
+        "77": [0, 0.68333, 0.10903, 0.08334],
+        "78": [0, 0.68333, 0.10903, 0.08334],
+        "79": [0, 0.68333, 0.02778, 0.08334],
+        "80": [0, 0.68333, 0.13889, 0.08334],
+        "81": [0.19444, 0.68333, 0, 0.08334],
+        "82": [0, 0.68333, 0.00773, 0.08334],
+        "83": [0, 0.68333, 0.05764, 0.08334],
+        "84": [0, 0.68333, 0.13889, 0.08334],
+        "85": [0, 0.68333, 0.10903, 0.02778],
+        "86": [0, 0.68333, 0.22222, 0],
+        "87": [0, 0.68333, 0.13889, 0],
+        "88": [0, 0.68333, 0.07847, 0.08334],
+        "89": [0, 0.68333, 0.22222, 0],
+        "90": [0, 0.68333, 0.07153, 0.08334],
+        "97": [0, 0.43056, 0, 0],
+        "98": [0, 0.69444, 0, 0],
+        "99": [0, 0.43056, 0, 0.05556],
+        "100": [0, 0.69444, 0, 0.16667],
+        "101": [0, 0.43056, 0, 0.05556],
+        "102": [0.19444, 0.69444, 0.10764, 0.16667],
+        "103": [0.19444, 0.43056, 0.03588, 0.02778],
+        "104": [0, 0.69444, 0, 0],
+        "105": [0, 0.65952, 0, 0],
+        "106": [0.19444, 0.65952, 0.05724, 0],
+        "107": [0, 0.69444, 0.03148, 0],
+        "108": [0, 0.69444, 0.01968, 0.08334],
+        "109": [0, 0.43056, 0, 0],
+        "110": [0, 0.43056, 0, 0],
+        "111": [0, 0.43056, 0, 0.05556],
+        "112": [0.19444, 0.43056, 0, 0.08334],
+        "113": [0.19444, 0.43056, 0.03588, 0.08334],
+        "114": [0, 0.43056, 0.02778, 0.05556],
+        "115": [0, 0.43056, 0, 0.05556],
+        "116": [0, 0.61508, 0, 0.08334],
+        "117": [0, 0.43056, 0, 0.02778],
+        "118": [0, 0.43056, 0.03588, 0.02778],
+        "119": [0, 0.43056, 0.02691, 0.08334],
+        "120": [0, 0.43056, 0, 0.02778],
+        "121": [0.19444, 0.43056, 0.03588, 0.05556],
+        "122": [0, 0.43056, 0.04398, 0.05556],
+        "915": [0, 0.68333, 0.13889, 0.08334],
+        "916": [0, 0.68333, 0, 0.16667],
+        "920": [0, 0.68333, 0.02778, 0.08334],
+        "923": [0, 0.68333, 0, 0.16667],
+        "926": [0, 0.68333, 0.07569, 0.08334],
+        "928": [0, 0.68333, 0.08125, 0.05556],
+        "931": [0, 0.68333, 0.05764, 0.08334],
+        "933": [0, 0.68333, 0.13889, 0.05556],
+        "934": [0, 0.68333, 0, 0.08334],
+        "936": [0, 0.68333, 0.11, 0.05556],
+        "937": [0, 0.68333, 0.05017, 0.08334],
+        "945": [0, 0.43056, 0.0037, 0.02778],
+        "946": [0.19444, 0.69444, 0.05278, 0.08334],
+        "947": [0.19444, 0.43056, 0.05556, 0],
+        "948": [0, 0.69444, 0.03785, 0.05556],
+        "949": [0, 0.43056, 0, 0.08334],
+        "950": [0.19444, 0.69444, 0.07378, 0.08334],
+        "951": [0.19444, 0.43056, 0.03588, 0.05556],
+        "952": [0, 0.69444, 0.02778, 0.08334],
+        "953": [0, 0.43056, 0, 0.05556],
+        "954": [0, 0.43056, 0, 0],
+        "955": [0, 0.69444, 0, 0],
+        "956": [0.19444, 0.43056, 0, 0.02778],
+        "957": [0, 0.43056, 0.06366, 0.02778],
+        "958": [0.19444, 0.69444, 0.04601, 0.11111],
+        "959": [0, 0.43056, 0, 0.05556],
+        "960": [0, 0.43056, 0.03588, 0],
+        "961": [0.19444, 0.43056, 0, 0.08334],
+        "962": [0.09722, 0.43056, 0.07986, 0.08334],
+        "963": [0, 0.43056, 0.03588, 0],
+        "964": [0, 0.43056, 0.1132, 0.02778],
+        "965": [0, 0.43056, 0.03588, 0.02778],
+        "966": [0.19444, 0.43056, 0, 0.08334],
+        "967": [0.19444, 0.43056, 0, 0.05556],
+        "968": [0.19444, 0.69444, 0.03588, 0.11111],
+        "969": [0, 0.43056, 0.03588, 0],
+        "977": [0, 0.69444, 0, 0.08334],
+        "981": [0.19444, 0.69444, 0, 0.08334],
+        "982": [0, 0.43056, 0.02778, 0],
+        "1009": [0.19444, 0.43056, 0, 0.08334],
+        "1013": [0, 0.43056, 0, 0.05556],
+    },
+    "Math-Regular": {
+        "65": [0, 0.68333, 0, 0.13889],
+        "66": [0, 0.68333, 0.05017, 0.08334],
+        "67": [0, 0.68333, 0.07153, 0.08334],
+        "68": [0, 0.68333, 0.02778, 0.05556],
+        "69": [0, 0.68333, 0.05764, 0.08334],
+        "70": [0, 0.68333, 0.13889, 0.08334],
+        "71": [0, 0.68333, 0, 0.08334],
+        "72": [0, 0.68333, 0.08125, 0.05556],
+        "73": [0, 0.68333, 0.07847, 0.11111],
+        "74": [0, 0.68333, 0.09618, 0.16667],
+        "75": [0, 0.68333, 0.07153, 0.05556],
+        "76": [0, 0.68333, 0, 0.02778],
+        "77": [0, 0.68333, 0.10903, 0.08334],
+        "78": [0, 0.68333, 0.10903, 0.08334],
+        "79": [0, 0.68333, 0.02778, 0.08334],
+        "80": [0, 0.68333, 0.13889, 0.08334],
+        "81": [0.19444, 0.68333, 0, 0.08334],
+        "82": [0, 0.68333, 0.00773, 0.08334],
+        "83": [0, 0.68333, 0.05764, 0.08334],
+        "84": [0, 0.68333, 0.13889, 0.08334],
+        "85": [0, 0.68333, 0.10903, 0.02778],
+        "86": [0, 0.68333, 0.22222, 0],
+        "87": [0, 0.68333, 0.13889, 0],
+        "88": [0, 0.68333, 0.07847, 0.08334],
+        "89": [0, 0.68333, 0.22222, 0],
+        "90": [0, 0.68333, 0.07153, 0.08334],
+        "97": [0, 0.43056, 0, 0],
+        "98": [0, 0.69444, 0, 0],
+        "99": [0, 0.43056, 0, 0.05556],
+        "100": [0, 0.69444, 0, 0.16667],
+        "101": [0, 0.43056, 0, 0.05556],
+        "102": [0.19444, 0.69444, 0.10764, 0.16667],
+        "103": [0.19444, 0.43056, 0.03588, 0.02778],
+        "104": [0, 0.69444, 0, 0],
+        "105": [0, 0.65952, 0, 0],
+        "106": [0.19444, 0.65952, 0.05724, 0],
+        "107": [0, 0.69444, 0.03148, 0],
+        "108": [0, 0.69444, 0.01968, 0.08334],
+        "109": [0, 0.43056, 0, 0],
+        "110": [0, 0.43056, 0, 0],
+        "111": [0, 0.43056, 0, 0.05556],
+        "112": [0.19444, 0.43056, 0, 0.08334],
+        "113": [0.19444, 0.43056, 0.03588, 0.08334],
+        "114": [0, 0.43056, 0.02778, 0.05556],
+        "115": [0, 0.43056, 0, 0.05556],
+        "116": [0, 0.61508, 0, 0.08334],
+        "117": [0, 0.43056, 0, 0.02778],
+        "118": [0, 0.43056, 0.03588, 0.02778],
+        "119": [0, 0.43056, 0.02691, 0.08334],
+        "120": [0, 0.43056, 0, 0.02778],
+        "121": [0.19444, 0.43056, 0.03588, 0.05556],
+        "122": [0, 0.43056, 0.04398, 0.05556],
+        "915": [0, 0.68333, 0.13889, 0.08334],
+        "916": [0, 0.68333, 0, 0.16667],
+        "920": [0, 0.68333, 0.02778, 0.08334],
+        "923": [0, 0.68333, 0, 0.16667],
+        "926": [0, 0.68333, 0.07569, 0.08334],
+        "928": [0, 0.68333, 0.08125, 0.05556],
+        "931": [0, 0.68333, 0.05764, 0.08334],
+        "933": [0, 0.68333, 0.13889, 0.05556],
+        "934": [0, 0.68333, 0, 0.08334],
+        "936": [0, 0.68333, 0.11, 0.05556],
+        "937": [0, 0.68333, 0.05017, 0.08334],
+        "945": [0, 0.43056, 0.0037, 0.02778],
+        "946": [0.19444, 0.69444, 0.05278, 0.08334],
+        "947": [0.19444, 0.43056, 0.05556, 0],
+        "948": [0, 0.69444, 0.03785, 0.05556],
+        "949": [0, 0.43056, 0, 0.08334],
+        "950": [0.19444, 0.69444, 0.07378, 0.08334],
+        "951": [0.19444, 0.43056, 0.03588, 0.05556],
+        "952": [0, 0.69444, 0.02778, 0.08334],
+        "953": [0, 0.43056, 0, 0.05556],
+        "954": [0, 0.43056, 0, 0],
+        "955": [0, 0.69444, 0, 0],
+        "956": [0.19444, 0.43056, 0, 0.02778],
+        "957": [0, 0.43056, 0.06366, 0.02778],
+        "958": [0.19444, 0.69444, 0.04601, 0.11111],
+        "959": [0, 0.43056, 0, 0.05556],
+        "960": [0, 0.43056, 0.03588, 0],
+        "961": [0.19444, 0.43056, 0, 0.08334],
+        "962": [0.09722, 0.43056, 0.07986, 0.08334],
+        "963": [0, 0.43056, 0.03588, 0],
+        "964": [0, 0.43056, 0.1132, 0.02778],
+        "965": [0, 0.43056, 0.03588, 0.02778],
+        "966": [0.19444, 0.43056, 0, 0.08334],
+        "967": [0.19444, 0.43056, 0, 0.05556],
+        "968": [0.19444, 0.69444, 0.03588, 0.11111],
+        "969": [0, 0.43056, 0.03588, 0],
+        "977": [0, 0.69444, 0, 0.08334],
+        "981": [0.19444, 0.69444, 0, 0.08334],
+        "982": [0, 0.43056, 0.02778, 0],
+        "1009": [0.19444, 0.43056, 0, 0.08334],
+        "1013": [0, 0.43056, 0, 0.05556],
+    },
+    "SansSerif-Regular": {
+        "33": [0, 0.69444, 0, 0],
+        "34": [0, 0.69444, 0, 0],
+        "35": [0.19444, 0.69444, 0, 0],
+        "36": [0.05556, 0.75, 0, 0],
+        "37": [0.05556, 0.75, 0, 0],
+        "38": [0, 0.69444, 0, 0],
+        "39": [0, 0.69444, 0, 0],
+        "40": [0.25, 0.75, 0, 0],
+        "41": [0.25, 0.75, 0, 0],
+        "42": [0, 0.75, 0, 0],
+        "43": [0.08333, 0.58333, 0, 0],
+        "44": [0.125, 0.08333, 0, 0],
+        "45": [0, 0.44444, 0, 0],
+        "46": [0, 0.08333, 0, 0],
+        "47": [0.25, 0.75, 0, 0],
+        "48": [0, 0.65556, 0, 0],
+        "49": [0, 0.65556, 0, 0],
+        "50": [0, 0.65556, 0, 0],
+        "51": [0, 0.65556, 0, 0],
+        "52": [0, 0.65556, 0, 0],
+        "53": [0, 0.65556, 0, 0],
+        "54": [0, 0.65556, 0, 0],
+        "55": [0, 0.65556, 0, 0],
+        "56": [0, 0.65556, 0, 0],
+        "57": [0, 0.65556, 0, 0],
+        "58": [0, 0.44444, 0, 0],
+        "59": [0.125, 0.44444, 0, 0],
+        "61": [-0.13, 0.37, 0, 0],
+        "63": [0, 0.69444, 0, 0],
+        "64": [0, 0.69444, 0, 0],
+        "65": [0, 0.69444, 0, 0],
+        "66": [0, 0.69444, 0, 0],
+        "67": [0, 0.69444, 0, 0],
+        "68": [0, 0.69444, 0, 0],
+        "69": [0, 0.69444, 0, 0],
+        "70": [0, 0.69444, 0, 0],
+        "71": [0, 0.69444, 0, 0],
+        "72": [0, 0.69444, 0, 0],
+        "73": [0, 0.69444, 0, 0],
+        "74": [0, 0.69444, 0, 0],
+        "75": [0, 0.69444, 0, 0],
+        "76": [0, 0.69444, 0, 0],
+        "77": [0, 0.69444, 0, 0],
+        "78": [0, 0.69444, 0, 0],
+        "79": [0, 0.69444, 0, 0],
+        "80": [0, 0.69444, 0, 0],
+        "81": [0.125, 0.69444, 0, 0],
+        "82": [0, 0.69444, 0, 0],
+        "83": [0, 0.69444, 0, 0],
+        "84": [0, 0.69444, 0, 0],
+        "85": [0, 0.69444, 0, 0],
+        "86": [0, 0.69444, 0.01389, 0],
+        "87": [0, 0.69444, 0.01389, 0],
+        "88": [0, 0.69444, 0, 0],
+        "89": [0, 0.69444, 0.025, 0],
+        "90": [0, 0.69444, 0, 0],
+        "91": [0.25, 0.75, 0, 0],
+        "93": [0.25, 0.75, 0, 0],
+        "94": [0, 0.69444, 0, 0],
+        "95": [0.35, 0.09444, 0.02778, 0],
+        "97": [0, 0.44444, 0, 0],
+        "98": [0, 0.69444, 0, 0],
+        "99": [0, 0.44444, 0, 0],
+        "100": [0, 0.69444, 0, 0],
+        "101": [0, 0.44444, 0, 0],
+        "102": [0, 0.69444, 0.06944, 0],
+        "103": [0.19444, 0.44444, 0.01389, 0],
+        "104": [0, 0.69444, 0, 0],
+        "105": [0, 0.67937, 0, 0],
+        "106": [0.19444, 0.67937, 0, 0],
+        "107": [0, 0.69444, 0, 0],
+        "108": [0, 0.69444, 0, 0],
+        "109": [0, 0.44444, 0, 0],
+        "110": [0, 0.44444, 0, 0],
+        "111": [0, 0.44444, 0, 0],
+        "112": [0.19444, 0.44444, 0, 0],
+        "113": [0.19444, 0.44444, 0, 0],
+        "114": [0, 0.44444, 0.01389, 0],
+        "115": [0, 0.44444, 0, 0],
+        "116": [0, 0.57143, 0, 0],
+        "117": [0, 0.44444, 0, 0],
+        "118": [0, 0.44444, 0.01389, 0],
+        "119": [0, 0.44444, 0.01389, 0],
+        "120": [0, 0.44444, 0, 0],
+        "121": [0.19444, 0.44444, 0.01389, 0],
+        "122": [0, 0.44444, 0, 0],
+        "126": [0.35, 0.32659, 0, 0],
+        "305": [0, 0.44444, 0, 0],
+        "567": [0.19444, 0.44444, 0, 0],
+        "768": [0, 0.69444, 0, 0],
+        "769": [0, 0.69444, 0, 0],
+        "770": [0, 0.69444, 0, 0],
+        "771": [0, 0.67659, 0, 0],
+        "772": [0, 0.60889, 0, 0],
+        "774": [0, 0.69444, 0, 0],
+        "775": [0, 0.67937, 0, 0],
+        "776": [0, 0.67937, 0, 0],
+        "778": [0, 0.69444, 0, 0],
+        "779": [0, 0.69444, 0, 0],
+        "780": [0, 0.63194, 0, 0],
+        "915": [0, 0.69444, 0, 0],
+        "916": [0, 0.69444, 0, 0],
+        "920": [0, 0.69444, 0, 0],
+        "923": [0, 0.69444, 0, 0],
+        "926": [0, 0.69444, 0, 0],
+        "928": [0, 0.69444, 0, 0],
+        "931": [0, 0.69444, 0, 0],
+        "933": [0, 0.69444, 0, 0],
+        "934": [0, 0.69444, 0, 0],
+        "936": [0, 0.69444, 0, 0],
+        "937": [0, 0.69444, 0, 0],
+        "8211": [0, 0.44444, 0.02778, 0],
+        "8212": [0, 0.44444, 0.02778, 0],
+        "8216": [0, 0.69444, 0, 0],
+        "8217": [0, 0.69444, 0, 0],
+        "8220": [0, 0.69444, 0, 0],
+        "8221": [0, 0.69444, 0, 0],
+    },
+    "Script-Regular": {
+        "65": [0, 0.7, 0.22925, 0],
+        "66": [0, 0.7, 0.04087, 0],
+        "67": [0, 0.7, 0.1689, 0],
+        "68": [0, 0.7, 0.09371, 0],
+        "69": [0, 0.7, 0.18583, 0],
+        "70": [0, 0.7, 0.13634, 0],
+        "71": [0, 0.7, 0.17322, 0],
+        "72": [0, 0.7, 0.29694, 0],
+        "73": [0, 0.7, 0.19189, 0],
+        "74": [0.27778, 0.7, 0.19189, 0],
+        "75": [0, 0.7, 0.31259, 0],
+        "76": [0, 0.7, 0.19189, 0],
+        "77": [0, 0.7, 0.15981, 0],
+        "78": [0, 0.7, 0.3525, 0],
+        "79": [0, 0.7, 0.08078, 0],
+        "80": [0, 0.7, 0.08078, 0],
+        "81": [0, 0.7, 0.03305, 0],
+        "82": [0, 0.7, 0.06259, 0],
+        "83": [0, 0.7, 0.19189, 0],
+        "84": [0, 0.7, 0.29087, 0],
+        "85": [0, 0.7, 0.25815, 0],
+        "86": [0, 0.7, 0.27523, 0],
+        "87": [0, 0.7, 0.27523, 0],
+        "88": [0, 0.7, 0.26006, 0],
+        "89": [0, 0.7, 0.2939, 0],
+        "90": [0, 0.7, 0.24037, 0],
+    },
+    "Size1-Regular": {
+        "40": [0.35001, 0.85, 0, 0],
+        "41": [0.35001, 0.85, 0, 0],
+        "47": [0.35001, 0.85, 0, 0],
+        "91": [0.35001, 0.85, 0, 0],
+        "92": [0.35001, 0.85, 0, 0],
+        "93": [0.35001, 0.85, 0, 0],
+        "123": [0.35001, 0.85, 0, 0],
+        "125": [0.35001, 0.85, 0, 0],
+        "710": [0, 0.72222, 0, 0],
+        "732": [0, 0.72222, 0, 0],
+        "770": [0, 0.72222, 0, 0],
+        "771": [0, 0.72222, 0, 0],
+        "8214": [-0.00099, 0.601, 0, 0],
+        "8593": [1e-05, 0.6, 0, 0],
+        "8595": [1e-05, 0.6, 0, 0],
+        "8657": [1e-05, 0.6, 0, 0],
+        "8659": [1e-05, 0.6, 0, 0],
+        "8719": [0.25001, 0.75, 0, 0],
+        "8720": [0.25001, 0.75, 0, 0],
+        "8721": [0.25001, 0.75, 0, 0],
+        "8730": [0.35001, 0.85, 0, 0],
+        "8739": [-0.00599, 0.606, 0, 0],
+        "8741": [-0.00599, 0.606, 0, 0],
+        "8747": [0.30612, 0.805, 0.19445, 0],
+        "8748": [0.306, 0.805, 0.19445, 0],
+        "8749": [0.306, 0.805, 0.19445, 0],
+        "8750": [0.30612, 0.805, 0.19445, 0],
+        "8896": [0.25001, 0.75, 0, 0],
+        "8897": [0.25001, 0.75, 0, 0],
+        "8898": [0.25001, 0.75, 0, 0],
+        "8899": [0.25001, 0.75, 0, 0],
+        "8968": [0.35001, 0.85, 0, 0],
+        "8969": [0.35001, 0.85, 0, 0],
+        "8970": [0.35001, 0.85, 0, 0],
+        "8971": [0.35001, 0.85, 0, 0],
+        "9168": [-0.00099, 0.601, 0, 0],
+        "10216": [0.35001, 0.85, 0, 0],
+        "10217": [0.35001, 0.85, 0, 0],
+        "10752": [0.25001, 0.75, 0, 0],
+        "10753": [0.25001, 0.75, 0, 0],
+        "10754": [0.25001, 0.75, 0, 0],
+        "10756": [0.25001, 0.75, 0, 0],
+        "10758": [0.25001, 0.75, 0, 0],
+    },
+    "Size2-Regular": {
+        "40": [0.65002, 1.15, 0, 0],
+        "41": [0.65002, 1.15, 0, 0],
+        "47": [0.65002, 1.15, 0, 0],
+        "91": [0.65002, 1.15, 0, 0],
+        "92": [0.65002, 1.15, 0, 0],
+        "93": [0.65002, 1.15, 0, 0],
+        "123": [0.65002, 1.15, 0, 0],
+        "125": [0.65002, 1.15, 0, 0],
+        "710": [0, 0.75, 0, 0],
+        "732": [0, 0.75, 0, 0],
+        "770": [0, 0.75, 0, 0],
+        "771": [0, 0.75, 0, 0],
+        "8719": [0.55001, 1.05, 0, 0],
+        "8720": [0.55001, 1.05, 0, 0],
+        "8721": [0.55001, 1.05, 0, 0],
+        "8730": [0.65002, 1.15, 0, 0],
+        "8747": [0.86225, 1.36, 0.44445, 0],
+        "8748": [0.862, 1.36, 0.44445, 0],
+        "8749": [0.862, 1.36, 0.44445, 0],
+        "8750": [0.86225, 1.36, 0.44445, 0],
+        "8896": [0.55001, 1.05, 0, 0],
+        "8897": [0.55001, 1.05, 0, 0],
+        "8898": [0.55001, 1.05, 0, 0],
+        "8899": [0.55001, 1.05, 0, 0],
+        "8968": [0.65002, 1.15, 0, 0],
+        "8969": [0.65002, 1.15, 0, 0],
+        "8970": [0.65002, 1.15, 0, 0],
+        "8971": [0.65002, 1.15, 0, 0],
+        "10216": [0.65002, 1.15, 0, 0],
+        "10217": [0.65002, 1.15, 0, 0],
+        "10752": [0.55001, 1.05, 0, 0],
+        "10753": [0.55001, 1.05, 0, 0],
+        "10754": [0.55001, 1.05, 0, 0],
+        "10756": [0.55001, 1.05, 0, 0],
+        "10758": [0.55001, 1.05, 0, 0],
+    },
+    "Size3-Regular": {
+        "40": [0.95003, 1.45, 0, 0],
+        "41": [0.95003, 1.45, 0, 0],
+        "47": [0.95003, 1.45, 0, 0],
+        "91": [0.95003, 1.45, 0, 0],
+        "92": [0.95003, 1.45, 0, 0],
+        "93": [0.95003, 1.45, 0, 0],
+        "123": [0.95003, 1.45, 0, 0],
+        "125": [0.95003, 1.45, 0, 0],
+        "710": [0, 0.75, 0, 0],
+        "732": [0, 0.75, 0, 0],
+        "770": [0, 0.75, 0, 0],
+        "771": [0, 0.75, 0, 0],
+        "8730": [0.95003, 1.45, 0, 0],
+        "8968": [0.95003, 1.45, 0, 0],
+        "8969": [0.95003, 1.45, 0, 0],
+        "8970": [0.95003, 1.45, 0, 0],
+        "8971": [0.95003, 1.45, 0, 0],
+        "10216": [0.95003, 1.45, 0, 0],
+        "10217": [0.95003, 1.45, 0, 0],
+    },
+    "Size4-Regular": {
+        "40": [1.25003, 1.75, 0, 0],
+        "41": [1.25003, 1.75, 0, 0],
+        "47": [1.25003, 1.75, 0, 0],
+        "91": [1.25003, 1.75, 0, 0],
+        "92": [1.25003, 1.75, 0, 0],
+        "93": [1.25003, 1.75, 0, 0],
+        "123": [1.25003, 1.75, 0, 0],
+        "125": [1.25003, 1.75, 0, 0],
+        "710": [0, 0.825, 0, 0],
+        "732": [0, 0.825, 0, 0],
+        "770": [0, 0.825, 0, 0],
+        "771": [0, 0.825, 0, 0],
+        "8730": [1.25003, 1.75, 0, 0],
+        "8968": [1.25003, 1.75, 0, 0],
+        "8969": [1.25003, 1.75, 0, 0],
+        "8970": [1.25003, 1.75, 0, 0],
+        "8971": [1.25003, 1.75, 0, 0],
+        "9115": [0.64502, 1.155, 0, 0],
+        "9116": [1e-05, 0.6, 0, 0],
+        "9117": [0.64502, 1.155, 0, 0],
+        "9118": [0.64502, 1.155, 0, 0],
+        "9119": [1e-05, 0.6, 0, 0],
+        "9120": [0.64502, 1.155, 0, 0],
+        "9121": [0.64502, 1.155, 0, 0],
+        "9122": [-0.00099, 0.601, 0, 0],
+        "9123": [0.64502, 1.155, 0, 0],
+        "9124": [0.64502, 1.155, 0, 0],
+        "9125": [-0.00099, 0.601, 0, 0],
+        "9126": [0.64502, 1.155, 0, 0],
+        "9127": [1e-05, 0.9, 0, 0],
+        "9128": [0.65002, 1.15, 0, 0],
+        "9129": [0.90001, 0, 0, 0],
+        "9130": [0, 0.3, 0, 0],
+        "9131": [1e-05, 0.9, 0, 0],
+        "9132": [0.65002, 1.15, 0, 0],
+        "9133": [0.90001, 0, 0, 0],
+        "9143": [0.88502, 0.915, 0, 0],
+        "10216": [1.25003, 1.75, 0, 0],
+        "10217": [1.25003, 1.75, 0, 0],
+        "57344": [-0.00499, 0.605, 0, 0],
+        "57345": [-0.00499, 0.605, 0, 0],
+        "57680": [0, 0.12, 0, 0],
+        "57681": [0, 0.12, 0, 0],
+        "57682": [0, 0.12, 0, 0],
+        "57683": [0, 0.12, 0, 0],
+    },
+    "Typewriter-Regular": {
+        "33": [0, 0.61111, 0, 0],
+        "34": [0, 0.61111, 0, 0],
+        "35": [0, 0.61111, 0, 0],
+        "36": [0.08333, 0.69444, 0, 0],
+        "37": [0.08333, 0.69444, 0, 0],
+        "38": [0, 0.61111, 0, 0],
+        "39": [0, 0.61111, 0, 0],
+        "40": [0.08333, 0.69444, 0, 0],
+        "41": [0.08333, 0.69444, 0, 0],
+        "42": [0, 0.52083, 0, 0],
+        "43": [-0.08056, 0.53055, 0, 0],
+        "44": [0.13889, 0.125, 0, 0],
+        "45": [-0.08056, 0.53055, 0, 0],
+        "46": [0, 0.125, 0, 0],
+        "47": [0.08333, 0.69444, 0, 0],
+        "48": [0, 0.61111, 0, 0],
+        "49": [0, 0.61111, 0, 0],
+        "50": [0, 0.61111, 0, 0],
+        "51": [0, 0.61111, 0, 0],
+        "52": [0, 0.61111, 0, 0],
+        "53": [0, 0.61111, 0, 0],
+        "54": [0, 0.61111, 0, 0],
+        "55": [0, 0.61111, 0, 0],
+        "56": [0, 0.61111, 0, 0],
+        "57": [0, 0.61111, 0, 0],
+        "58": [0, 0.43056, 0, 0],
+        "59": [0.13889, 0.43056, 0, 0],
+        "60": [-0.05556, 0.55556, 0, 0],
+        "61": [-0.19549, 0.41562, 0, 0],
+        "62": [-0.05556, 0.55556, 0, 0],
+        "63": [0, 0.61111, 0, 0],
+        "64": [0, 0.61111, 0, 0],
+        "65": [0, 0.61111, 0, 0],
+        "66": [0, 0.61111, 0, 0],
+        "67": [0, 0.61111, 0, 0],
+        "68": [0, 0.61111, 0, 0],
+        "69": [0, 0.61111, 0, 0],
+        "70": [0, 0.61111, 0, 0],
+        "71": [0, 0.61111, 0, 0],
+        "72": [0, 0.61111, 0, 0],
+        "73": [0, 0.61111, 0, 0],
+        "74": [0, 0.61111, 0, 0],
+        "75": [0, 0.61111, 0, 0],
+        "76": [0, 0.61111, 0, 0],
+        "77": [0, 0.61111, 0, 0],
+        "78": [0, 0.61111, 0, 0],
+        "79": [0, 0.61111, 0, 0],
+        "80": [0, 0.61111, 0, 0],
+        "81": [0.13889, 0.61111, 0, 0],
+        "82": [0, 0.61111, 0, 0],
+        "83": [0, 0.61111, 0, 0],
+        "84": [0, 0.61111, 0, 0],
+        "85": [0, 0.61111, 0, 0],
+        "86": [0, 0.61111, 0, 0],
+        "87": [0, 0.61111, 0, 0],
+        "88": [0, 0.61111, 0, 0],
+        "89": [0, 0.61111, 0, 0],
+        "90": [0, 0.61111, 0, 0],
+        "91": [0.08333, 0.69444, 0, 0],
+        "92": [0.08333, 0.69444, 0, 0],
+        "93": [0.08333, 0.69444, 0, 0],
+        "94": [0, 0.61111, 0, 0],
+        "95": [0.09514, 0, 0, 0],
+        "96": [0, 0.61111, 0, 0],
+        "97": [0, 0.43056, 0, 0],
+        "98": [0, 0.61111, 0, 0],
+        "99": [0, 0.43056, 0, 0],
+        "100": [0, 0.61111, 0, 0],
+        "101": [0, 0.43056, 0, 0],
+        "102": [0, 0.61111, 0, 0],
+        "103": [0.22222, 0.43056, 0, 0],
+        "104": [0, 0.61111, 0, 0],
+        "105": [0, 0.61111, 0, 0],
+        "106": [0.22222, 0.61111, 0, 0],
+        "107": [0, 0.61111, 0, 0],
+        "108": [0, 0.61111, 0, 0],
+        "109": [0, 0.43056, 0, 0],
+        "110": [0, 0.43056, 0, 0],
+        "111": [0, 0.43056, 0, 0],
+        "112": [0.22222, 0.43056, 0, 0],
+        "113": [0.22222, 0.43056, 0, 0],
+        "114": [0, 0.43056, 0, 0],
+        "115": [0, 0.43056, 0, 0],
+        "116": [0, 0.55358, 0, 0],
+        "117": [0, 0.43056, 0, 0],
+        "118": [0, 0.43056, 0, 0],
+        "119": [0, 0.43056, 0, 0],
+        "120": [0, 0.43056, 0, 0],
+        "121": [0.22222, 0.43056, 0, 0],
+        "122": [0, 0.43056, 0, 0],
+        "123": [0.08333, 0.69444, 0, 0],
+        "124": [0.08333, 0.69444, 0, 0],
+        "125": [0.08333, 0.69444, 0, 0],
+        "126": [0, 0.61111, 0, 0],
+        "127": [0, 0.61111, 0, 0],
+        "305": [0, 0.43056, 0, 0],
+        "567": [0.22222, 0.43056, 0, 0],
+        "768": [0, 0.61111, 0, 0],
+        "769": [0, 0.61111, 0, 0],
+        "770": [0, 0.61111, 0, 0],
+        "771": [0, 0.61111, 0, 0],
+        "772": [0, 0.56555, 0, 0],
+        "774": [0, 0.61111, 0, 0],
+        "776": [0, 0.61111, 0, 0],
+        "778": [0, 0.61111, 0, 0],
+        "780": [0, 0.56597, 0, 0],
+        "915": [0, 0.61111, 0, 0],
+        "916": [0, 0.61111, 0, 0],
+        "920": [0, 0.61111, 0, 0],
+        "923": [0, 0.61111, 0, 0],
+        "926": [0, 0.61111, 0, 0],
+        "928": [0, 0.61111, 0, 0],
+        "931": [0, 0.61111, 0, 0],
+        "933": [0, 0.61111, 0, 0],
+        "934": [0, 0.61111, 0, 0],
+        "936": [0, 0.61111, 0, 0],
+        "937": [0, 0.61111, 0, 0],
+        "2018": [0, 0.61111, 0, 0],
+        "2019": [0, 0.61111, 0, 0],
+        "8242": [0, 0.61111, 0, 0],
+    },
+};
 
-},{}],29:[function(require,module,exports){
+},{}],31:[function(require,module,exports){
 var utils = require("./utils");
 var ParseError = require("./ParseError");
 
-// This file contains a list of functions that we parse. The functions map
-// contains the following data:
-
-/*
- * Keys are the name of the functions to parse
- * The data contains the following keys:
+/* This file contains a list of functions that we parse, identified by
+ * the calls to defineFunction.
+ *
+ * The first argument to defineFunction is a single name or a list of names.
+ * All functions named in such a list will share a single implementation.
+ *
+ * Each declared function can have associated properties, which
+ * include the following:
+ *
  *  - numArgs: The number of arguments the function takes.
+ *             If this is the only property, it can be passed as a number
+ *             instead of an element of a properties object.
  *  - argTypes: (optional) An array corresponding to each argument of the
  *              function, giving the type of argument that should be parsed. Its
  *              length should be equal to `numArgs + numOptionalArgs`. Valid
@@ -9520,135 +9964,174 @@ var ParseError = require("./ParseError");
  *                     should parse. If the optional arguments aren't found,
  *                     `null` will be passed to the handler in their place.
  *                     (default 0)
- *  - handler: The function that is called to handle this function and its
- *             arguments. The arguments are:
- *              - func: the text of the function
- *              - [args]: the next arguments are the arguments to the function,
- *                        of which there are numArgs of them
- *              - positions: the positions in the overall string of the function
- *                           and the arguments. Should only be used to produce
- *                           error messages
- *             The function should return an object with the following keys:
- *              - type: The type of element that this is. This is then used in
- *                      buildHTML/buildMathML to determine which function
- *                      should be called to build this node into a DOM node
- *             Any other data can be added to the object, which will be passed
- *             in to the function in buildHTML/buildMathML as `group.value`.
+ *
+ * The last argument is that implementation, the handler for the function(s).
+ * It is called to handle these functions and their arguments.
+ * It receives two arguments:
+ *  - context contains information and references provided by the parser
+ *  - args is an array of arguments obtained from TeX input
+ * The context contains the following properties:
+ *  - funcName: the text (i.e. name) of the function, including \
+ *  - parser: the parser object
+ *  - lexer: the lexer object
+ *  - positions: the positions in the overall string of the function
+ *               and the arguments.
+ * The latter three should only be used to produce error messages.
+ *
+ * The function should return an object with the following keys:
+ *  - type: The type of element that this is. This is then used in
+ *          buildHTML/buildMathML to determine which function
+ *          should be called to build this node into a DOM node
+ * Any other data can be added to the object, which will be passed
+ * in to the function in buildHTML/buildMathML as `group.value`.
  */
 
-var functions = {
-    // A normal square root
-    "\\sqrt": {
-        numArgs: 1,
-        numOptionalArgs: 1,
-        handler: function(func, index, body, positions) {
-            return {
-                type: "sqrt",
-                body: body,
-                index: index
-            };
-        }
-    },
-
-    // Some non-mathy text
-    "\\text": {
-        numArgs: 1,
-        argTypes: ["text"],
-        greediness: 2,
-        handler: function(func, body) {
-            // Since the corresponding buildHTML/buildMathML function expects a
-            // list of elements, we normalize for different kinds of arguments
-            // TODO(emily): maybe this should be done somewhere else
-            var inner;
-            if (body.type === "ordgroup") {
-                inner = body.value;
-            } else {
-                inner = [body];
-            }
-
-            return {
-                type: "text",
-                body: inner
-            };
-        }
-    },
-
-    // A two-argument custom color
-    "\\color": {
-        numArgs: 2,
-        allowedInText: true,
-        greediness: 3,
-        argTypes: ["color", "original"],
-        handler: function(func, color, body) {
-            // Normalize the different kinds of bodies (see \text above)
-            var inner;
-            if (body.type === "ordgroup") {
-                inner = body.value;
-            } else {
-                inner = [body];
-            }
-
-            return {
-                type: "color",
-                color: color.value,
-                value: inner
-            };
-        }
-    },
-
-    // An overline
-    "\\overline": {
-        numArgs: 1,
-        handler: function(func, body) {
-            return {
-                type: "overline",
-                body: body
-            };
-        }
-    },
-
-    // A box of the width and height
-    "\\rule": {
-        numArgs: 2,
-        numOptionalArgs: 1,
-        argTypes: ["size", "size", "size"],
-        handler: function(func, shift, width, height) {
-            return {
-                type: "rule",
-                shift: shift && shift.value,
-                width: width.value,
-                height: height.value
-            };
-        }
-    },
-
-    // A KaTeX logo
-    "\\KaTeX": {
-        numArgs: 0,
-        handler: function(func) {
-            return {
-                type: "katex"
-            };
-        }
-    },
-
-    "\\phantom": {
-        numArgs: 1,
-        handler: function(func, body) {
-            var inner;
-            if (body.type === "ordgroup") {
-                inner = body.value;
-            } else {
-                inner = [body];
-            }
-
-            return {
-                type: "phantom",
-                value: inner
-            };
-        }
+function defineFunction(names, props, handler) {
+    if (typeof names === "string") {
+        names = [names];
     }
-};
+    if (typeof props === "number") {
+        props = { numArgs: props };
+    }
+    // Set default values of functions
+    var data = {
+        numArgs: props.numArgs,
+        argTypes: props.argTypes,
+        greediness: (props.greediness === undefined) ? 1 : props.greediness,
+        allowedInText: !!props.allowedInText,
+        numOptionalArgs: props.numOptionalArgs || 0,
+        handler: handler,
+    };
+    for (var i = 0; i < names.length; ++i) {
+        module.exports[names[i]] = data;
+    }
+}
+
+// A normal square root
+defineFunction("\\sqrt", {
+    numArgs: 1,
+    numOptionalArgs: 1,
+}, function(context, args) {
+    var index = args[0];
+    var body = args[1];
+    return {
+        type: "sqrt",
+        body: body,
+        index: index,
+    };
+});
+
+// Some non-mathy text
+defineFunction("\\text", {
+    numArgs: 1,
+    argTypes: ["text"],
+    greediness: 2,
+}, function(context, args) {
+    var body = args[0];
+    // Since the corresponding buildHTML/buildMathML function expects a
+    // list of elements, we normalize for different kinds of arguments
+    // TODO(emily): maybe this should be done somewhere else
+    var inner;
+    if (body.type === "ordgroup") {
+        inner = body.value;
+    } else {
+        inner = [body];
+    }
+
+    return {
+        type: "text",
+        body: inner,
+    };
+});
+
+// A two-argument custom color
+defineFunction("\\color", {
+    numArgs: 2,
+    allowedInText: true,
+    greediness: 3,
+    argTypes: ["color", "original"],
+}, function(context, args) {
+    var color = args[0];
+    var body = args[1];
+    // Normalize the different kinds of bodies (see \text above)
+    var inner;
+    if (body.type === "ordgroup") {
+        inner = body.value;
+    } else {
+        inner = [body];
+    }
+
+    return {
+        type: "color",
+        color: color.value,
+        value: inner,
+    };
+});
+
+// An overline
+defineFunction("\\overline", {
+    numArgs: 1,
+}, function(context, args) {
+    var body = args[0];
+    return {
+        type: "overline",
+        body: body,
+    };
+});
+
+// An underline
+defineFunction("\\underline", {
+    numArgs: 1,
+}, function(context, args) {
+    var body = args[0];
+    return {
+        type: "underline",
+        body: body,
+    };
+});
+
+// A box of the width and height
+defineFunction("\\rule", {
+    numArgs: 2,
+    numOptionalArgs: 1,
+    argTypes: ["size", "size", "size"],
+}, function(context, args) {
+    var shift = args[0];
+    var width = args[1];
+    var height = args[2];
+    return {
+        type: "rule",
+        shift: shift && shift.value,
+        width: width.value,
+        height: height.value,
+    };
+});
+
+// A KaTeX logo
+defineFunction("\\KaTeX", {
+    numArgs: 0,
+}, function(context) {
+    return {
+        type: "katex",
+    };
+});
+
+defineFunction("\\phantom", {
+    numArgs: 1,
+}, function(context, args) {
+    var body = args[0];
+    var inner;
+    if (body.type === "ordgroup") {
+        inner = body.value;
+    } else {
+        inner = [body];
+    }
+
+    return {
+        type: "phantom",
+        value: inner,
+    };
+});
 
 // Extra data needed for the delimiter handler down below
 var delimiterSizes = {
@@ -9667,14 +10150,14 @@ var delimiterSizes = {
     "\\big"  : {type: "textord", size: 1},
     "\\Big"  : {type: "textord", size: 2},
     "\\bigg" : {type: "textord", size: 3},
-    "\\Bigg" : {type: "textord", size: 4}
+    "\\Bigg" : {type: "textord", size: 4},
 };
 
 var delimiters = [
     "(", ")", "[", "\\lbrack", "]", "\\rbrack",
     "\\{", "\\lbrace", "\\}", "\\rbrace",
     "\\lfloor", "\\rfloor", "\\lceil", "\\rceil",
-    "<", ">", "\\langle", "\\rangle",
+    "<", ">", "\\langle", "\\rangle", "\\lt", "\\gt",
     "\\lvert", "\\rvert", "\\lVert", "\\rVert",
     "\\lgroup", "\\rgroup", "\\lmoustache", "\\rmoustache",
     "/", "\\backslash",
@@ -9682,423 +10165,330 @@ var delimiters = [
     "\\uparrow", "\\Uparrow",
     "\\downarrow", "\\Downarrow",
     "\\updownarrow", "\\Updownarrow",
-    "."
+    ".",
 ];
 
 var fontAliases = {
     "\\Bbb": "\\mathbb",
     "\\bold": "\\mathbf",
-    "\\frak": "\\mathfrak"
+    "\\frak": "\\mathfrak",
 };
 
-/*
- * This is a list of functions which each have the same function but have
- * different names so that we don't have to duplicate the data a bunch of times.
- * Each element in the list is an object with the following keys:
- *  - funcs: A list of function names to be associated with the data
- *  - data: An objecty with the same data as in each value of the `function`
- *          table above
- */
-var duplicatedFunctions = [
-    // Single-argument color functions
-    {
-        funcs: [
-            "\\blue", "\\orange", "\\pink", "\\red",
-            "\\green", "\\gray", "\\purple",
-            "\\blueA", "\\blueB", "\\blueC", "\\blueD", "\\blueE",
-            "\\tealA", "\\tealB", "\\tealC", "\\tealD", "\\tealE",
-            "\\greenA", "\\greenB", "\\greenC", "\\greenD", "\\greenE",
-            "\\goldA", "\\goldB", "\\goldC", "\\goldD", "\\goldE",
-            "\\redA", "\\redB", "\\redC", "\\redD", "\\redE",
-            "\\maroonA", "\\maroonB", "\\maroonC", "\\maroonD", "\\maroonE",
-            "\\purpleA", "\\purpleB", "\\purpleC", "\\purpleD", "\\purpleE",
-            "\\mintA", "\\mintB", "\\mintC",
-            "\\grayA", "\\grayB", "\\grayC", "\\grayD", "\\grayE",
-            "\\grayF", "\\grayG", "\\grayH", "\\grayI",
-            "\\kaBlue", "\\kaGreen"
-        ],
-        data: {
-            numArgs: 1,
-            allowedInText: true,
-            greediness: 3,
-            handler: function(func, body) {
-                var atoms;
-                if (body.type === "ordgroup") {
-                    atoms = body.value;
-                } else {
-                    atoms = [body];
-                }
-
-                return {
-                    type: "color",
-                    color: "katex-" + func.slice(1),
-                    value: atoms
-                };
-            }
-        }
-    },
-
-    // There are 2 flags for operators; whether they produce limits in
-    // displaystyle, and whether they are symbols and should grow in
-    // displaystyle. These four groups cover the four possible choices.
-
-    // No limits, not symbols
-    {
-        funcs: [
-            "\\arcsin", "\\arccos", "\\arctan", "\\arg", "\\cos", "\\cosh",
-            "\\cot", "\\coth", "\\csc", "\\deg", "\\dim", "\\exp", "\\hom",
-            "\\ker", "\\lg", "\\ln", "\\log", "\\sec", "\\sin", "\\sinh",
-            "\\tan","\\tanh"
-        ],
-        data: {
-            numArgs: 0,
-            handler: function(func) {
-                return {
-                    type: "op",
-                    limits: false,
-                    symbol: false,
-                    body: func
-                };
-            }
-        }
-    },
-
-    // Limits, not symbols
-    {
-        funcs: [
-            "\\det", "\\gcd", "\\inf", "\\lim", "\\liminf", "\\limsup", "\\max",
-            "\\min", "\\Pr", "\\sup"
-        ],
-        data: {
-            numArgs: 0,
-            handler: function(func) {
-                return {
-                    type: "op",
-                    limits: true,
-                    symbol: false,
-                    body: func
-                };
-            }
-        }
-    },
-
-    // No limits, symbols
-    {
-        funcs: [
-            "\\int", "\\iint", "\\iiint", "\\oint"
-        ],
-        data: {
-            numArgs: 0,
-            handler: function(func) {
-                return {
-                    type: "op",
-                    limits: false,
-                    symbol: true,
-                    body: func
-                };
-            }
-        }
-    },
-
-    // Limits, symbols
-    {
-        funcs: [
-            "\\coprod", "\\bigvee", "\\bigwedge", "\\biguplus", "\\bigcap",
-            "\\bigcup", "\\intop", "\\prod", "\\sum", "\\bigotimes",
-            "\\bigoplus", "\\bigodot", "\\bigsqcup", "\\smallint"
-        ],
-        data: {
-            numArgs: 0,
-            handler: function(func) {
-                return {
-                    type: "op",
-                    limits: true,
-                    symbol: true,
-                    body: func
-                };
-            }
-        }
-    },
-
-    // Fractions
-    {
-        funcs: [
-            "\\dfrac", "\\frac", "\\tfrac",
-            "\\dbinom", "\\binom", "\\tbinom"
-        ],
-        data: {
-            numArgs: 2,
-            greediness: 2,
-            handler: function(func, numer, denom) {
-                var hasBarLine;
-                var leftDelim = null;
-                var rightDelim = null;
-                var size = "auto";
-
-                switch (func) {
-                    case "\\dfrac":
-                    case "\\frac":
-                    case "\\tfrac":
-                        hasBarLine = true;
-                        break;
-                    case "\\dbinom":
-                    case "\\binom":
-                    case "\\tbinom":
-                        hasBarLine = false;
-                        leftDelim = "(";
-                        rightDelim = ")";
-                        break;
-                    default:
-                        throw new Error("Unrecognized genfrac command");
-                }
-
-                switch (func) {
-                    case "\\dfrac":
-                    case "\\dbinom":
-                        size = "display";
-                        break;
-                    case "\\tfrac":
-                    case "\\tbinom":
-                        size = "text";
-                        break;
-                }
-
-                return {
-                    type: "genfrac",
-                    numer: numer,
-                    denom: denom,
-                    hasBarLine: hasBarLine,
-                    leftDelim: leftDelim,
-                    rightDelim: rightDelim,
-                    size: size
-                };
-            }
-        }
-    },
-
-    // Left and right overlap functions
-    {
-        funcs: ["\\llap", "\\rlap"],
-        data: {
-            numArgs: 1,
-            allowedInText: true,
-            handler: function(func, body) {
-                return {
-                    type: func.slice(1),
-                    body: body
-                };
-            }
-        }
-    },
-
-    // Delimiter functions
-    {
-        funcs: [
-            "\\bigl", "\\Bigl", "\\biggl", "\\Biggl",
-            "\\bigr", "\\Bigr", "\\biggr", "\\Biggr",
-            "\\bigm", "\\Bigm", "\\biggm", "\\Biggm",
-            "\\big",  "\\Big",  "\\bigg",  "\\Bigg",
-            "\\left", "\\right"
-        ],
-        data: {
-            numArgs: 1,
-            handler: function(func, delim, positions) {
-                if (!utils.contains(delimiters, delim.value)) {
-                    throw new ParseError(
-                        "Invalid delimiter: '" + delim.value + "' after '" +
-                            func + "'",
-                        this.lexer, positions[1]);
-                }
-
-                // \left and \right are caught somewhere in Parser.js, which is
-                // why this data doesn't match what is in buildHTML.
-                if (func === "\\left" || func === "\\right") {
-                    return {
-                        type: "leftright",
-                        value: delim.value
-                    };
-                } else {
-                    return {
-                        type: "delimsizing",
-                        size: delimiterSizes[func].size,
-                        delimType: delimiterSizes[func].type,
-                        value: delim.value
-                    };
-                }
-            }
-        }
-    },
-
-    // Sizing functions (handled in Parser.js explicitly, hence no handler)
-    {
-        funcs: [
-            "\\tiny", "\\scriptsize", "\\footnotesize", "\\small",
-            "\\normalsize", "\\large", "\\Large", "\\LARGE", "\\huge", "\\Huge"
-        ],
-        data: {
-            numArgs: 0
-        }
-    },
-
-    // Style changing functions (handled in Parser.js explicitly, hence no
-    // handler)
-    {
-        funcs: [
-            "\\displaystyle", "\\textstyle", "\\scriptstyle",
-            "\\scriptscriptstyle"
-        ],
-        data: {
-            numArgs: 0
-        }
-    },
-
-    {
-        funcs: [
-            // styles
-            "\\mathrm", "\\mathit", "\\mathbf",
-
-            // families
-            "\\mathbb", "\\mathcal", "\\mathfrak", "\\mathscr", "\\mathsf",
-            "\\mathtt",
-
-            // aliases
-            "\\Bbb", "\\bold", "\\frak"
-        ],
-        data: {
-            numArgs: 1,
-            handler: function (func, body) {
-                if (func in fontAliases) {
-                    func = fontAliases[func];
-                }
-                return {
-                    type: "font",
-                    font: func.slice(1),
-                    body: body
-                };
-            }
-        }
-    },
-
-    // Accents
-    {
-        funcs: [
-            "\\acute", "\\grave", "\\ddot", "\\tilde", "\\bar", "\\breve",
-            "\\check", "\\hat", "\\vec", "\\dot"
-            // We don't support expanding accents yet
-            // "\\widetilde", "\\widehat"
-        ],
-        data: {
-            numArgs: 1,
-            handler: function(func, base) {
-                return {
-                    type: "accent",
-                    accent: func,
-                    base: base
-                };
-            }
-        }
-    },
-
-    // Infix generalized fractions
-    {
-        funcs: ["\\over", "\\choose"],
-        data: {
-            numArgs: 0,
-            handler: function (func) {
-                var replaceWith;
-                switch (func) {
-                    case "\\over":
-                        replaceWith = "\\frac";
-                        break;
-                    case "\\choose":
-                        replaceWith = "\\binom";
-                        break;
-                    default:
-                        throw new Error("Unrecognized infix genfrac command");
-                }
-                return {
-                    type: "infix",
-                    replaceWith: replaceWith
-                };
-            }
-        }
-    },
-
-    // Row breaks for aligned data
-    {
-        funcs: ["\\\\", "\\cr"],
-        data: {
-            numArgs: 0,
-            numOptionalArgs: 1,
-            argTypes: ["size"],
-            handler: function(func, size) {
-                return {
-                    type: "cr",
-                    size: size
-                };
-            }
-        }
-    },
-
-    // Environment delimiters
-    {
-        funcs: ["\\begin", "\\end"],
-        data: {
-            numArgs: 1,
-            argTypes: ["text"],
-            handler: function(func, nameGroup, positions) {
-                if (nameGroup.type !== "ordgroup") {
-                    throw new ParseError(
-                        "Invalid environment name",
-                        this.lexer, positions[1]);
-                }
-                var name = "";
-                for (var i = 0; i < nameGroup.value.length; ++i) {
-                    name += nameGroup.value[i].value;
-                }
-                return {
-                    type: "environment",
-                    name: name,
-                    namepos: positions[1]
-                };
-            }
-        }
+// Single-argument color functions
+defineFunction([
+    "\\blue", "\\orange", "\\pink", "\\red",
+    "\\green", "\\gray", "\\purple",
+    "\\blueA", "\\blueB", "\\blueC", "\\blueD", "\\blueE",
+    "\\tealA", "\\tealB", "\\tealC", "\\tealD", "\\tealE",
+    "\\greenA", "\\greenB", "\\greenC", "\\greenD", "\\greenE",
+    "\\goldA", "\\goldB", "\\goldC", "\\goldD", "\\goldE",
+    "\\redA", "\\redB", "\\redC", "\\redD", "\\redE",
+    "\\maroonA", "\\maroonB", "\\maroonC", "\\maroonD", "\\maroonE",
+    "\\purpleA", "\\purpleB", "\\purpleC", "\\purpleD", "\\purpleE",
+    "\\mintA", "\\mintB", "\\mintC",
+    "\\grayA", "\\grayB", "\\grayC", "\\grayD", "\\grayE",
+    "\\grayF", "\\grayG", "\\grayH", "\\grayI",
+    "\\kaBlue", "\\kaGreen",
+], {
+    numArgs: 1,
+    allowedInText: true,
+    greediness: 3,
+}, function(context, args) {
+    var body = args[0];
+    var atoms;
+    if (body.type === "ordgroup") {
+        atoms = body.value;
+    } else {
+        atoms = [body];
     }
-];
 
-var addFuncsWithData = function(funcs, data) {
-    for (var i = 0; i < funcs.length; i++) {
-        functions[funcs[i]] = data;
+    return {
+        type: "color",
+        color: "katex-" + context.funcName.slice(1),
+        value: atoms,
+    };
+});
+
+// There are 2 flags for operators; whether they produce limits in
+// displaystyle, and whether they are symbols and should grow in
+// displaystyle. These four groups cover the four possible choices.
+
+// No limits, not symbols
+defineFunction([
+    "\\arcsin", "\\arccos", "\\arctan", "\\arg", "\\cos", "\\cosh",
+    "\\cot", "\\coth", "\\csc", "\\deg", "\\dim", "\\exp", "\\hom",
+    "\\ker", "\\lg", "\\ln", "\\log", "\\sec", "\\sin", "\\sinh",
+    "\\tan", "\\tanh",
+], {
+    numArgs: 0,
+}, function(context) {
+    return {
+        type: "op",
+        limits: false,
+        symbol: false,
+        body: context.funcName,
+    };
+});
+
+// Limits, not symbols
+defineFunction([
+    "\\det", "\\gcd", "\\inf", "\\lim", "\\liminf", "\\limsup", "\\max",
+    "\\min", "\\Pr", "\\sup",
+], {
+    numArgs: 0,
+}, function(context) {
+    return {
+        type: "op",
+        limits: true,
+        symbol: false,
+        body: context.funcName,
+    };
+});
+
+// No limits, symbols
+defineFunction([
+    "\\int", "\\iint", "\\iiint", "\\oint",
+], {
+    numArgs: 0,
+}, function(context) {
+    return {
+        type: "op",
+        limits: false,
+        symbol: true,
+        body: context.funcName,
+    };
+});
+
+// Limits, symbols
+defineFunction([
+    "\\coprod", "\\bigvee", "\\bigwedge", "\\biguplus", "\\bigcap",
+    "\\bigcup", "\\intop", "\\prod", "\\sum", "\\bigotimes",
+    "\\bigoplus", "\\bigodot", "\\bigsqcup", "\\smallint",
+], {
+    numArgs: 0,
+}, function(context) {
+    return {
+        type: "op",
+        limits: true,
+        symbol: true,
+        body: context.funcName,
+    };
+});
+
+// Fractions
+defineFunction([
+    "\\dfrac", "\\frac", "\\tfrac",
+    "\\dbinom", "\\binom", "\\tbinom",
+], {
+    numArgs: 2,
+    greediness: 2,
+}, function(context, args) {
+    var numer = args[0];
+    var denom = args[1];
+    var hasBarLine;
+    var leftDelim = null;
+    var rightDelim = null;
+    var size = "auto";
+
+    switch (context.funcName) {
+        case "\\dfrac":
+        case "\\frac":
+        case "\\tfrac":
+            hasBarLine = true;
+            break;
+        case "\\dbinom":
+        case "\\binom":
+        case "\\tbinom":
+            hasBarLine = false;
+            leftDelim = "(";
+            rightDelim = ")";
+            break;
+        default:
+            throw new Error("Unrecognized genfrac command");
     }
-};
 
-// Add all of the functions in duplicatedFunctions to the functions map
-for (var i = 0; i < duplicatedFunctions.length; i++) {
-    addFuncsWithData(duplicatedFunctions[i].funcs, duplicatedFunctions[i].data);
-}
+    switch (context.funcName) {
+        case "\\dfrac":
+        case "\\dbinom":
+            size = "display";
+            break;
+        case "\\tfrac":
+        case "\\tbinom":
+            size = "text";
+            break;
+    }
 
-// Set default values of functions
-for (var f in functions) {
-    if (functions.hasOwnProperty(f)) {
-        var func = functions[f];
+    return {
+        type: "genfrac",
+        numer: numer,
+        denom: denom,
+        hasBarLine: hasBarLine,
+        leftDelim: leftDelim,
+        rightDelim: rightDelim,
+        size: size,
+    };
+});
 
-        functions[f] = {
-            numArgs: func.numArgs,
-            argTypes: func.argTypes,
-            greediness: (func.greediness === undefined) ? 1 : func.greediness,
-            allowedInText: func.allowedInText ? func.allowedInText : false,
-            numOptionalArgs: (func.numOptionalArgs === undefined) ? 0 :
-                func.numOptionalArgs,
-            handler: func.handler
+// Left and right overlap functions
+defineFunction(["\\llap", "\\rlap"], {
+    numArgs: 1,
+    allowedInText: true,
+}, function(context, args) {
+    var body = args[0];
+    return {
+        type: context.funcName.slice(1),
+        body: body,
+    };
+});
+
+// Delimiter functions
+defineFunction([
+    "\\bigl", "\\Bigl", "\\biggl", "\\Biggl",
+    "\\bigr", "\\Bigr", "\\biggr", "\\Biggr",
+    "\\bigm", "\\Bigm", "\\biggm", "\\Biggm",
+    "\\big",  "\\Big",  "\\bigg",  "\\Bigg",
+    "\\left", "\\right",
+], {
+    numArgs: 1,
+}, function(context, args) {
+    var delim = args[0];
+    if (!utils.contains(delimiters, delim.value)) {
+        throw new ParseError(
+            "Invalid delimiter: '" + delim.value + "' after '" +
+                context.funcName + "'",
+            context.lexer, context.positions[1]);
+    }
+
+    // \left and \right are caught somewhere in Parser.js, which is
+    // why this data doesn't match what is in buildHTML.
+    if (context.funcName === "\\left" || context.funcName === "\\right") {
+        return {
+            type: "leftright",
+            value: delim.value,
+        };
+    } else {
+        return {
+            type: "delimsizing",
+            size: delimiterSizes[context.funcName].size,
+            delimType: delimiterSizes[context.funcName].type,
+            value: delim.value,
         };
     }
-}
+});
 
-module.exports = {
-    funcs: functions
-};
+// Sizing functions (handled in Parser.js explicitly, hence no handler)
+defineFunction([
+    "\\tiny", "\\scriptsize", "\\footnotesize", "\\small",
+    "\\normalsize", "\\large", "\\Large", "\\LARGE", "\\huge", "\\Huge",
+], 0, null);
 
-},{"./ParseError":16,"./utils":34}],30:[function(require,module,exports){
+// Style changing functions (handled in Parser.js explicitly, hence no
+// handler)
+defineFunction([
+    "\\displaystyle", "\\textstyle", "\\scriptstyle",
+    "\\scriptscriptstyle",
+], 0, null);
+
+defineFunction([
+    // styles
+    "\\mathrm", "\\mathit", "\\mathbf",
+
+    // families
+    "\\mathbb", "\\mathcal", "\\mathfrak", "\\mathscr", "\\mathsf",
+    "\\mathtt",
+
+    // aliases
+    "\\Bbb", "\\bold", "\\frak",
+], {
+    numArgs: 1,
+    greediness: 2,
+}, function(context, args) {
+    var body = args[0];
+    var func = context.funcName;
+    if (func in fontAliases) {
+        func = fontAliases[func];
+    }
+    return {
+        type: "font",
+        font: func.slice(1),
+        body: body,
+    };
+});
+
+// Accents
+defineFunction([
+    "\\acute", "\\grave", "\\ddot", "\\tilde", "\\bar", "\\breve",
+    "\\check", "\\hat", "\\vec", "\\dot",
+    // We don't support expanding accents yet
+    // "\\widetilde", "\\widehat"
+], {
+    numArgs: 1,
+}, function(context, args) {
+    var base = args[0];
+    return {
+        type: "accent",
+        accent: context.funcName,
+        base: base,
+    };
+});
+
+// Infix generalized fractions
+defineFunction(["\\over", "\\choose"], {
+    numArgs: 0,
+}, function(context) {
+    var replaceWith;
+    switch (context.funcName) {
+        case "\\over":
+            replaceWith = "\\frac";
+            break;
+        case "\\choose":
+            replaceWith = "\\binom";
+            break;
+        default:
+            throw new Error("Unrecognized infix genfrac command");
+    }
+    return {
+        type: "infix",
+        replaceWith: replaceWith,
+    };
+});
+
+// Row breaks for aligned data
+defineFunction(["\\\\", "\\cr"], {
+    numArgs: 0,
+    numOptionalArgs: 1,
+    argTypes: ["size"],
+}, function(context, args) {
+    var size = args[0];
+    return {
+        type: "cr",
+        size: size,
+    };
+});
+
+// Environment delimiters
+defineFunction(["\\begin", "\\end"], {
+    numArgs: 1,
+    argTypes: ["text"],
+}, function(context, args) {
+    var nameGroup = args[0];
+    if (nameGroup.type !== "ordgroup") {
+        throw new ParseError(
+            "Invalid environment name",
+            context.lexer, context.positions[1]);
+    }
+    var name = "";
+    for (var i = 0; i < nameGroup.value.length; ++i) {
+        name += nameGroup.value[i].value;
+    }
+    return {
+        type: "environment",
+        name: name,
+        namepos: context.positions[1],
+    };
+});
+
+},{"./ParseError":18,"./utils":36}],32:[function(require,module,exports){
 /**
  * These objects store data about MathML nodes. This is the MathML equivalent
  * of the types in domTree.js. Since MathML handles its own rendering, and
@@ -10199,10 +10589,10 @@ TextNode.prototype.toMarkup = function() {
 
 module.exports = {
     MathNode: MathNode,
-    TextNode: TextNode
+    TextNode: TextNode,
 };
 
-},{"./utils":34}],31:[function(require,module,exports){
+},{"./utils":36}],33:[function(require,module,exports){
 /**
  * The resulting parse tree nodes of the parse tree.
  */
@@ -10212,22 +10602,12 @@ function ParseNode(type, value, mode) {
     this.mode = mode;
 }
 
-/**
- * A result and final position returned by the `.parse...` functions.
- * 
- */
-function ParseResult(result, newPosition, peek) {
-    this.result = result;
-    this.position = newPosition;
-}
-
 module.exports = {
     ParseNode: ParseNode,
-    ParseResult: ParseResult
 };
 
 
-},{}],32:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 /**
  * Provides a single function for parsing an expression using a Parser
  * TODO(emily): Remove this
@@ -10246,7 +10626,7 @@ var parseTree = function(toParse, settings) {
 
 module.exports = parseTree;
 
-},{"./Parser":17}],33:[function(require,module,exports){
+},{"./Parser":19}],35:[function(require,module,exports){
 /**
  * This file holds a list of all no-argument functions and single-character
  * symbols (like 'a' or ';').
@@ -10257,7 +10637,7 @@ module.exports = parseTree;
  * - group (required): the ParseNode group type the symbol should have (i.e.
      "textord", "mathord", etc).
      See https://github.com/Khan/KaTeX/wiki/Examining-TeX#group-types
- * - replace (optional): the character that this symbol or function should be
+ * - replace: the character that this symbol or function should be
  *   replaced with (i.e. "\phi" has a replace value of "\u03d5", the phi
  *   character in the main font).
  *
@@ -10265,2575 +10645,610 @@ module.exports = parseTree;
  * accepted in (e.g. "math" or "text").
  */
 
-var symbols = {
-    "math": {
-        // Relation Symbols
-        "\\equiv": {
-            font: "main",
-            group: "rel",
-            replace: "\u2261"
-        },
-        "\\prec": {
-            font: "main",
-            group: "rel",
-            replace: "\u227a"
-        },
-        "\\succ": {
-            font: "main",
-            group: "rel",
-            replace: "\u227b"
-        },
-        "\\sim": {
-            font: "main",
-            group: "rel",
-            replace: "\u223c"
-        },
-        "\\perp": {
-            font: "main",
-            group: "rel",
-            replace: "\u22a5"
-        },
-        "\\preceq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2aaf"
-        },
-        "\\succeq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2ab0"
-        },
-        "\\simeq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2243"
-        },
-        "\\mid": {
-            font: "main",
-            group: "rel",
-            replace: "\u2223"
-        },
-        "\\ll": {
-            font: "main",
-            group: "rel",
-            replace: "\u226a"
-        },
-        "\\gg": {
-            font: "main",
-            group: "rel",
-            replace: "\u226b"
-        },
-        "\\asymp": {
-            font: "main",
-            group: "rel",
-            replace: "\u224d"
-        },
-        "\\parallel": {
-            font: "main",
-            group: "rel",
-            replace: "\u2225"
-        },
-        "\\bowtie": {
-            font: "main",
-            group: "rel",
-            replace: "\u22c8"
-        },
-        "\\smile": {
-            font: "main",
-            group: "rel",
-            replace: "\u2323"
-        },
-        "\\sqsubseteq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2291"
-        },
-        "\\sqsupseteq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2292"
-        },
-        "\\doteq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2250"
-        },
-        "\\frown": {
-            font: "main",
-            group: "rel",
-            replace: "\u2322"
-        },
-        "\\ni": {
-            font: "main",
-            group: "rel",
-            replace: "\u220b"
-        },
-        "\\propto": {
-            font: "main",
-            group: "rel",
-            replace: "\u221d"
-        },
-        "\\vdash": {
-            font: "main",
-            group: "rel",
-            replace: "\u22a2"
-        },
-        "\\dashv": {
-            font: "main",
-            group: "rel",
-            replace: "\u22a3"
-        },
-        "\\owns": {
-            font: "main",
-            group: "rel",
-            replace: "\u220b"
-        },
-
-        // Punctuation
-        "\\ldotp": {
-            font: "main",
-            group: "punct",
-            replace: "\u002e"
-        },
-        "\\cdotp": {
-            font: "main",
-            group: "punct",
-            replace: "\u22c5"
-        },
-
-        // Misc Symbols
-        "\\#": {
-          font: "main",
-          group: "textord",
-          replace: "\u0023"
-        },
-        "\\&": {
-          font: "main",
-          group: "textord",
-          replace: "\u0026"
-        },
-        "\\aleph": {
-            font: "main",
-            group: "textord",
-            replace: "\u2135"
-        },
-        "\\forall": {
-            font: "main",
-            group: "textord",
-            replace: "\u2200"
-        },
-        "\\hbar": {
-            font: "main",
-            group: "textord",
-            replace: "\u210f"
-        },
-        "\\exists": {
-            font: "main",
-            group: "textord",
-            replace: "\u2203"
-        },
-        "\\nabla": {
-            font: "main",
-            group: "textord",
-            replace: "\u2207"
-        },
-        "\\flat": {
-            font: "main",
-            group: "textord",
-            replace: "\u266d"
-        },
-        "\\ell": {
-            font: "main",
-            group: "textord",
-            replace: "\u2113"
-        },
-        "\\natural": {
-            font: "main",
-            group: "textord",
-            replace: "\u266e"
-        },
-        "\\clubsuit": {
-            font: "main",
-            group: "textord",
-            replace: "\u2663"
-        },
-        "\\wp": {
-            font: "main",
-            group: "textord",
-            replace: "\u2118"
-        },
-        "\\sharp": {
-            font: "main",
-            group: "textord",
-            replace: "\u266f"
-        },
-        "\\diamondsuit": {
-            font: "main",
-            group: "textord",
-            replace: "\u2662"
-        },
-        "\\Re": {
-            font: "main",
-            group: "textord",
-            replace: "\u211c"
-        },
-        "\\heartsuit": {
-            font: "main",
-            group: "textord",
-            replace: "\u2661"
-        },
-        "\\Im": {
-            font: "main",
-            group: "textord",
-            replace: "\u2111"
-        },
-        "\\spadesuit": {
-            font: "main",
-            group: "textord",
-            replace: "\u2660"
-        },
-
-        // Math and Text
-        "\\dag": {
-            font: "main",
-            group: "textord",
-            replace: "\u2020"
-        },
-        "\\ddag": {
-            font: "main",
-            group: "textord",
-            replace: "\u2021"
-        },
-
-        // Large Delimiters
-        "\\rmoustache": {
-            font: "main",
-            group: "close",
-            replace: "\u23b1"
-        },
-        "\\lmoustache": {
-            font: "main",
-            group: "open",
-            replace: "\u23b0"
-        },
-        "\\rgroup": {
-            font: "main",
-            group: "close",
-            replace: "\u27ef"
-        },
-        "\\lgroup": {
-            font: "main",
-            group: "open",
-            replace: "\u27ee"
-        },
-
-        // Binary Operators
-        "\\mp": {
-            font: "main",
-            group: "bin",
-            replace: "\u2213"
-        },
-        "\\ominus": {
-            font: "main",
-            group: "bin",
-            replace: "\u2296"
-        },
-        "\\uplus": {
-            font: "main",
-            group: "bin",
-            replace: "\u228e"
-        },
-        "\\sqcap": {
-            font: "main",
-            group: "bin",
-            replace: "\u2293"
-        },
-        "\\ast": {
-            font: "main",
-            group: "bin",
-            replace: "\u2217"
-        },
-        "\\sqcup": {
-            font: "main",
-            group: "bin",
-            replace: "\u2294"
-        },
-        "\\bigcirc": {
-            font: "main",
-            group: "bin",
-            replace: "\u25ef"
-        },
-        "\\bullet": {
-            font: "main",
-            group: "bin",
-            replace: "\u2219"
-        },
-        "\\ddagger": {
-            font: "main",
-            group: "bin",
-            replace: "\u2021"
-        },
-        "\\wr": {
-            font: "main",
-            group: "bin",
-            replace: "\u2240"
-        },
-        "\\amalg": {
-            font: "main",
-            group: "bin",
-            replace: "\u2a3f"
-        },
-
-        // Arrow Symbols
-        "\\longleftarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u27f5"
-        },
-        "\\Leftarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u21d0"
-        },
-        "\\Longleftarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u27f8"
-        },
-        "\\longrightarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u27f6"
-        },
-        "\\Rightarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u21d2"
-        },
-        "\\Longrightarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u27f9"
-        },
-        "\\leftrightarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2194"
-        },
-        "\\longleftrightarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u27f7"
-        },
-        "\\Leftrightarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u21d4"
-        },
-        "\\Longleftrightarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u27fa"
-        },
-        "\\mapsto": {
-            font: "main",
-            group: "rel",
-            replace: "\u21a6"
-        },
-        "\\longmapsto": {
-            font: "main",
-            group: "rel",
-            replace: "\u27fc"
-        },
-        "\\nearrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2197"
-        },
-        "\\hookleftarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u21a9"
-        },
-        "\\hookrightarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u21aa"
-        },
-        "\\searrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2198"
-        },
-        "\\leftharpoonup": {
-            font: "main",
-            group: "rel",
-            replace: "\u21bc"
-        },
-        "\\rightharpoonup": {
-            font: "main",
-            group: "rel",
-            replace: "\u21c0"
-        },
-        "\\swarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2199"
-        },
-        "\\leftharpoondown": {
-            font: "main",
-            group: "rel",
-            replace: "\u21bd"
-        },
-        "\\rightharpoondown": {
-            font: "main",
-            group: "rel",
-            replace: "\u21c1"
-        },
-        "\\nwarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2196"
-        },
-        "\\rightleftharpoons": {
-            font: "main",
-            group: "rel",
-            replace: "\u21cc"
-        },
-
-        // AMS Negated Binary Relations
-        "\\nless": {
-            font: "ams",
-            group: "rel",
-            replace: "\u226e"
-        },
-        "\\nleqslant": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue010"
-        },
-        "\\nleqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue011"
-        },
-        "\\lneq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a87"
-        },
-        "\\lneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2268"
-        },
-        "\\lvertneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue00c"
-        },
-        "\\lnsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22e6"
-        },
-        "\\lnapprox": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a89"
-        },
-        "\\nprec": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2280"
-        },
-        "\\npreceq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22e0"
-        },
-        "\\precnsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22e8"
-        },
-        "\\precnapprox": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2ab9"
-        },
-        "\\nsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2241"
-        },
-        "\\nshortmid": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue006"
-        },
-        "\\nmid": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2224"
-        },
-        "\\nvdash": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22ac"
-        },
-        "\\nvDash": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22ad"
-        },
-        "\\ntriangleleft": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22ea"
-        },
-        "\\ntrianglelefteq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22ec"
-        },
-        "\\subsetneq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u228a"
-        },
-        "\\varsubsetneq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue01a"
-        },
-        "\\subsetneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2acb"
-        },
-        "\\varsubsetneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue017"
-        },
-        "\\ngtr": {
-            font: "ams",
-            group: "rel",
-            replace: "\u226f"
-        },
-        "\\ngeqslant": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue00f"
-        },
-        "\\ngeqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue00e"
-        },
-        "\\gneq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a88"
-        },
-        "\\gneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2269"
-        },
-        "\\gvertneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue00d"
-        },
-        "\\gnsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22e7"
-        },
-        "\\gnapprox": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a8a"
-        },
-        "\\nsucc": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2281"
-        },
-        "\\nsucceq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22e1"
-        },
-        "\\succnsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22e9"
-        },
-        "\\succnapprox": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2aba"
-        },
-        "\\ncong": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2246"
-        },
-        "\\nshortparallel": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue007"
-        },
-        "\\nparallel": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2226"
-        },
-        "\\nVDash": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22af"
-        },
-        "\\ntriangleright": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22eb"
-        },
-        "\\ntrianglerighteq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22ed"
-        },
-        "\\nsupseteqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue018"
-        },
-        "\\supsetneq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u228b"
-        },
-        "\\varsupsetneq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue01b"
-        },
-        "\\supsetneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2acc"
-        },
-        "\\varsupsetneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue019"
-        },
-        "\\nVdash": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22ae"
-        },
-        "\\precneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2ab5"
-        },
-        "\\succneqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2ab6"
-        },
-        "\\nsubseteqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\ue016"
-        },
-        "\\unlhd": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22b4"
-        },
-        "\\unrhd": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22b5"
-        },
-
-        // AMS Negated Arrows
-         "\\nleftarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u219a"
-        },
-        "\\nrightarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u219b"
-        },
-        "\\nLeftarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21cd"
-        },
-        "\\nRightarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21cf"
-        },
-        "\\nleftrightarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21ae"
-        },
-        "\\nLeftrightarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21ce"
-        },
-
-        // AMS Misc
-        "\\vartriangle": {
-            font: "ams",
-            group: "rel",
-            replace: "\u25b3"
-        },
-        "\\hslash": {
-            font: "ams",
-            group: "textord",
-            replace: "\u210f"
-        },
-        "\\triangledown": {
-            font: "ams",
-            group: "textord",
-            replace: "\u25bd"
-        },
-        "\\lozenge": {
-            font: "ams",
-            group: "textord",
-            replace: "\u25ca"
-        },
-        "\\circledS": {
-            font: "ams",
-            group: "textord",
-            replace: "\u24c8"
-        },
-        "\\circledR": {
-            font: "ams",
-            group: "textord",
-            replace: "\u00ae"
-        },
-        "\\measuredangle": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2221"
-        },
-        "\\nexists": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2204"
-        },
-        "\\mho": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2127"
-        },
-        "\\Finv": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2132"
-        },
-        "\\Game": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2141"
-        },
-        "\\Bbbk": {
-            font: "ams",
-            group: "textord",
-            replace: "\u006b"
-        },
-        "\\backprime": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2035"
-        },
-        "\\blacktriangle": {
-            font: "ams",
-            group: "textord",
-            replace: "\u25b2"
-        },
-        "\\blacktriangledown": {
-            font: "ams",
-            group: "textord",
-            replace: "\u25bc"
-        },
-        "\\blacksquare": {
-            font: "ams",
-            group: "textord",
-            replace: "\u25a0"
-        },
-        "\\blacklozenge": {
-            font: "ams",
-            group: "textord",
-            replace: "\u29eb"
-        },
-        "\\bigstar": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2605"
-        },
-        "\\sphericalangle": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2222"
-        },
-        "\\complement": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2201"
-        },
-        "\\eth": {
-            font: "ams",
-            group: "textord",
-            replace: "\u00f0"
-        },
-        "\\diagup": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2571"
-        },
-        "\\diagdown": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2572"
-        },
-        "\\square": {
-            font: "ams",
-            group: "textord",
-            replace: "\u25a1"
-        },
-        "\\Box": {
-            font: "ams",
-            group: "textord",
-            replace: "\u25a1"
-        },
-        "\\Diamond": {
-            font: "ams",
-            group: "textord",
-            replace: "\u25ca"
-        },
-        "\\yen": {
-            font: "ams",
-            group: "textord",
-            replace: "\u00a5"
-        },
-        "\\checkmark": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2713"
-        },
-
-        // AMS Hebrew
-        "\\beth": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2136"
-        },
-        "\\daleth": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2138"
-        },
-        "\\gimel": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2137"
-        },
-
-        // AMS Greek
-        "\\digamma": {
-            font: "ams",
-            group: "textord",
-            replace: "\u03dd"
-        },
-        "\\varkappa": {
-            font: "ams",
-            group: "textord",
-            replace: "\u03f0"
-        },
-
-        // AMS Delimiters
-        "\\ulcorner": {
-            font: "ams",
-            group: "open",
-            replace: "\u250c"
-        },
-        "\\urcorner": {
-            font: "ams",
-            group: "close",
-            replace: "\u2510"
-        },
-        "\\llcorner": {
-            font: "ams",
-            group: "open",
-            replace: "\u2514"
-        },
-        "\\lrcorner": {
-            font: "ams",
-            group: "close",
-            replace: "\u2518"
-        },
-
-        // AMS Binary Relations
-        "\\leqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2266"
-        },
-        "\\leqslant": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a7d"
-        },
-        "\\eqslantless": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a95"
-        },
-        "\\lesssim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2272"
-        },
-        "\\lessapprox": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a85"
-        },
-        "\\approxeq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u224a"
-        },
-        "\\lessdot": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22d6"
-        },
-        "\\lll": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22d8"
-        },
-        "\\lessgtr": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2276"
-        },
-        "\\lesseqgtr": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22da"
-        },
-        "\\lesseqqgtr": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a8b"
-        },
-        "\\doteqdot": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2251"
-        },
-        "\\risingdotseq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2253"
-        },
-        "\\fallingdotseq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2252"
-        },
-        "\\backsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u223d"
-        },
-        "\\backsimeq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22cd"
-        },
-        "\\subseteqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2ac5"
-        },
-        "\\Subset": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22d0"
-        },
-        "\\sqsubset": {
-            font: "ams",
-            group: "rel",
-            replace: "\u228f"
-        },
-        "\\preccurlyeq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u227c"
-        },
-        "\\curlyeqprec": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22de"
-        },
-        "\\precsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u227e"
-        },
-        "\\precapprox": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2ab7"
-        },
-        "\\vartriangleleft": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22b2"
-        },
-        "\\trianglelefteq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22b4"
-        },
-        "\\vDash": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22a8"
-        },
-        "\\Vvdash": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22aa"
-        },
-        "\\smallsmile": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2323"
-        },
-        "\\smallfrown": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2322"
-        },
-        "\\bumpeq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u224f"
-        },
-        "\\Bumpeq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u224e"
-        },
-        "\\geqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2267"
-        },
-        "\\geqslant": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a7e"
-        },
-        "\\eqslantgtr": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a96"
-        },
-        "\\gtrsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2273"
-        },
-        "\\gtrapprox": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a86"
-        },
-        "\\gtrdot": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22d7"
-        },
-        "\\ggg": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22d9"
-        },
-        "\\gtrless": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2277"
-        },
-        "\\gtreqless": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22db"
-        },
-        "\\gtreqqless": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2a8c"
-        },
-        "\\eqcirc": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2256"
-        },
-        "\\circeq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2257"
-        },
-        "\\triangleq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u225c"
-        },
-        "\\thicksim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u223c"
-        },
-        "\\thickapprox": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2248"
-        },
-        "\\supseteqq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2ac6"
-        },
-        "\\Supset": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22d1"
-        },
-        "\\sqsupset": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2290"
-        },
-        "\\succcurlyeq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u227d"
-        },
-        "\\curlyeqsucc": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22df"
-        },
-        "\\succsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u227f"
-        },
-        "\\succapprox": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2ab8"
-        },
-        "\\vartriangleright": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22b3"
-        },
-        "\\trianglerighteq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22b5"
-        },
-        "\\Vdash": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22a9"
-        },
-        "\\shortmid": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2223"
-        },
-        "\\shortparallel": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2225"
-        },
-        "\\between": {
-            font: "ams",
-            group: "rel",
-            replace: "\u226c"
-        },
-        "\\pitchfork": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22d4"
-        },
-        "\\varpropto": {
-            font: "ams",
-            group: "rel",
-            replace: "\u221d"
-        },
-        "\\blacktriangleleft": {
-            font: "ams",
-            group: "rel",
-            replace: "\u25c0"
-        },
-        "\\therefore": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2234"
-        },
-        "\\backepsilon": {
-            font: "ams",
-            group: "rel",
-            replace: "\u220d"
-        },
-        "\\blacktriangleright": {
-            font: "ams",
-            group: "rel",
-            replace: "\u25b6"
-        },
-        "\\because": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2235"
-        },
-        "\\llless": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22d8"
-        },
-        "\\gggtr": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22d9"
-        },
-        "\\lhd": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22b2"
-        },
-        "\\rhd": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22b3"
-        },
-        "\\eqsim": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2242"
-        },
-        "\\Join": {
-            font: "main",
-            group: "rel",
-            replace: "\u22c8"
-        },
-        "\\Doteq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2251"
-        },
-
-        // AMS Binary Operators
-        "\\dotplus": {
-            font: "ams",
-            group: "bin",
-            replace: "\u2214"
-        },
-        "\\smallsetminus": {
-            font: "ams",
-            group: "bin",
-            replace: "\u2216"
-        },
-        "\\Cap": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22d2"
-        },
-        "\\Cup": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22d3"
-        },
-        "\\doublebarwedge": {
-            font: "ams",
-            group: "bin",
-            replace: "\u2a5e"
-        },
-        "\\boxminus": {
-            font: "ams",
-            group: "bin",
-            replace: "\u229f"
-        },
-        "\\boxplus": {
-            font: "ams",
-            group: "bin",
-            replace: "\u229e"
-        },
-        "\\divideontimes": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22c7"
-        },
-        "\\ltimes": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22c9"
-        },
-        "\\rtimes": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22ca"
-        },
-        "\\leftthreetimes": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22cb"
-        },
-        "\\rightthreetimes": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22cc"
-        },
-        "\\curlywedge": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22cf"
-        },
-        "\\curlyvee": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22ce"
-        },
-        "\\circleddash": {
-            font: "ams",
-            group: "bin",
-            replace: "\u229d"
-        },
-        "\\circledast": {
-            font: "ams",
-            group: "bin",
-            replace: "\u229b"
-        },
-        "\\centerdot": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22c5"
-        },
-        "\\intercal": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22ba"
-        },
-        "\\doublecap": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22d2"
-        },
-        "\\doublecup": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22d3"
-        },
-        "\\boxtimes": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22a0"
-        },
-
-        // AMS Arrows
-        "\\dashrightarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21e2"
-        },
-        "\\dashleftarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21e0"
-        },
-        "\\leftleftarrows": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21c7"
-        },
-        "\\leftrightarrows": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21c6"
-        },
-        "\\Lleftarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21da"
-        },
-        "\\twoheadleftarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u219e"
-        },
-        "\\leftarrowtail": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21a2"
-        },
-        "\\looparrowleft": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21ab"
-        },
-        "\\leftrightharpoons": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21cb"
-        },
-        "\\curvearrowleft": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21b6"
-        },
-        "\\circlearrowleft": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21ba"
-        },
-        "\\Lsh": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21b0"
-        },
-        "\\upuparrows": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21c8"
-        },
-        "\\upharpoonleft": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21bf"
-        },
-        "\\downharpoonleft": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21c3"
-        },
-        "\\multimap": {
-            font: "ams",
-            group: "rel",
-            replace: "\u22b8"
-        },
-        "\\leftrightsquigarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21ad"
-        },
-        "\\rightrightarrows": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21c9"
-        },
-        "\\rightleftarrows": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21c4"
-        },
-        "\\twoheadrightarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21a0"
-        },
-        "\\rightarrowtail": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21a3"
-        },
-        "\\looparrowright": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21ac"
-        },
-        "\\curvearrowright": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21b7"
-        },
-        "\\circlearrowright": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21bb"
-        },
-        "\\Rsh": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21b1"
-        },
-        "\\downdownarrows": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21ca"
-        },
-        "\\upharpoonright": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21be"
-        },
-        "\\downharpoonright": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21c2"
-        },
-        "\\rightsquigarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21dd"
-        },
-        "\\leadsto": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21dd"
-        },
-        "\\Rrightarrow": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21db"
-        },
-        "\\restriction": {
-            font: "ams",
-            group: "rel",
-            replace: "\u21be"
-        },
-
-        "`": {
-            font: "main",
-            group: "textord",
-            replace: "\u2018"
-        },
-        "\\$": {
-            font: "main",
-            group: "textord",
-            replace: "$"
-        },
-        "\\%": {
-            font: "main",
-            group: "textord",
-            replace: "%"
-        },
-        "\\_": {
-            font: "main",
-            group: "textord",
-            replace: "_"
-        },
-        "\\angle": {
-            font: "main",
-            group: "textord",
-            replace: "\u2220"
-        },
-        "\\infty": {
-            font: "main",
-            group: "textord",
-            replace: "\u221e"
-        },
-        "\\prime": {
-            font: "main",
-            group: "textord",
-            replace: "\u2032"
-        },
-        "\\triangle": {
-            font: "main",
-            group: "textord",
-            replace: "\u25b3"
-        },
-        "\\Gamma": {
-            font: "main",
-            group: "textord",
-            replace: "\u0393"
-        },
-        "\\Delta": {
-            font: "main",
-            group: "textord",
-            replace: "\u0394"
-        },
-        "\\Theta": {
-            font: "main",
-            group: "textord",
-            replace: "\u0398"
-        },
-        "\\Lambda": {
-            font: "main",
-            group: "textord",
-            replace: "\u039b"
-        },
-        "\\Xi": {
-            font: "main",
-            group: "textord",
-            replace: "\u039e"
-        },
-        "\\Pi": {
-            font: "main",
-            group: "textord",
-            replace: "\u03a0"
-        },
-        "\\Sigma": {
-            font: "main",
-            group: "textord",
-            replace: "\u03a3"
-        },
-        "\\Upsilon": {
-            font: "main",
-            group: "textord",
-            replace: "\u03a5"
-        },
-        "\\Phi": {
-            font: "main",
-            group: "textord",
-            replace: "\u03a6"
-        },
-        "\\Psi": {
-            font: "main",
-            group: "textord",
-            replace: "\u03a8"
-        },
-        "\\Omega": {
-            font: "main",
-            group: "textord",
-            replace: "\u03a9"
-        },
-        "\\neg": {
-            font: "main",
-            group: "textord",
-            replace: "\u00ac"
-        },
-        "\\lnot": {
-            font: "main",
-            group: "textord",
-            replace: "\u00ac"
-        },
-        "\\top": {
-            font: "main",
-            group: "textord",
-            replace: "\u22a4"
-        },
-        "\\bot": {
-            font: "main",
-            group: "textord",
-            replace: "\u22a5"
-        },
-        "\\emptyset": {
-            font: "main",
-            group: "textord",
-            replace: "\u2205"
-        },
-        "\\varnothing": {
-            font: "ams",
-            group: "textord",
-            replace: "\u2205"
-        },
-        "\\alpha": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03b1"
-        },
-        "\\beta": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03b2"
-        },
-        "\\gamma": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03b3"
-        },
-        "\\delta": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03b4"
-        },
-        "\\epsilon": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03f5"
-        },
-        "\\zeta": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03b6"
-        },
-        "\\eta": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03b7"
-        },
-        "\\theta": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03b8"
-        },
-        "\\iota": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03b9"
-        },
-        "\\kappa": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03ba"
-        },
-        "\\lambda": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03bb"
-        },
-        "\\mu": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03bc"
-        },
-        "\\nu": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03bd"
-        },
-        "\\xi": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03be"
-        },
-        "\\omicron": {
-            font: "main",
-            group: "mathord",
-            replace: "o"
-        },
-        "\\pi": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c0"
-        },
-        "\\rho": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c1"
-        },
-        "\\sigma": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c3"
-        },
-        "\\tau": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c4"
-        },
-        "\\upsilon": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c5"
-        },
-        "\\phi": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03d5"
-        },
-        "\\chi": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c7"
-        },
-        "\\psi": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c8"
-        },
-        "\\omega": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c9"
-        },
-        "\\varepsilon": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03b5"
-        },
-        "\\vartheta": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03d1"
-        },
-        "\\varpi": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03d6"
-        },
-        "\\varrho": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03f1"
-        },
-        "\\varsigma": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c2"
-        },
-        "\\varphi": {
-            font: "main",
-            group: "mathord",
-            replace: "\u03c6"
-        },
-        "*": {
-            font: "main",
-            group: "bin",
-            replace: "\u2217"
-        },
-        "+": {
-            font: "main",
-            group: "bin"
-        },
-        "-": {
-            font: "main",
-            group: "bin",
-            replace: "\u2212"
-        },
-        "\\cdot": {
-            font: "main",
-            group: "bin",
-            replace: "\u22c5"
-        },
-        "\\circ": {
-            font: "main",
-            group: "bin",
-            replace: "\u2218"
-        },
-        "\\div": {
-            font: "main",
-            group: "bin",
-            replace: "\u00f7"
-        },
-        "\\pm": {
-            font: "main",
-            group: "bin",
-            replace: "\u00b1"
-        },
-        "\\times": {
-            font: "main",
-            group: "bin",
-            replace: "\u00d7"
-        },
-        "\\cap": {
-            font: "main",
-            group: "bin",
-            replace: "\u2229"
-        },
-        "\\cup": {
-            font: "main",
-            group: "bin",
-            replace: "\u222a"
-        },
-        "\\setminus": {
-            font: "main",
-            group: "bin",
-            replace: "\u2216"
-        },
-        "\\land": {
-            font: "main",
-            group: "bin",
-            replace: "\u2227"
-        },
-        "\\lor": {
-            font: "main",
-            group: "bin",
-            replace: "\u2228"
-        },
-        "\\wedge": {
-            font: "main",
-            group: "bin",
-            replace: "\u2227"
-        },
-        "\\vee": {
-            font: "main",
-            group: "bin",
-            replace: "\u2228"
-        },
-        "\\surd": {
-            font: "main",
-            group: "textord",
-            replace: "\u221a"
-        },
-        "(": {
-            font: "main",
-            group: "open"
-        },
-        "[": {
-            font: "main",
-            group: "open"
-        },
-        "\\langle": {
-            font: "main",
-            group: "open",
-            replace: "\u27e8"
-        },
-        "\\lvert": {
-            font: "main",
-            group: "open",
-            replace: "\u2223"
-        },
-        "\\lVert": {
-            font: "main",
-            group: "open",
-            replace: "\u2225"
-        },
-        ")": {
-            font: "main",
-            group: "close"
-        },
-        "]": {
-            font: "main",
-            group: "close"
-        },
-        "?": {
-            font: "main",
-            group: "close"
-        },
-        "!": {
-            font: "main",
-            group: "close"
-        },
-        "\\rangle": {
-            font: "main",
-            group: "close",
-            replace: "\u27e9"
-        },
-        "\\rvert": {
-            font: "main",
-            group: "close",
-            replace: "\u2223"
-        },
-        "\\rVert": {
-            font: "main",
-            group: "close",
-            replace: "\u2225"
-        },
-        "=": {
-            font: "main",
-            group: "rel"
-        },
-        "<": {
-            font: "main",
-            group: "rel"
-        },
-        ">": {
-            font: "main",
-            group: "rel"
-        },
-        ":": {
-            font: "main",
-            group: "rel"
-        },
-        "\\approx": {
-            font: "main",
-            group: "rel",
-            replace: "\u2248"
-        },
-        "\\cong": {
-            font: "main",
-            group: "rel",
-            replace: "\u2245"
-        },
-        "\\ge": {
-            font: "main",
-            group: "rel",
-            replace: "\u2265"
-        },
-        "\\geq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2265"
-        },
-        "\\gets": {
-            font: "main",
-            group: "rel",
-            replace: "\u2190"
-        },
-        "\\in": {
-            font: "main",
-            group: "rel",
-            replace: "\u2208"
-        },
-        "\\notin": {
-            font: "main",
-            group: "rel",
-            replace: "\u2209"
-        },
-        "\\subset": {
-            font: "main",
-            group: "rel",
-            replace: "\u2282"
-        },
-        "\\supset": {
-            font: "main",
-            group: "rel",
-            replace: "\u2283"
-        },
-        "\\subseteq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2286"
-        },
-        "\\supseteq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2287"
-        },
-        "\\nsubseteq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2288"
-        },
-        "\\nsupseteq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2289"
-        },
-        "\\models": {
-            font: "main",
-            group: "rel",
-            replace: "\u22a8"
-        },
-        "\\leftarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2190"
-        },
-        "\\le": {
-            font: "main",
-            group: "rel",
-            replace: "\u2264"
-        },
-        "\\leq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2264"
-        },
-        "\\ne": {
-            font: "main",
-            group: "rel",
-            replace: "\u2260"
-        },
-        "\\neq": {
-            font: "main",
-            group: "rel",
-            replace: "\u2260"
-        },
-        "\\rightarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2192"
-        },
-        "\\to": {
-            font: "main",
-            group: "rel",
-            replace: "\u2192"
-        },
-        "\\ngeq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2271"
-        },
-        "\\nleq": {
-            font: "ams",
-            group: "rel",
-            replace: "\u2270"
-        },
-        "\\!": {
-            font: "main",
-            group: "spacing"
-        },
-        "\\ ": {
-            font: "main",
-            group: "spacing",
-            replace: "\u00a0"
-        },
-        "~": {
-            font: "main",
-            group: "spacing",
-            replace: "\u00a0"
-        },
-        "\\,": {
-            font: "main",
-            group: "spacing"
-        },
-        "\\:": {
-            font: "main",
-            group: "spacing"
-        },
-        "\\;": {
-            font: "main",
-            group: "spacing"
-        },
-        "\\enspace": {
-            font: "main",
-            group: "spacing"
-        },
-        "\\qquad": {
-            font: "main",
-            group: "spacing"
-        },
-        "\\quad": {
-            font: "main",
-            group: "spacing"
-        },
-        "\\space": {
-            font: "main",
-            group: "spacing",
-            replace: "\u00a0"
-        },
-        ",": {
-            font: "main",
-            group: "punct"
-        },
-        ";": {
-            font: "main",
-            group: "punct"
-        },
-        "\\colon": {
-            font: "main",
-            group: "punct",
-            replace: ":"
-        },
-        "\\barwedge": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22bc"
-        },
-        "\\veebar": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22bb"
-        },
-        "\\odot": {
-            font: "main",
-            group: "bin",
-            replace: "\u2299"
-        },
-        "\\oplus": {
-            font: "main",
-            group: "bin",
-            replace: "\u2295"
-        },
-        "\\otimes": {
-            font: "main",
-            group: "bin",
-            replace: "\u2297"
-        },
-        "\\partial":{
-            font: "main",
-            group: "textord",
-            replace: "\u2202"
-        },
-        "\\oslash": {
-            font: "main",
-            group: "bin",
-            replace: "\u2298"
-        },
-        "\\circledcirc": {
-            font: "ams",
-            group: "bin",
-            replace: "\u229a"
-        },
-        "\\boxdot": {
-            font: "ams",
-            group: "bin",
-            replace: "\u22a1"
-        },
-        "\\bigtriangleup": {
-            font: "main",
-            group: "bin",
-            replace: "\u25b3"
-        },
-        "\\bigtriangledown": {
-            font: "main",
-            group: "bin",
-            replace: "\u25bd"
-        },
-        "\\dagger": {
-            font: "main",
-            group: "bin",
-            replace: "\u2020"
-        },
-        "\\diamond": {
-            font: "main",
-            group: "bin",
-            replace: "\u22c4"
-        },
-        "\\star": {
-            font: "main",
-            group: "bin",
-            replace: "\u22c6"
-        },
-        "\\triangleleft": {
-            font: "main",
-            group: "bin",
-            replace: "\u25c3"
-        },
-        "\\triangleright": {
-            font: "main",
-            group: "bin",
-            replace: "\u25b9"
-        },
-        "\\{": {
-            font: "main",
-            group: "open",
-            replace: "{"
-        },
-        "\\}": {
-            font: "main",
-            group: "close",
-            replace: "}"
-        },
-        "\\lbrace": {
-            font: "main",
-            group: "open",
-            replace: "{"
-        },
-        "\\rbrace": {
-            font: "main",
-            group: "close",
-            replace: "}"
-        },
-        "\\lbrack": {
-            font: "main",
-            group: "open",
-            replace: "["
-        },
-        "\\rbrack": {
-            font: "main",
-            group: "close",
-            replace: "]"
-        },
-        "\\lfloor": {
-            font: "main",
-            group: "open",
-            replace: "\u230a"
-        },
-        "\\rfloor": {
-            font: "main",
-            group: "close",
-            replace: "\u230b"
-        },
-        "\\lceil": {
-            font: "main",
-            group: "open",
-            replace: "\u2308"
-        },
-        "\\rceil": {
-            font: "main",
-            group: "close",
-            replace: "\u2309"
-        },
-        "\\backslash": {
-            font: "main",
-            group: "textord",
-            replace: "\\"
-        },
-        "|": {
-            font: "main",
-            group: "textord",
-            replace: "\u2223"
-        },
-        "\\vert": {
-            font: "main",
-            group: "textord",
-            replace: "\u2223"
-        },
-        "\\|": {
-            font: "main",
-            group: "textord",
-            replace: "\u2225"
-        },
-        "\\Vert": {
-            font: "main",
-            group: "textord",
-            replace: "\u2225"
-        },
-        "\\uparrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2191"
-        },
-        "\\Uparrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u21d1"
-        },
-        "\\downarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2193"
-        },
-        "\\Downarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u21d3"
-        },
-        "\\updownarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u2195"
-        },
-        "\\Updownarrow": {
-            font: "main",
-            group: "rel",
-            replace: "\u21d5"
-        },
-        "\\coprod": {
-            font: "math",
-            group: "op",
-            replace: "\u2210"
-        },
-        "\\bigvee": {
-            font: "math",
-            group: "op",
-            replace: "\u22c1"
-        },
-        "\\bigwedge": {
-            font: "math",
-            group: "op",
-            replace: "\u22c0"
-        },
-        "\\biguplus": {
-            font: "math",
-            group: "op",
-            replace: "\u2a04"
-        },
-        "\\bigcap": {
-            font: "math",
-            group: "op",
-            replace: "\u22c2"
-        },
-        "\\bigcup": {
-            font: "math",
-            group: "op",
-            replace: "\u22c3"
-        },
-        "\\int": {
-            font: "math",
-            group: "op",
-            replace: "\u222b"
-        },
-        "\\intop": {
-            font: "math",
-            group: "op",
-            replace: "\u222b"
-        },
-        "\\iint": {
-            font: "math",
-            group: "op",
-            replace: "\u222c"
-        },
-        "\\iiint": {
-            font: "math",
-            group: "op",
-            replace: "\u222d"
-        },
-        "\\prod": {
-            font: "math",
-            group: "op",
-            replace: "\u220f"
-        },
-        "\\sum": {
-            font: "math",
-            group: "op",
-            replace: "\u2211"
-        },
-        "\\bigotimes": {
-            font: "math",
-            group: "op",
-            replace: "\u2a02"
-        },
-        "\\bigoplus": {
-            font: "math",
-            group: "op",
-            replace: "\u2a01"
-        },
-        "\\bigodot": {
-            font: "math",
-            group: "op",
-            replace: "\u2a00"
-        },
-        "\\oint": {
-            font: "math",
-            group: "op",
-            replace: "\u222e"
-        },
-        "\\bigsqcup": {
-            font: "math",
-            group: "op",
-            replace: "\u2a06"
-        },
-        "\\smallint": {
-            font: "math",
-            group: "op",
-            replace: "\u222b"
-        },
-        "\\ldots": {
-            font: "main",
-            group: "inner",
-            replace: "\u2026"
-        },
-        "\\cdots": {
-            font: "main",
-            group: "inner",
-            replace: "\u22ef"
-        },
-        "\\ddots": {
-            font: "main",
-            group: "inner",
-            replace: "\u22f1"
-        },
-        "\\vdots": {
-            font: "main",
-            group: "textord",
-            replace: "\u22ee"
-        },
-        "\\acute": {
-            font: "main",
-            group: "accent",
-            replace: "\u00b4"
-        },
-        "\\grave": {
-            font: "main",
-            group: "accent",
-            replace: "\u0060"
-        },
-        "\\ddot": {
-            font: "main",
-            group: "accent",
-            replace: "\u00a8"
-        },
-        "\\tilde": {
-            font: "main",
-            group: "accent",
-            replace: "\u007e"
-        },
-        "\\bar": {
-            font: "main",
-            group: "accent",
-            replace: "\u00af"
-        },
-        "\\breve": {
-            font: "main",
-            group: "accent",
-            replace: "\u02d8"
-        },
-        "\\check": {
-            font: "main",
-            group: "accent",
-            replace: "\u02c7"
-        },
-        "\\hat": {
-            font: "main",
-            group: "accent",
-            replace: "\u005e"
-        },
-        "\\vec": {
-            font: "main",
-            group: "accent",
-            replace: "\u20d7"
-        },
-        "\\dot": {
-            font: "main",
-            group: "accent",
-            replace: "\u02d9"
-        },
-
-        "\\imath": {
-            font: "main",
-            group: "mathord",
-            replace: "\u0131"
-        },
-        "\\jmath": {
-            font: "main",
-            group: "mathord",
-            replace: "\u0237"
-        }
-    },
-    "text": {
-        "\\ ": {
-            font: "main",
-            group: "spacing",
-            replace: "\u00a0"
-        },
-        " ": {
-            font: "main",
-            group: "spacing",
-            replace: "\u00a0"
-        },
-        "~": {
-            font: "main",
-            group: "spacing",
-            replace: "\u00a0"
-        }
-    }
+module.exports = {
+    math: {},
+    text: {},
 };
 
+function defineSymbol(mode, font, group, replace, name) {
+    module.exports[mode][name] = {
+        font: font,
+        group: group,
+        replace: replace,
+    };
+}
+
+// Some abbreviations for commonly used strings.
+// This helps minify the code, and also spotting typos using jshint.
+
+// modes:
+var math = "math";
+var text = "text";
+
+// fonts:
+var main = "main";
+var ams = "ams";
+
+// groups:
+var accent = "accent";
+var bin = "bin";
+var close = "close";
+var inner = "inner";
+var mathord = "mathord";
+var op = "op";
+var open = "open";
+var punct = "punct";
+var rel = "rel";
+var spacing = "spacing";
+var textord = "textord";
+
+// Now comes the symbol table
+
+// Relation Symbols
+defineSymbol(math, main, rel, "\u2261", "\\equiv");
+defineSymbol(math, main, rel, "\u227a", "\\prec");
+defineSymbol(math, main, rel, "\u227b", "\\succ");
+defineSymbol(math, main, rel, "\u223c", "\\sim");
+defineSymbol(math, main, rel, "\u22a5", "\\perp");
+defineSymbol(math, main, rel, "\u2aaf", "\\preceq");
+defineSymbol(math, main, rel, "\u2ab0", "\\succeq");
+defineSymbol(math, main, rel, "\u2243", "\\simeq");
+defineSymbol(math, main, rel, "\u2223", "\\mid");
+defineSymbol(math, main, rel, "\u226a", "\\ll");
+defineSymbol(math, main, rel, "\u226b", "\\gg");
+defineSymbol(math, main, rel, "\u224d", "\\asymp");
+defineSymbol(math, main, rel, "\u2225", "\\parallel");
+defineSymbol(math, main, rel, "\u22c8", "\\bowtie");
+defineSymbol(math, main, rel, "\u2323", "\\smile");
+defineSymbol(math, main, rel, "\u2291", "\\sqsubseteq");
+defineSymbol(math, main, rel, "\u2292", "\\sqsupseteq");
+defineSymbol(math, main, rel, "\u2250", "\\doteq");
+defineSymbol(math, main, rel, "\u2322", "\\frown");
+defineSymbol(math, main, rel, "\u220b", "\\ni");
+defineSymbol(math, main, rel, "\u221d", "\\propto");
+defineSymbol(math, main, rel, "\u22a2", "\\vdash");
+defineSymbol(math, main, rel, "\u22a3", "\\dashv");
+defineSymbol(math, main, rel, "\u220b", "\\owns");
+
+// Punctuation
+defineSymbol(math, main, punct, "\u002e", "\\ldotp");
+defineSymbol(math, main, punct, "\u22c5", "\\cdotp");
+
+// Misc Symbols
+defineSymbol(math, main, textord, "\u0023", "\\#");
+defineSymbol(math, main, textord, "\u0026", "\\&");
+defineSymbol(math, main, textord, "\u2135", "\\aleph");
+defineSymbol(math, main, textord, "\u2200", "\\forall");
+defineSymbol(math, main, textord, "\u210f", "\\hbar");
+defineSymbol(math, main, textord, "\u2203", "\\exists");
+defineSymbol(math, main, textord, "\u2207", "\\nabla");
+defineSymbol(math, main, textord, "\u266d", "\\flat");
+defineSymbol(math, main, textord, "\u2113", "\\ell");
+defineSymbol(math, main, textord, "\u266e", "\\natural");
+defineSymbol(math, main, textord, "\u2663", "\\clubsuit");
+defineSymbol(math, main, textord, "\u2118", "\\wp");
+defineSymbol(math, main, textord, "\u266f", "\\sharp");
+defineSymbol(math, main, textord, "\u2662", "\\diamondsuit");
+defineSymbol(math, main, textord, "\u211c", "\\Re");
+defineSymbol(math, main, textord, "\u2661", "\\heartsuit");
+defineSymbol(math, main, textord, "\u2111", "\\Im");
+defineSymbol(math, main, textord, "\u2660", "\\spadesuit");
+
+// Math and Text
+defineSymbol(math, main, textord, "\u2020", "\\dag");
+defineSymbol(math, main, textord, "\u2021", "\\ddag");
+
+// Large Delimiters
+defineSymbol(math, main, close, "\u23b1", "\\rmoustache");
+defineSymbol(math, main, open, "\u23b0", "\\lmoustache");
+defineSymbol(math, main, close, "\u27ef", "\\rgroup");
+defineSymbol(math, main, open, "\u27ee", "\\lgroup");
+
+// Binary Operators
+defineSymbol(math, main, bin, "\u2213", "\\mp");
+defineSymbol(math, main, bin, "\u2296", "\\ominus");
+defineSymbol(math, main, bin, "\u228e", "\\uplus");
+defineSymbol(math, main, bin, "\u2293", "\\sqcap");
+defineSymbol(math, main, bin, "\u2217", "\\ast");
+defineSymbol(math, main, bin, "\u2294", "\\sqcup");
+defineSymbol(math, main, bin, "\u25ef", "\\bigcirc");
+defineSymbol(math, main, bin, "\u2219", "\\bullet");
+defineSymbol(math, main, bin, "\u2021", "\\ddagger");
+defineSymbol(math, main, bin, "\u2240", "\\wr");
+defineSymbol(math, main, bin, "\u2a3f", "\\amalg");
+
+// Arrow Symbols
+defineSymbol(math, main, rel, "\u27f5", "\\longleftarrow");
+defineSymbol(math, main, rel, "\u21d0", "\\Leftarrow");
+defineSymbol(math, main, rel, "\u27f8", "\\Longleftarrow");
+defineSymbol(math, main, rel, "\u27f6", "\\longrightarrow");
+defineSymbol(math, main, rel, "\u21d2", "\\Rightarrow");
+defineSymbol(math, main, rel, "\u27f9", "\\Longrightarrow");
+defineSymbol(math, main, rel, "\u2194", "\\leftrightarrow");
+defineSymbol(math, main, rel, "\u27f7", "\\longleftrightarrow");
+defineSymbol(math, main, rel, "\u21d4", "\\Leftrightarrow");
+defineSymbol(math, main, rel, "\u27fa", "\\Longleftrightarrow");
+defineSymbol(math, main, rel, "\u21a6", "\\mapsto");
+defineSymbol(math, main, rel, "\u27fc", "\\longmapsto");
+defineSymbol(math, main, rel, "\u2197", "\\nearrow");
+defineSymbol(math, main, rel, "\u21a9", "\\hookleftarrow");
+defineSymbol(math, main, rel, "\u21aa", "\\hookrightarrow");
+defineSymbol(math, main, rel, "\u2198", "\\searrow");
+defineSymbol(math, main, rel, "\u21bc", "\\leftharpoonup");
+defineSymbol(math, main, rel, "\u21c0", "\\rightharpoonup");
+defineSymbol(math, main, rel, "\u2199", "\\swarrow");
+defineSymbol(math, main, rel, "\u21bd", "\\leftharpoondown");
+defineSymbol(math, main, rel, "\u21c1", "\\rightharpoondown");
+defineSymbol(math, main, rel, "\u2196", "\\nwarrow");
+defineSymbol(math, main, rel, "\u21cc", "\\rightleftharpoons");
+
+// AMS Negated Binary Relations
+defineSymbol(math, ams, rel, "\u226e", "\\nless");
+defineSymbol(math, ams, rel, "\ue010", "\\nleqslant");
+defineSymbol(math, ams, rel, "\ue011", "\\nleqq");
+defineSymbol(math, ams, rel, "\u2a87", "\\lneq");
+defineSymbol(math, ams, rel, "\u2268", "\\lneqq");
+defineSymbol(math, ams, rel, "\ue00c", "\\lvertneqq");
+defineSymbol(math, ams, rel, "\u22e6", "\\lnsim");
+defineSymbol(math, ams, rel, "\u2a89", "\\lnapprox");
+defineSymbol(math, ams, rel, "\u2280", "\\nprec");
+defineSymbol(math, ams, rel, "\u22e0", "\\npreceq");
+defineSymbol(math, ams, rel, "\u22e8", "\\precnsim");
+defineSymbol(math, ams, rel, "\u2ab9", "\\precnapprox");
+defineSymbol(math, ams, rel, "\u2241", "\\nsim");
+defineSymbol(math, ams, rel, "\ue006", "\\nshortmid");
+defineSymbol(math, ams, rel, "\u2224", "\\nmid");
+defineSymbol(math, ams, rel, "\u22ac", "\\nvdash");
+defineSymbol(math, ams, rel, "\u22ad", "\\nvDash");
+defineSymbol(math, ams, rel, "\u22ea", "\\ntriangleleft");
+defineSymbol(math, ams, rel, "\u22ec", "\\ntrianglelefteq");
+defineSymbol(math, ams, rel, "\u228a", "\\subsetneq");
+defineSymbol(math, ams, rel, "\ue01a", "\\varsubsetneq");
+defineSymbol(math, ams, rel, "\u2acb", "\\subsetneqq");
+defineSymbol(math, ams, rel, "\ue017", "\\varsubsetneqq");
+defineSymbol(math, ams, rel, "\u226f", "\\ngtr");
+defineSymbol(math, ams, rel, "\ue00f", "\\ngeqslant");
+defineSymbol(math, ams, rel, "\ue00e", "\\ngeqq");
+defineSymbol(math, ams, rel, "\u2a88", "\\gneq");
+defineSymbol(math, ams, rel, "\u2269", "\\gneqq");
+defineSymbol(math, ams, rel, "\ue00d", "\\gvertneqq");
+defineSymbol(math, ams, rel, "\u22e7", "\\gnsim");
+defineSymbol(math, ams, rel, "\u2a8a", "\\gnapprox");
+defineSymbol(math, ams, rel, "\u2281", "\\nsucc");
+defineSymbol(math, ams, rel, "\u22e1", "\\nsucceq");
+defineSymbol(math, ams, rel, "\u22e9", "\\succnsim");
+defineSymbol(math, ams, rel, "\u2aba", "\\succnapprox");
+defineSymbol(math, ams, rel, "\u2246", "\\ncong");
+defineSymbol(math, ams, rel, "\ue007", "\\nshortparallel");
+defineSymbol(math, ams, rel, "\u2226", "\\nparallel");
+defineSymbol(math, ams, rel, "\u22af", "\\nVDash");
+defineSymbol(math, ams, rel, "\u22eb", "\\ntriangleright");
+defineSymbol(math, ams, rel, "\u22ed", "\\ntrianglerighteq");
+defineSymbol(math, ams, rel, "\ue018", "\\nsupseteqq");
+defineSymbol(math, ams, rel, "\u228b", "\\supsetneq");
+defineSymbol(math, ams, rel, "\ue01b", "\\varsupsetneq");
+defineSymbol(math, ams, rel, "\u2acc", "\\supsetneqq");
+defineSymbol(math, ams, rel, "\ue019", "\\varsupsetneqq");
+defineSymbol(math, ams, rel, "\u22ae", "\\nVdash");
+defineSymbol(math, ams, rel, "\u2ab5", "\\precneqq");
+defineSymbol(math, ams, rel, "\u2ab6", "\\succneqq");
+defineSymbol(math, ams, rel, "\ue016", "\\nsubseteqq");
+defineSymbol(math, ams, bin, "\u22b4", "\\unlhd");
+defineSymbol(math, ams, bin, "\u22b5", "\\unrhd");
+
+// AMS Negated Arrows
+defineSymbol(math, ams, rel, "\u219a", "\\nleftarrow");
+defineSymbol(math, ams, rel, "\u219b", "\\nrightarrow");
+defineSymbol(math, ams, rel, "\u21cd", "\\nLeftarrow");
+defineSymbol(math, ams, rel, "\u21cf", "\\nRightarrow");
+defineSymbol(math, ams, rel, "\u21ae", "\\nleftrightarrow");
+defineSymbol(math, ams, rel, "\u21ce", "\\nLeftrightarrow");
+
+// AMS Misc
+defineSymbol(math, ams, rel, "\u25b3", "\\vartriangle");
+defineSymbol(math, ams, textord, "\u210f", "\\hslash");
+defineSymbol(math, ams, textord, "\u25bd", "\\triangledown");
+defineSymbol(math, ams, textord, "\u25ca", "\\lozenge");
+defineSymbol(math, ams, textord, "\u24c8", "\\circledS");
+defineSymbol(math, ams, textord, "\u00ae", "\\circledR");
+defineSymbol(math, ams, textord, "\u2221", "\\measuredangle");
+defineSymbol(math, ams, textord, "\u2204", "\\nexists");
+defineSymbol(math, ams, textord, "\u2127", "\\mho");
+defineSymbol(math, ams, textord, "\u2132", "\\Finv");
+defineSymbol(math, ams, textord, "\u2141", "\\Game");
+defineSymbol(math, ams, textord, "\u006b", "\\Bbbk");
+defineSymbol(math, ams, textord, "\u2035", "\\backprime");
+defineSymbol(math, ams, textord, "\u25b2", "\\blacktriangle");
+defineSymbol(math, ams, textord, "\u25bc", "\\blacktriangledown");
+defineSymbol(math, ams, textord, "\u25a0", "\\blacksquare");
+defineSymbol(math, ams, textord, "\u29eb", "\\blacklozenge");
+defineSymbol(math, ams, textord, "\u2605", "\\bigstar");
+defineSymbol(math, ams, textord, "\u2222", "\\sphericalangle");
+defineSymbol(math, ams, textord, "\u2201", "\\complement");
+defineSymbol(math, ams, textord, "\u00f0", "\\eth");
+defineSymbol(math, ams, textord, "\u2571", "\\diagup");
+defineSymbol(math, ams, textord, "\u2572", "\\diagdown");
+defineSymbol(math, ams, textord, "\u25a1", "\\square");
+defineSymbol(math, ams, textord, "\u25a1", "\\Box");
+defineSymbol(math, ams, textord, "\u25ca", "\\Diamond");
+defineSymbol(math, ams, textord, "\u00a5", "\\yen");
+defineSymbol(math, ams, textord, "\u2713", "\\checkmark");
+
+// AMS Hebrew
+defineSymbol(math, ams, textord, "\u2136", "\\beth");
+defineSymbol(math, ams, textord, "\u2138", "\\daleth");
+defineSymbol(math, ams, textord, "\u2137", "\\gimel");
+
+// AMS Greek
+defineSymbol(math, ams, textord, "\u03dd", "\\digamma");
+defineSymbol(math, ams, textord, "\u03f0", "\\varkappa");
+
+// AMS Delimiters
+defineSymbol(math, ams, open, "\u250c", "\\ulcorner");
+defineSymbol(math, ams, close, "\u2510", "\\urcorner");
+defineSymbol(math, ams, open, "\u2514", "\\llcorner");
+defineSymbol(math, ams, close, "\u2518", "\\lrcorner");
+
+// AMS Binary Relations
+defineSymbol(math, ams, rel, "\u2266", "\\leqq");
+defineSymbol(math, ams, rel, "\u2a7d", "\\leqslant");
+defineSymbol(math, ams, rel, "\u2a95", "\\eqslantless");
+defineSymbol(math, ams, rel, "\u2272", "\\lesssim");
+defineSymbol(math, ams, rel, "\u2a85", "\\lessapprox");
+defineSymbol(math, ams, rel, "\u224a", "\\approxeq");
+defineSymbol(math, ams, bin, "\u22d6", "\\lessdot");
+defineSymbol(math, ams, rel, "\u22d8", "\\lll");
+defineSymbol(math, ams, rel, "\u2276", "\\lessgtr");
+defineSymbol(math, ams, rel, "\u22da", "\\lesseqgtr");
+defineSymbol(math, ams, rel, "\u2a8b", "\\lesseqqgtr");
+defineSymbol(math, ams, rel, "\u2251", "\\doteqdot");
+defineSymbol(math, ams, rel, "\u2253", "\\risingdotseq");
+defineSymbol(math, ams, rel, "\u2252", "\\fallingdotseq");
+defineSymbol(math, ams, rel, "\u223d", "\\backsim");
+defineSymbol(math, ams, rel, "\u22cd", "\\backsimeq");
+defineSymbol(math, ams, rel, "\u2ac5", "\\subseteqq");
+defineSymbol(math, ams, rel, "\u22d0", "\\Subset");
+defineSymbol(math, ams, rel, "\u228f", "\\sqsubset");
+defineSymbol(math, ams, rel, "\u227c", "\\preccurlyeq");
+defineSymbol(math, ams, rel, "\u22de", "\\curlyeqprec");
+defineSymbol(math, ams, rel, "\u227e", "\\precsim");
+defineSymbol(math, ams, rel, "\u2ab7", "\\precapprox");
+defineSymbol(math, ams, rel, "\u22b2", "\\vartriangleleft");
+defineSymbol(math, ams, rel, "\u22b4", "\\trianglelefteq");
+defineSymbol(math, ams, rel, "\u22a8", "\\vDash");
+defineSymbol(math, ams, rel, "\u22aa", "\\Vvdash");
+defineSymbol(math, ams, rel, "\u2323", "\\smallsmile");
+defineSymbol(math, ams, rel, "\u2322", "\\smallfrown");
+defineSymbol(math, ams, rel, "\u224f", "\\bumpeq");
+defineSymbol(math, ams, rel, "\u224e", "\\Bumpeq");
+defineSymbol(math, ams, rel, "\u2267", "\\geqq");
+defineSymbol(math, ams, rel, "\u2a7e", "\\geqslant");
+defineSymbol(math, ams, rel, "\u2a96", "\\eqslantgtr");
+defineSymbol(math, ams, rel, "\u2273", "\\gtrsim");
+defineSymbol(math, ams, rel, "\u2a86", "\\gtrapprox");
+defineSymbol(math, ams, bin, "\u22d7", "\\gtrdot");
+defineSymbol(math, ams, rel, "\u22d9", "\\ggg");
+defineSymbol(math, ams, rel, "\u2277", "\\gtrless");
+defineSymbol(math, ams, rel, "\u22db", "\\gtreqless");
+defineSymbol(math, ams, rel, "\u2a8c", "\\gtreqqless");
+defineSymbol(math, ams, rel, "\u2256", "\\eqcirc");
+defineSymbol(math, ams, rel, "\u2257", "\\circeq");
+defineSymbol(math, ams, rel, "\u225c", "\\triangleq");
+defineSymbol(math, ams, rel, "\u223c", "\\thicksim");
+defineSymbol(math, ams, rel, "\u2248", "\\thickapprox");
+defineSymbol(math, ams, rel, "\u2ac6", "\\supseteqq");
+defineSymbol(math, ams, rel, "\u22d1", "\\Supset");
+defineSymbol(math, ams, rel, "\u2290", "\\sqsupset");
+defineSymbol(math, ams, rel, "\u227d", "\\succcurlyeq");
+defineSymbol(math, ams, rel, "\u22df", "\\curlyeqsucc");
+defineSymbol(math, ams, rel, "\u227f", "\\succsim");
+defineSymbol(math, ams, rel, "\u2ab8", "\\succapprox");
+defineSymbol(math, ams, rel, "\u22b3", "\\vartriangleright");
+defineSymbol(math, ams, rel, "\u22b5", "\\trianglerighteq");
+defineSymbol(math, ams, rel, "\u22a9", "\\Vdash");
+defineSymbol(math, ams, rel, "\u2223", "\\shortmid");
+defineSymbol(math, ams, rel, "\u2225", "\\shortparallel");
+defineSymbol(math, ams, rel, "\u226c", "\\between");
+defineSymbol(math, ams, rel, "\u22d4", "\\pitchfork");
+defineSymbol(math, ams, rel, "\u221d", "\\varpropto");
+defineSymbol(math, ams, rel, "\u25c0", "\\blacktriangleleft");
+defineSymbol(math, ams, rel, "\u2234", "\\therefore");
+defineSymbol(math, ams, rel, "\u220d", "\\backepsilon");
+defineSymbol(math, ams, rel, "\u25b6", "\\blacktriangleright");
+defineSymbol(math, ams, rel, "\u2235", "\\because");
+defineSymbol(math, ams, rel, "\u22d8", "\\llless");
+defineSymbol(math, ams, rel, "\u22d9", "\\gggtr");
+defineSymbol(math, ams, bin, "\u22b2", "\\lhd");
+defineSymbol(math, ams, bin, "\u22b3", "\\rhd");
+defineSymbol(math, ams, rel, "\u2242", "\\eqsim");
+defineSymbol(math, main, rel, "\u22c8", "\\Join");
+defineSymbol(math, ams, rel, "\u2251", "\\Doteq");
+
+// AMS Binary Operators
+defineSymbol(math, ams, bin, "\u2214", "\\dotplus");
+defineSymbol(math, ams, bin, "\u2216", "\\smallsetminus");
+defineSymbol(math, ams, bin, "\u22d2", "\\Cap");
+defineSymbol(math, ams, bin, "\u22d3", "\\Cup");
+defineSymbol(math, ams, bin, "\u2a5e", "\\doublebarwedge");
+defineSymbol(math, ams, bin, "\u229f", "\\boxminus");
+defineSymbol(math, ams, bin, "\u229e", "\\boxplus");
+defineSymbol(math, ams, bin, "\u22c7", "\\divideontimes");
+defineSymbol(math, ams, bin, "\u22c9", "\\ltimes");
+defineSymbol(math, ams, bin, "\u22ca", "\\rtimes");
+defineSymbol(math, ams, bin, "\u22cb", "\\leftthreetimes");
+defineSymbol(math, ams, bin, "\u22cc", "\\rightthreetimes");
+defineSymbol(math, ams, bin, "\u22cf", "\\curlywedge");
+defineSymbol(math, ams, bin, "\u22ce", "\\curlyvee");
+defineSymbol(math, ams, bin, "\u229d", "\\circleddash");
+defineSymbol(math, ams, bin, "\u229b", "\\circledast");
+defineSymbol(math, ams, bin, "\u22c5", "\\centerdot");
+defineSymbol(math, ams, bin, "\u22ba", "\\intercal");
+defineSymbol(math, ams, bin, "\u22d2", "\\doublecap");
+defineSymbol(math, ams, bin, "\u22d3", "\\doublecup");
+defineSymbol(math, ams, bin, "\u22a0", "\\boxtimes");
+
+// AMS Arrows
+defineSymbol(math, ams, rel, "\u21e2", "\\dashrightarrow");
+defineSymbol(math, ams, rel, "\u21e0", "\\dashleftarrow");
+defineSymbol(math, ams, rel, "\u21c7", "\\leftleftarrows");
+defineSymbol(math, ams, rel, "\u21c6", "\\leftrightarrows");
+defineSymbol(math, ams, rel, "\u21da", "\\Lleftarrow");
+defineSymbol(math, ams, rel, "\u219e", "\\twoheadleftarrow");
+defineSymbol(math, ams, rel, "\u21a2", "\\leftarrowtail");
+defineSymbol(math, ams, rel, "\u21ab", "\\looparrowleft");
+defineSymbol(math, ams, rel, "\u21cb", "\\leftrightharpoons");
+defineSymbol(math, ams, rel, "\u21b6", "\\curvearrowleft");
+defineSymbol(math, ams, rel, "\u21ba", "\\circlearrowleft");
+defineSymbol(math, ams, rel, "\u21b0", "\\Lsh");
+defineSymbol(math, ams, rel, "\u21c8", "\\upuparrows");
+defineSymbol(math, ams, rel, "\u21bf", "\\upharpoonleft");
+defineSymbol(math, ams, rel, "\u21c3", "\\downharpoonleft");
+defineSymbol(math, ams, rel, "\u22b8", "\\multimap");
+defineSymbol(math, ams, rel, "\u21ad", "\\leftrightsquigarrow");
+defineSymbol(math, ams, rel, "\u21c9", "\\rightrightarrows");
+defineSymbol(math, ams, rel, "\u21c4", "\\rightleftarrows");
+defineSymbol(math, ams, rel, "\u21a0", "\\twoheadrightarrow");
+defineSymbol(math, ams, rel, "\u21a3", "\\rightarrowtail");
+defineSymbol(math, ams, rel, "\u21ac", "\\looparrowright");
+defineSymbol(math, ams, rel, "\u21b7", "\\curvearrowright");
+defineSymbol(math, ams, rel, "\u21bb", "\\circlearrowright");
+defineSymbol(math, ams, rel, "\u21b1", "\\Rsh");
+defineSymbol(math, ams, rel, "\u21ca", "\\downdownarrows");
+defineSymbol(math, ams, rel, "\u21be", "\\upharpoonright");
+defineSymbol(math, ams, rel, "\u21c2", "\\downharpoonright");
+defineSymbol(math, ams, rel, "\u21dd", "\\rightsquigarrow");
+defineSymbol(math, ams, rel, "\u21dd", "\\leadsto");
+defineSymbol(math, ams, rel, "\u21db", "\\Rrightarrow");
+defineSymbol(math, ams, rel, "\u21be", "\\restriction");
+
+defineSymbol(math, main, textord, "\u2018", "`");
+defineSymbol(math, main, textord, "$", "\\$");
+defineSymbol(math, main, textord, "%", "\\%");
+defineSymbol(math, main, textord, "_", "\\_");
+defineSymbol(math, main, textord, "\u2220", "\\angle");
+defineSymbol(math, main, textord, "\u221e", "\\infty");
+defineSymbol(math, main, textord, "\u2032", "\\prime");
+defineSymbol(math, main, textord, "\u25b3", "\\triangle");
+defineSymbol(math, main, textord, "\u0393", "\\Gamma");
+defineSymbol(math, main, textord, "\u0394", "\\Delta");
+defineSymbol(math, main, textord, "\u0398", "\\Theta");
+defineSymbol(math, main, textord, "\u039b", "\\Lambda");
+defineSymbol(math, main, textord, "\u039e", "\\Xi");
+defineSymbol(math, main, textord, "\u03a0", "\\Pi");
+defineSymbol(math, main, textord, "\u03a3", "\\Sigma");
+defineSymbol(math, main, textord, "\u03a5", "\\Upsilon");
+defineSymbol(math, main, textord, "\u03a6", "\\Phi");
+defineSymbol(math, main, textord, "\u03a8", "\\Psi");
+defineSymbol(math, main, textord, "\u03a9", "\\Omega");
+defineSymbol(math, main, textord, "\u00ac", "\\neg");
+defineSymbol(math, main, textord, "\u00ac", "\\lnot");
+defineSymbol(math, main, textord, "\u22a4", "\\top");
+defineSymbol(math, main, textord, "\u22a5", "\\bot");
+defineSymbol(math, main, textord, "\u2205", "\\emptyset");
+defineSymbol(math, ams, textord, "\u2205", "\\varnothing");
+defineSymbol(math, main, mathord, "\u03b1", "\\alpha");
+defineSymbol(math, main, mathord, "\u03b2", "\\beta");
+defineSymbol(math, main, mathord, "\u03b3", "\\gamma");
+defineSymbol(math, main, mathord, "\u03b4", "\\delta");
+defineSymbol(math, main, mathord, "\u03f5", "\\epsilon");
+defineSymbol(math, main, mathord, "\u03b6", "\\zeta");
+defineSymbol(math, main, mathord, "\u03b7", "\\eta");
+defineSymbol(math, main, mathord, "\u03b8", "\\theta");
+defineSymbol(math, main, mathord, "\u03b9", "\\iota");
+defineSymbol(math, main, mathord, "\u03ba", "\\kappa");
+defineSymbol(math, main, mathord, "\u03bb", "\\lambda");
+defineSymbol(math, main, mathord, "\u03bc", "\\mu");
+defineSymbol(math, main, mathord, "\u03bd", "\\nu");
+defineSymbol(math, main, mathord, "\u03be", "\\xi");
+defineSymbol(math, main, mathord, "o", "\\omicron");
+defineSymbol(math, main, mathord, "\u03c0", "\\pi");
+defineSymbol(math, main, mathord, "\u03c1", "\\rho");
+defineSymbol(math, main, mathord, "\u03c3", "\\sigma");
+defineSymbol(math, main, mathord, "\u03c4", "\\tau");
+defineSymbol(math, main, mathord, "\u03c5", "\\upsilon");
+defineSymbol(math, main, mathord, "\u03d5", "\\phi");
+defineSymbol(math, main, mathord, "\u03c7", "\\chi");
+defineSymbol(math, main, mathord, "\u03c8", "\\psi");
+defineSymbol(math, main, mathord, "\u03c9", "\\omega");
+defineSymbol(math, main, mathord, "\u03b5", "\\varepsilon");
+defineSymbol(math, main, mathord, "\u03d1", "\\vartheta");
+defineSymbol(math, main, mathord, "\u03d6", "\\varpi");
+defineSymbol(math, main, mathord, "\u03f1", "\\varrho");
+defineSymbol(math, main, mathord, "\u03c2", "\\varsigma");
+defineSymbol(math, main, mathord, "\u03c6", "\\varphi");
+defineSymbol(math, main, bin, "\u2217", "*");
+defineSymbol(math, main, bin, "+", "+");
+defineSymbol(math, main, bin, "\u2212", "-");
+defineSymbol(math, main, bin, "\u22c5", "\\cdot");
+defineSymbol(math, main, bin, "\u2218", "\\circ");
+defineSymbol(math, main, bin, "\u00f7", "\\div");
+defineSymbol(math, main, bin, "\u00b1", "\\pm");
+defineSymbol(math, main, bin, "\u00d7", "\\times");
+defineSymbol(math, main, bin, "\u2229", "\\cap");
+defineSymbol(math, main, bin, "\u222a", "\\cup");
+defineSymbol(math, main, bin, "\u2216", "\\setminus");
+defineSymbol(math, main, bin, "\u2227", "\\land");
+defineSymbol(math, main, bin, "\u2228", "\\lor");
+defineSymbol(math, main, bin, "\u2227", "\\wedge");
+defineSymbol(math, main, bin, "\u2228", "\\vee");
+defineSymbol(math, main, textord, "\u221a", "\\surd");
+defineSymbol(math, main, open, "(", "(");
+defineSymbol(math, main, open, "[", "[");
+defineSymbol(math, main, open, "\u27e8", "\\langle");
+defineSymbol(math, main, open, "\u2223", "\\lvert");
+defineSymbol(math, main, open, "\u2225", "\\lVert");
+defineSymbol(math, main, close, ")", ")");
+defineSymbol(math, main, close, "]", "]");
+defineSymbol(math, main, close, "?", "?");
+defineSymbol(math, main, close, "!", "!");
+defineSymbol(math, main, close, "\u27e9", "\\rangle");
+defineSymbol(math, main, close, "\u2223", "\\rvert");
+defineSymbol(math, main, close, "\u2225", "\\rVert");
+defineSymbol(math, main, rel, "=", "=");
+defineSymbol(math, main, rel, "<", "<");
+defineSymbol(math, main, rel, ">", ">");
+defineSymbol(math, main, rel, ":", ":");
+defineSymbol(math, main, rel, "\u2248", "\\approx");
+defineSymbol(math, main, rel, "\u2245", "\\cong");
+defineSymbol(math, main, rel, "\u2265", "\\ge");
+defineSymbol(math, main, rel, "\u2265", "\\geq");
+defineSymbol(math, main, rel, "\u2190", "\\gets");
+defineSymbol(math, main, rel, ">", "\\gt");
+defineSymbol(math, main, rel, "\u2208", "\\in");
+defineSymbol(math, main, rel, "\u2209", "\\notin");
+defineSymbol(math, main, rel, "\u2282", "\\subset");
+defineSymbol(math, main, rel, "\u2283", "\\supset");
+defineSymbol(math, main, rel, "\u2286", "\\subseteq");
+defineSymbol(math, main, rel, "\u2287", "\\supseteq");
+defineSymbol(math, ams, rel, "\u2288", "\\nsubseteq");
+defineSymbol(math, ams, rel, "\u2289", "\\nsupseteq");
+defineSymbol(math, main, rel, "\u22a8", "\\models");
+defineSymbol(math, main, rel, "\u2190", "\\leftarrow");
+defineSymbol(math, main, rel, "\u2264", "\\le");
+defineSymbol(math, main, rel, "\u2264", "\\leq");
+defineSymbol(math, main, rel, "<", "\\lt");
+defineSymbol(math, main, rel, "\u2260", "\\ne");
+defineSymbol(math, main, rel, "\u2260", "\\neq");
+defineSymbol(math, main, rel, "\u2192", "\\rightarrow");
+defineSymbol(math, main, rel, "\u2192", "\\to");
+defineSymbol(math, ams, rel, "\u2271", "\\ngeq");
+defineSymbol(math, ams, rel, "\u2270", "\\nleq");
+defineSymbol(math, main, spacing, null, "\\!");
+defineSymbol(math, main, spacing, "\u00a0", "\\ ");
+defineSymbol(math, main, spacing, "\u00a0", "~");
+defineSymbol(math, main, spacing, null, "\\,");
+defineSymbol(math, main, spacing, null, "\\:");
+defineSymbol(math, main, spacing, null, "\\;");
+defineSymbol(math, main, spacing, null, "\\enspace");
+defineSymbol(math, main, spacing, null, "\\qquad");
+defineSymbol(math, main, spacing, null, "\\quad");
+defineSymbol(math, main, spacing, "\u00a0", "\\space");
+defineSymbol(math, main, punct, ",", ",");
+defineSymbol(math, main, punct, ";", ";");
+defineSymbol(math, main, punct, ":", "\\colon");
+defineSymbol(math, ams, bin, "\u22bc", "\\barwedge");
+defineSymbol(math, ams, bin, "\u22bb", "\\veebar");
+defineSymbol(math, main, bin, "\u2299", "\\odot");
+defineSymbol(math, main, bin, "\u2295", "\\oplus");
+defineSymbol(math, main, bin, "\u2297", "\\otimes");
+defineSymbol(math, main, textord, "\u2202", "\\partial");
+defineSymbol(math, main, bin, "\u2298", "\\oslash");
+defineSymbol(math, ams, bin, "\u229a", "\\circledcirc");
+defineSymbol(math, ams, bin, "\u22a1", "\\boxdot");
+defineSymbol(math, main, bin, "\u25b3", "\\bigtriangleup");
+defineSymbol(math, main, bin, "\u25bd", "\\bigtriangledown");
+defineSymbol(math, main, bin, "\u2020", "\\dagger");
+defineSymbol(math, main, bin, "\u22c4", "\\diamond");
+defineSymbol(math, main, bin, "\u22c6", "\\star");
+defineSymbol(math, main, bin, "\u25c3", "\\triangleleft");
+defineSymbol(math, main, bin, "\u25b9", "\\triangleright");
+defineSymbol(math, main, open, "{", "\\{");
+defineSymbol(math, main, close, "}", "\\}");
+defineSymbol(math, main, open, "{", "\\lbrace");
+defineSymbol(math, main, close, "}", "\\rbrace");
+defineSymbol(math, main, open, "[", "\\lbrack");
+defineSymbol(math, main, close, "]", "\\rbrack");
+defineSymbol(math, main, open, "\u230a", "\\lfloor");
+defineSymbol(math, main, close, "\u230b", "\\rfloor");
+defineSymbol(math, main, open, "\u2308", "\\lceil");
+defineSymbol(math, main, close, "\u2309", "\\rceil");
+defineSymbol(math, main, textord, "\\", "\\backslash");
+defineSymbol(math, main, textord, "\u2223", "|");
+defineSymbol(math, main, textord, "\u2223", "\\vert");
+defineSymbol(math, main, textord, "\u2225", "\\|");
+defineSymbol(math, main, textord, "\u2225", "\\Vert");
+defineSymbol(math, main, rel, "\u2191", "\\uparrow");
+defineSymbol(math, main, rel, "\u21d1", "\\Uparrow");
+defineSymbol(math, main, rel, "\u2193", "\\downarrow");
+defineSymbol(math, main, rel, "\u21d3", "\\Downarrow");
+defineSymbol(math, main, rel, "\u2195", "\\updownarrow");
+defineSymbol(math, main, rel, "\u21d5", "\\Updownarrow");
+defineSymbol(math, math, op, "\u2210", "\\coprod");
+defineSymbol(math, math, op, "\u22c1", "\\bigvee");
+defineSymbol(math, math, op, "\u22c0", "\\bigwedge");
+defineSymbol(math, math, op, "\u2a04", "\\biguplus");
+defineSymbol(math, math, op, "\u22c2", "\\bigcap");
+defineSymbol(math, math, op, "\u22c3", "\\bigcup");
+defineSymbol(math, math, op, "\u222b", "\\int");
+defineSymbol(math, math, op, "\u222b", "\\intop");
+defineSymbol(math, math, op, "\u222c", "\\iint");
+defineSymbol(math, math, op, "\u222d", "\\iiint");
+defineSymbol(math, math, op, "\u220f", "\\prod");
+defineSymbol(math, math, op, "\u2211", "\\sum");
+defineSymbol(math, math, op, "\u2a02", "\\bigotimes");
+defineSymbol(math, math, op, "\u2a01", "\\bigoplus");
+defineSymbol(math, math, op, "\u2a00", "\\bigodot");
+defineSymbol(math, math, op, "\u222e", "\\oint");
+defineSymbol(math, math, op, "\u2a06", "\\bigsqcup");
+defineSymbol(math, math, op, "\u222b", "\\smallint");
+defineSymbol(math, main, inner, "\u2026", "\\ldots");
+defineSymbol(math, main, inner, "\u22ef", "\\cdots");
+defineSymbol(math, main, inner, "\u22f1", "\\ddots");
+defineSymbol(math, main, textord, "\u22ee", "\\vdots");
+defineSymbol(math, main, accent, "\u00b4", "\\acute");
+defineSymbol(math, main, accent, "\u0060", "\\grave");
+defineSymbol(math, main, accent, "\u00a8", "\\ddot");
+defineSymbol(math, main, accent, "\u007e", "\\tilde");
+defineSymbol(math, main, accent, "\u00af", "\\bar");
+defineSymbol(math, main, accent, "\u02d8", "\\breve");
+defineSymbol(math, main, accent, "\u02c7", "\\check");
+defineSymbol(math, main, accent, "\u005e", "\\hat");
+defineSymbol(math, main, accent, "\u20d7", "\\vec");
+defineSymbol(math, main, accent, "\u02d9", "\\dot");
+defineSymbol(math, main, mathord, "\u0131", "\\imath");
+defineSymbol(math, main, mathord, "\u0237", "\\jmath");
+
+defineSymbol(text, main, spacing, "\u00a0", "\\ ");
+defineSymbol(text, main, spacing, "\u00a0", " ");
+defineSymbol(text, main, spacing, "\u00a0", "~");
+
 // There are lots of symbols which are the same, so we add them in afterwards.
+var i;
+var ch;
 
 // All of these are textords in math mode
 var mathTextSymbols = "0123456789/@.\"";
-for (var i = 0; i < mathTextSymbols.length; i++) {
-    var ch = mathTextSymbols.charAt(i);
-    symbols.math[ch] = {
-        font: "main",
-        group: "textord"
-    };
+for (i = 0; i < mathTextSymbols.length; i++) {
+    ch = mathTextSymbols.charAt(i);
+    defineSymbol(math, main, textord, ch, ch);
 }
 
 // All of these are textords in text mode
 var textSymbols = "0123456789`!@*()-=+[]'\";:?/.,";
-for (var i = 0; i < textSymbols.length; i++) {
-    var ch = textSymbols.charAt(i);
-    symbols.text[ch] = {
-        font: "main",
-        group: "textord"
-    };
+for (i = 0; i < textSymbols.length; i++) {
+    ch = textSymbols.charAt(i);
+    defineSymbol(text, main, textord, ch, ch);
 }
 
 // All of these are textords in text mode, and mathords in math mode
 var letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-for (var i = 0; i < letters.length; i++) {
-    var ch = letters.charAt(i);
-    symbols.math[ch] = {
-        font: "main",
-        group: "mathord"
-    };
-    symbols.text[ch] = {
-        font: "main",
-        group: "textord"
-    };
+for (i = 0; i < letters.length; i++) {
+    ch = letters.charAt(i);
+    defineSymbol(math, main, mathord, ch, ch);
+    defineSymbol(text, main, textord, ch, ch);
 }
 
-module.exports = symbols;
-
-},{}],34:[function(require,module,exports){
+},{}],36:[function(require,module,exports){
 /**
  * This file contains a list of utility functions which are useful in other
  * files.
@@ -12851,7 +11266,8 @@ var indexOf = function(list, elem) {
     if (nativeIndexOf && list.indexOf === nativeIndexOf) {
         return list.indexOf(elem);
     }
-    var i = 0, l = list.length;
+    var i = 0;
+    var l = list.length;
     for (; i < l; i++) {
         if (list[i] === elem) {
             return i;
@@ -12882,17 +11298,17 @@ var hyphenate = function(str) {
 };
 
 var ESCAPE_LOOKUP = {
-  "&": "&amp;",
-  ">": "&gt;",
-  "<": "&lt;",
-  "\"": "&quot;",
-  "'": "&#x27;"
+    "&": "&amp;",
+    ">": "&gt;",
+    "<": "&lt;",
+    "\"": "&quot;",
+    "'": "&#x27;",
 };
 
 var ESCAPE_REGEX = /[&><"']/g;
 
 function escaper(match) {
-  return ESCAPE_LOOKUP[match];
+    return ESCAPE_LOOKUP[match];
 }
 
 /**
@@ -12902,7 +11318,7 @@ function escaper(match) {
  * @return {string} An escaped string.
  */
 function escape(text) {
-  return ("" + text).replace(ESCAPE_REGEX, escaper);
+    return ("" + text).replace(ESCAPE_REGEX, escaper);
 }
 
 /**
@@ -12937,10 +11353,10 @@ module.exports = {
     hyphenate: hyphenate,
     indexOf: indexOf,
     setTextContent: setTextContent,
-    clearNode: clearNode
+    clearNode: clearNode,
 };
 
-},{}],35:[function(require,module,exports){
+},{}],37:[function(require,module,exports){
 'use strict';
 
 
@@ -13197,8 +11613,8 @@ function compile(self) {
                       .map(escapeRE)
                       .join('|');
   // (?!_) cause 1.5x slowdown
-  self.re.schema_test   = RegExp('(^|(?!_)(?:[><]|' + re.src_ZPCc + '))(' + slist + ')', 'i');
-  self.re.schema_search = RegExp('(^|(?!_)(?:[><]|' + re.src_ZPCc + '))(' + slist + ')', 'ig');
+  self.re.schema_test   = RegExp('(^|(?!_)(?:[><\uff5c]|' + re.src_ZPCc + '))(' + slist + ')', 'i');
+  self.re.schema_search = RegExp('(^|(?!_)(?:[><\uff5c]|' + re.src_ZPCc + '))(' + slist + ')', 'ig');
 
   self.re.pretest       = RegExp(
                             '(' + self.re.schema_test.source + ')|' +
@@ -13579,7 +11995,7 @@ LinkifyIt.prototype.onCompile = function onCompile() {
 
 module.exports = LinkifyIt;
 
-},{"./lib/re":36}],36:[function(require,module,exports){
+},{"./lib/re":38}],38:[function(require,module,exports){
 'use strict';
 
 
@@ -13598,10 +12014,14 @@ module.exports = function (opts) {
   // \p{\Z\Cc} (white spaces + control)
   re.src_ZCc = [ re.src_Z, re.src_Cc ].join('|');
 
+  // Experimental. List of chars, completely prohibited in links
+  // because can separate it from other part of text
+  var text_separators = '[><\uff5c]';
+
   // All possible word characters (everything without punctuation, spaces & controls)
   // Defined via punctuation & spaces to save space
   // Should be something like \p{\L\N\S\M} (\w but without `_`)
-  re.src_pseudo_letter       = '(?:(?!>|<|' + re.src_ZPCc + ')' + re.src_Any + ')';
+  re.src_pseudo_letter       = '(?:(?!' + text_separators + '|' + re.src_ZPCc + ')' + re.src_Any + ')';
   // The same as abothe but without [0-9]
   // var src_pseudo_letter_non_d = '(?:(?![0-9]|' + src_ZPCc + ')' + src_Any + ')';
 
@@ -13620,14 +12040,14 @@ module.exports = function (opts) {
 
   re.src_host_terminator =
 
-    '(?=$|>|<|' + re.src_ZPCc + ')(?!-|_|:\\d|\\.-|\\.(?!$|' + re.src_ZPCc + '))';
+    '(?=$|' + text_separators + '|' + re.src_ZPCc + ')(?!-|_|:\\d|\\.-|\\.(?!$|' + re.src_ZPCc + '))';
 
   re.src_path =
 
     '(?:' +
       '[/?#]' +
         '(?:' +
-          '(?!' + re.src_ZCc + '|[()[\\]{}.,"\'?!\\-<>]).|' +
+          '(?!' + re.src_ZCc + '|' + text_separators + '|[()[\\]{}.,"\'?!\\-]).|' +
           '\\[(?:(?!' + re.src_ZCc + '|\\]).)*\\]|' +
           '\\((?:(?!' + re.src_ZCc + '|[)]).)*\\)|' +
           '\\{(?:(?!' + re.src_ZCc + '|[}]).)*\\}|' +
@@ -13691,7 +12111,7 @@ module.exports = function (opts) {
     // Don't need IP check, because digits are already allowed in normal domain names
     //   src_ip4 +
     // '|' +
-      '(?:(?:(?:' + re.src_domain + ')\\.)*' + re.src_domain_root + ')' +
+      '(?:(?:(?:' + re.src_domain + ')\\.)*' + re.src_domain/*_root*/ + ')' +
     ')';
 
   re.tpl_host_fuzzy =
@@ -13737,24 +12157,24 @@ module.exports = function (opts) {
 
   re.tpl_email_fuzzy =
 
-      '(^|<|>|\\(|' + re.src_ZCc + ')(' + re.src_email_name + '@' + re.tpl_host_fuzzy_strict + ')';
+      '(^|' + text_separators + '|\\(|' + re.src_ZCc + ')(' + re.src_email_name + '@' + re.tpl_host_fuzzy_strict + ')';
 
   re.tpl_link_fuzzy =
       // Fuzzy link can't be prepended with .:/\- and non punctuation.
       // but can start with > (markdown blockquote)
-      '(^|(?![.:/\\-_@])(?:[$+<=>^`|]|' + re.src_ZPCc + '))' +
-      '((?![$+<=>^`|])' + re.tpl_host_port_fuzzy_strict + re.src_path + ')';
+      '(^|(?![.:/\\-_@])(?:[$+<=>^`|\uff5c]|' + re.src_ZPCc + '))' +
+      '((?![$+<=>^`|\uff5c])' + re.tpl_host_port_fuzzy_strict + re.src_path + ')';
 
   re.tpl_link_no_ip_fuzzy =
       // Fuzzy link can't be prepended with .:/\- and non punctuation.
       // but can start with > (markdown blockquote)
-      '(^|(?![.:/\\-_@])(?:[$+<=>^`|]|' + re.src_ZPCc + '))' +
-      '((?![$+<=>^`|])' + re.tpl_host_port_no_ip_fuzzy_strict + re.src_path + ')';
+      '(^|(?![.:/\\-_@])(?:[$+<=>^`|\uff5c]|' + re.src_ZPCc + '))' +
+      '((?![$+<=>^`|\uff5c])' + re.tpl_host_port_no_ip_fuzzy_strict + re.src_path + ')';
 
   return re;
 };
 
-},{"uc.micro/categories/Cc/regex":108,"uc.micro/categories/P/regex":110,"uc.micro/categories/Z/regex":111,"uc.micro/properties/Any/regex":113}],37:[function(require,module,exports){
+},{"uc.micro/categories/Cc/regex":112,"uc.micro/categories/P/regex":114,"uc.micro/categories/Z/regex":115,"uc.micro/properties/Any/regex":117}],39:[function(require,module,exports){
 // Process definition lists
 //
 'use strict';
@@ -13981,7 +12401,7 @@ module.exports = function deflist_plugin(md) {
   md.block.ruler.before('paragraph', 'deflist', deflist, { alt: [ 'paragraph', 'reference' ] });
 };
 
-},{}],38:[function(require,module,exports){
+},{}],40:[function(require,module,exports){
 /* Process inline math */
 /*
 Like markdown-it-simplemath, this is a stripped down, simplified version of:
@@ -13991,178 +12411,202 @@ It differs in that it takes (a subset of) LaTeX as input and relies on KaTeX
 for rendering output.
 */
 
+/*jslint node: true */
 'use strict';
 
 var katex = require('katex');
 
-//return if we have valid delimiter, '$', is in the position.
-function isValidDelim(state) {
-  var lastChar, secondLastChar, nextChar, pos = state.pos;
+// Test if potential opening or closing delimieter
+// Assumes that there is a "$" at state.src[pos]
+function isValidDelim(state, pos) {
+    var prevChar, nextChar,
+        max = state.posMax,
+        can_open = true,
+        can_close = true;
 
-  if(state.src[pos]!=='$'){
-    return false; //the character $ must be in its position.
-  }
+    prevChar = pos > 0 ? state.src.charCodeAt(pos - 1) : -1;
+    nextChar = pos + 1 <= max ? state.src.charCodeAt(pos + 1) : -1;
 
-  secondLastChar= pos > 1 ? state.src[pos-2] : ' '
-  lastChar      = pos > 0 ? state.src[pos-1] : ' '
-  nextChar      = pos + 1 < state.src.length ? state.src[pos+1] : ' '
+    // Check non-whitespace conditions for opening and closing, and
+    // check that closing delimeter isn't followed by a number
+    if (prevChar === 0x20/* " " */ || prevChar === 0x09/* \t */ ||
+            (nextChar >= 0x30/* "0" */ && nextChar <= 0x39/* "9" */)) {
+        can_close = false;
+    }
+    if (nextChar === 0x20/* " " */ || nextChar === 0x09/* \t */) {
+        can_open = false;
+    }
 
-  if(
-    lastChar === '\\' //$ we found was escaped.
-    || (lastChar === '$' && secondLastChar !== '\\') // $ we found was after $ but not escaped.
-    || nextChar === '$' //$ we found was actually block delimiter $$.
-  )
-  {
-    return false;
-  }
-
-  return true;
+    return {
+        can_open: can_open,
+        can_close: can_close
+    };
 }
 
-function math_inline(state, silent){
-  var start, found = false, token;
-  if(silent) { return false; }
+function math_inline(state, silent) {
+    var start, match, token, res, pos, esc_count;
 
-  start = state.pos;
-  if(state.src[start] !== '$'){ return false; }
-  if(!isValidDelim(state)){
-    state.pos += 1;
-    state.pending += '$';
-    return true;
-  }
-  state.pos+=1;
+    if (state.src[state.pos] !== "$") { return false; }
 
-  while(state.pos < state.posMax){
-    if(isValidDelim(state)){
-      found = true;
-      break;
+    res = isValidDelim(state, state.pos);
+    if (!res.can_open) {
+        if (!silent) { state.pending += "$"; }
+        state.pos += 1;
+        return true;
     }
-    state.md.inline.skipToken(state);
-  }
-  if(!found){
-    // Parser failed to find closing delimiter, so it is not a valid math
-    state.pos = start;
-    return false;
-  }
 
-  if (start + 1 === state.pos) {
-    // There is nothing between the delimiters -- don't match.
-    state.pos = start;
-    return false;
-  }
+    // First check for and bypass all properly escaped delimieters
+    // This loop will assume that the first leading backtick can not
+    // be the first character in state.src, which is known since
+    // we have found an opening delimieter already.
+    start = state.pos + 1;
+    match = start;
+    while ( (match = state.src.indexOf("$", match)) !== -1) {
+        // Found potential $, look for escapes, pos will point to
+        // first non escape when complete
+        pos = match - 1;
+        while (state.src[pos] === "\\") { pos -= 1; }
 
-  //found the closing delimiter and state.pos is pointing it
-  token = state.push('math_inline','math',0);
-  token.content = state.src.slice(start+1,state.pos).trim();
-  token.markup = '$';
+        // Even number of escapes, potential closing delimiter found
+        if ( ((match - pos) % 2) == 1 ) { break; }
+        match += 1;
+    }
 
-  state.pos += 1;
-  return true;
+    // No closing delimter found.  Consume $ and continue.
+    if (match === -1) {
+        if (!silent) { state.pending += "$"; }
+        state.pos = start;
+        return true;
+    }
+
+    // Check if we have empty content, ie: $$.  Do not parse.
+    if (match - start === 0) {
+        if (!silent) { state.pending += "$$"; }
+        state.pos = start + 1;
+        return true;
+    }
+
+    // Check for valid closing delimiter
+    res = isValidDelim(state, match);
+    if (!res.can_close) {
+        if (!silent) { state.pending += "$"; }
+        state.pos = start;
+        return true;
+    }
+
+    if (!silent) {
+        token         = state.push('math_inline', 'math', 0);
+        token.markup  = "$";
+        token.content = state.src.slice(start, match);
+    }
+
+    state.pos = match + 1;
+    return true;
 }
 
 function math_block(state, start, end, silent){
-  var firstLine, lastLine, next, lastPos, found = false, token,
-      pos = state.bMarks[start] + state.tShift[start],
-      max = state.eMarks[start]
+    var firstLine, lastLine, next, lastPos, found = false, token,
+        pos = state.bMarks[start] + state.tShift[start],
+        max = state.eMarks[start]
 
-  if(pos + 2 > max){ return false; }
-  if(state.src.slice(pos,pos+2)!=='$$'){ return false; }
+    if(pos + 2 > max){ return false; }
+    if(state.src.slice(pos,pos+2)!=='$$'){ return false; }
 
-  pos += 2;
-  firstLine = state.src.slice(pos,max);
+    pos += 2;
+    firstLine = state.src.slice(pos,max);
 
-  if(silent){ return true; }
-  if(firstLine.trim().slice(-2)==='$$'){
-    // Single line expression
-    firstLine = firstLine.trim().slice(0, -2);
-    found = true;
-  }
-
-  for(next = start; !found; ){
-
-    next++;
-
-    if(next >= end){ break; }
-
-    pos = state.bMarks[next]+state.tShift[next];
-    max = state.eMarks[next];
-
-    if(pos < max && state.tShift[next] < state.blkIndent){
-      // non-empty line with negative indent should stop the list:
-      break;
+    if(silent){ return true; }
+    if(firstLine.trim().slice(-2)==='$$'){
+        // Single line expression
+        firstLine = firstLine.trim().slice(0, -2);
+        found = true;
     }
 
-    if(state.src.slice(pos,max).trim().slice(-2)==='$$'){
-      lastPos = state.src.slice(0,max).lastIndexOf('$$');
-      lastLine = state.src.slice(pos,lastPos);
-      found = true;
+    for(next = start; !found; ){
+
+        next++;
+
+        if(next >= end){ break; }
+
+        pos = state.bMarks[next]+state.tShift[next];
+        max = state.eMarks[next];
+
+        if(pos < max && state.tShift[next] < state.blkIndent){
+            // non-empty line with negative indent should stop the list:
+            break;
+        }
+
+        if(state.src.slice(pos,max).trim().slice(-2)==='$$'){
+            lastPos = state.src.slice(0,max).lastIndexOf('$$');
+            lastLine = state.src.slice(pos,lastPos);
+            found = true;
+        }
+
     }
 
-  }
+    state.line = next + 1;
 
-  state.line = next + 1;
-
-  token = state.push('math_block', 'math', 0);
-  token.block = true;
-  token.content = (firstLine && firstLine.trim() ? firstLine + '\n' : '')
+    token = state.push('math_block', 'math', 0);
+    token.block = true;
+    token.content = (firstLine && firstLine.trim() ? firstLine + '\n' : '')
     + state.getLines(start + 1, next, state.tShift[start], true)
     + (lastLine && lastLine.trim() ? lastLine : '');
-  token.map = [ start, state.line ];
-  token.markup = '$$';
-  return true;
+    token.map = [ start, state.line ];
+    token.markup = '$$';
+    return true;
 }
 
 module.exports = function math_plugin(md, options) {
-  // Default options
+    // Default options
 
-  options = options || {};
+    options = options || {};
 
-  // set KaTeX as the renderer for markdown-it-simplemath
-  var katexInline = function(latex){
-    options.displayMode = false;
-    try{
-      return katex.renderToString(latex, options);
+    // set KaTeX as the renderer for markdown-it-simplemath
+    var katexInline = function(latex){
+        options.displayMode = false;
+        try{
+            return katex.renderToString(latex, options);
+        }
+        catch(error){
+            if(options.throwOnError){ console.log(error); }
+            return latex;
+        }
+    };
+
+    var inlineRenderer = function(tokens, idx){
+        return katexInline(tokens[idx].content);
+    };
+
+    var katexBlock = function(latex){
+        options.displayMode = true;
+        try{
+            return "<p>" + katex.renderToString(latex, options) + "</p>";
+        }
+        catch(error){
+            if(options.throwOnError){ console.log(error); }
+            return latex;
+        }
     }
-    catch(error){
-      if(options.throwOnError){ console.log(error); }
-      return latex;
+
+    var blockRenderer = function(tokens, idx){
+        return  katexBlock(tokens[idx].content) + '\n';
     }
-  };
 
-  var inlineRenderer = function(tokens, idx){
-    return katexInline(tokens[idx].content);
-  };
-
-  var katexBlock = function(latex){
-    options.displayMode = true;
-    try{
-      return "<p>" + katex.renderToString(latex, options) + "</p>";
-    }
-    catch(error){
-      if(options.throwOnError){ console.log(error); }
-      return latex;
-    }
-  }
-
-  var blockRenderer = function(tokens, idx){
-    return  katexBlock(tokens[idx].content) + '\n';
-  }
-
-  md.inline.ruler.before('escape', 'math_inline', math_inline);
-  md.block.ruler.after('blockquote', 'math_block', math_block, {
-    alt: [ 'paragraph', 'reference', 'blockquote', 'list' ]
-  });
-  md.renderer.rules.math_inline = inlineRenderer;
-  md.renderer.rules.math_block = blockRenderer;
+    md.inline.ruler.after('escape', 'math_inline', math_inline);
+    md.block.ruler.after('blockquote', 'math_block', math_block, {
+        alt: [ 'paragraph', 'reference', 'blockquote', 'list' ]
+    });
+    md.renderer.rules.math_inline = inlineRenderer;
+    md.renderer.rules.math_block = blockRenderer;
 };
 
-},{"katex":13}],39:[function(require,module,exports){
+},{"katex":15}],41:[function(require,module,exports){
 'use strict';
 
 
 module.exports = require('./lib/');
 
-},{"./lib/":48}],40:[function(require,module,exports){
+},{"./lib/":50}],42:[function(require,module,exports){
 // HTML5 entities map: { name -> utf16string }
 //
 'use strict';
@@ -14170,7 +12614,7 @@ module.exports = require('./lib/');
 /*eslint quotes:0*/
 module.exports = require('entities/maps/entities.json');
 
-},{"entities/maps/entities.json":12}],41:[function(require,module,exports){
+},{"entities/maps/entities.json":14}],43:[function(require,module,exports){
 // List of valid html blocks names, accorting to commonmark spec
 // http://jgm.github.io/CommonMark/spec.html#html-blocks
 
@@ -14204,6 +12648,11 @@ module.exports = [
   'frame',
   'frameset',
   'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
   'head',
   'header',
   'hr',
@@ -14240,7 +12689,7 @@ module.exports = [
   'ul'
 ];
 
-},{}],42:[function(require,module,exports){
+},{}],44:[function(require,module,exports){
 // Regexps to match html elements
 
 'use strict';
@@ -14270,7 +12719,7 @@ var HTML_OPEN_CLOSE_TAG_RE = new RegExp('^(?:' + open_tag + '|' + close_tag + ')
 module.exports.HTML_TAG_RE = HTML_TAG_RE;
 module.exports.HTML_OPEN_CLOSE_TAG_RE = HTML_OPEN_CLOSE_TAG_RE;
 
-},{}],43:[function(require,module,exports){
+},{}],45:[function(require,module,exports){
 // Utilities
 //
 'use strict';
@@ -14547,7 +12996,7 @@ exports.isPunctChar         = isPunctChar;
 exports.escapeRE            = escapeRE;
 exports.normalizeReference  = normalizeReference;
 
-},{"./entities":40,"mdurl":95,"uc.micro":112,"uc.micro/categories/P/regex":110}],44:[function(require,module,exports){
+},{"./entities":42,"mdurl":97,"uc.micro":116,"uc.micro/categories/P/regex":114}],46:[function(require,module,exports){
 // Just a shortcut for bulk export
 'use strict';
 
@@ -14556,7 +13005,7 @@ exports.parseLinkLabel       = require('./parse_link_label');
 exports.parseLinkDestination = require('./parse_link_destination');
 exports.parseLinkTitle       = require('./parse_link_title');
 
-},{"./parse_link_destination":45,"./parse_link_label":46,"./parse_link_title":47}],45:[function(require,module,exports){
+},{"./parse_link_destination":47,"./parse_link_label":48,"./parse_link_title":49}],47:[function(require,module,exports){
 // Parse link destination
 //
 'use strict';
@@ -14638,7 +13087,7 @@ module.exports = function parseLinkDestination(str, pos, max) {
   return result;
 };
 
-},{"../common/utils":43}],46:[function(require,module,exports){
+},{"../common/utils":45}],48:[function(require,module,exports){
 // Parse link label
 //
 // this function assumes that first character ("[") already matches;
@@ -14688,7 +13137,7 @@ module.exports = function parseLinkLabel(state, start, disableNested) {
   return labelEnd;
 };
 
-},{}],47:[function(require,module,exports){
+},{}],49:[function(require,module,exports){
 // Parse link title
 //
 'use strict';
@@ -14743,7 +13192,7 @@ module.exports = function parseLinkTitle(str, pos, max) {
   return result;
 };
 
-},{"../common/utils":43}],48:[function(require,module,exports){
+},{"../common/utils":45}],50:[function(require,module,exports){
 // Main parser class
 
 'use strict';
@@ -15084,7 +13533,7 @@ function MarkdownIt(presetName, options) {
    * Link components parser functions, useful to write plugins. See details
    * [here](https://github.com/markdown-it/markdown-it/blob/master/lib/helpers).
    **/
-  this.helpers = helpers;
+  this.helpers = utils.assign({}, helpers);
 
 
   this.options = {};
@@ -15260,6 +13709,10 @@ MarkdownIt.prototype.use = function (plugin /*, params, ... */) {
  * and then pass updated object to renderer.
  **/
 MarkdownIt.prototype.parse = function (src, env) {
+  if (typeof src !== 'string') {
+    throw new Error('Input data should be a String');
+  }
+
   var state = new this.core.State(src, this, env);
 
   this.core.process(state);
@@ -15322,7 +13775,7 @@ MarkdownIt.prototype.renderInline = function (src, env) {
 
 module.exports = MarkdownIt;
 
-},{"./common/utils":43,"./helpers":44,"./parser_block":49,"./parser_core":50,"./parser_inline":51,"./presets/commonmark":52,"./presets/default":53,"./presets/zero":54,"./renderer":55,"linkify-it":35,"mdurl":95,"punycode":100}],49:[function(require,module,exports){
+},{"./common/utils":45,"./helpers":46,"./parser_block":51,"./parser_core":52,"./parser_inline":53,"./presets/commonmark":54,"./presets/default":55,"./presets/zero":56,"./renderer":57,"linkify-it":37,"mdurl":97,"punycode":104}],51:[function(require,module,exports){
 /** internal
  * class ParserBlock
  *
@@ -15446,7 +13899,7 @@ ParserBlock.prototype.State = require('./rules_block/state_block');
 
 module.exports = ParserBlock;
 
-},{"./ruler":56,"./rules_block/blockquote":57,"./rules_block/code":58,"./rules_block/fence":59,"./rules_block/heading":60,"./rules_block/hr":61,"./rules_block/html_block":62,"./rules_block/lheading":63,"./rules_block/list":64,"./rules_block/paragraph":65,"./rules_block/reference":66,"./rules_block/state_block":67,"./rules_block/table":68}],50:[function(require,module,exports){
+},{"./ruler":58,"./rules_block/blockquote":59,"./rules_block/code":60,"./rules_block/fence":61,"./rules_block/heading":62,"./rules_block/hr":63,"./rules_block/html_block":64,"./rules_block/lheading":65,"./rules_block/list":66,"./rules_block/paragraph":67,"./rules_block/reference":68,"./rules_block/state_block":69,"./rules_block/table":70}],52:[function(require,module,exports){
 /** internal
  * class Core
  *
@@ -15506,7 +13959,7 @@ Core.prototype.State = require('./rules_core/state_core');
 
 module.exports = Core;
 
-},{"./ruler":56,"./rules_core/block":69,"./rules_core/inline":70,"./rules_core/linkify":71,"./rules_core/normalize":72,"./rules_core/replacements":73,"./rules_core/smartquotes":74,"./rules_core/state_core":75}],51:[function(require,module,exports){
+},{"./ruler":58,"./rules_core/block":71,"./rules_core/inline":72,"./rules_core/linkify":73,"./rules_core/normalize":74,"./rules_core/replacements":75,"./rules_core/smartquotes":76,"./rules_core/state_core":77}],53:[function(require,module,exports){
 /** internal
  * class ParserInline
  *
@@ -15685,7 +14138,7 @@ ParserInline.prototype.State = require('./rules_inline/state_inline');
 
 module.exports = ParserInline;
 
-},{"./ruler":56,"./rules_inline/autolink":76,"./rules_inline/backticks":77,"./rules_inline/balance_pairs":78,"./rules_inline/emphasis":79,"./rules_inline/entity":80,"./rules_inline/escape":81,"./rules_inline/html_inline":82,"./rules_inline/image":83,"./rules_inline/link":84,"./rules_inline/newline":85,"./rules_inline/state_inline":86,"./rules_inline/strikethrough":87,"./rules_inline/text":88,"./rules_inline/text_collapse":89}],52:[function(require,module,exports){
+},{"./ruler":58,"./rules_inline/autolink":78,"./rules_inline/backticks":79,"./rules_inline/balance_pairs":80,"./rules_inline/emphasis":81,"./rules_inline/entity":82,"./rules_inline/escape":83,"./rules_inline/html_inline":84,"./rules_inline/image":85,"./rules_inline/link":86,"./rules_inline/newline":87,"./rules_inline/state_inline":88,"./rules_inline/strikethrough":89,"./rules_inline/text":90,"./rules_inline/text_collapse":91}],54:[function(require,module,exports){
 // Commonmark default options
 
 'use strict';
@@ -15767,7 +14220,7 @@ module.exports = {
   }
 };
 
-},{}],53:[function(require,module,exports){
+},{}],55:[function(require,module,exports){
 // markdown-it default options
 
 'use strict';
@@ -15810,7 +14263,7 @@ module.exports = {
   }
 };
 
-},{}],54:[function(require,module,exports){
+},{}],56:[function(require,module,exports){
 // "Zero" preset, with nothing enabled. Useful for manual configuring of simple
 // modes. For example, to parse bold/italic only.
 
@@ -15874,7 +14327,7 @@ module.exports = {
   }
 };
 
-},{}],55:[function(require,module,exports){
+},{}],57:[function(require,module,exports){
 /**
  * class Renderer
  *
@@ -16211,7 +14664,7 @@ Renderer.prototype.render = function (tokens, options, env) {
 
 module.exports = Renderer;
 
-},{"./common/utils":43}],56:[function(require,module,exports){
+},{"./common/utils":45}],58:[function(require,module,exports){
 /**
  * class Ruler
  *
@@ -16565,7 +15018,7 @@ Ruler.prototype.getRules = function (chainName) {
 
 module.exports = Ruler;
 
-},{}],57:[function(require,module,exports){
+},{}],59:[function(require,module,exports){
 // Block quotes
 
 'use strict';
@@ -16578,6 +15031,7 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
       ch,
       i,
       initial,
+      isOutdented,
       l,
       lastLineEmpty,
       lines,
@@ -16593,8 +15047,12 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
       terminate,
       terminatorRules,
       token,
+      oldLineMax = state.lineMax,
       pos = state.bMarks[startLine] + state.tShift[startLine],
       max = state.eMarks[startLine];
+
+  // if it's indented more than 3 spaces, it should be a code block
+  if (state.sCount[startLine] - state.blkIndent >= 4) { return false; }
 
   // check the block quote marker
   if (state.src.charCodeAt(pos++) !== 0x3E/* > */) { return false; }
@@ -16602,9 +15060,6 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
   // we know that it's going to be a valid blockquote,
   // so no point trying to find the end of it in silent mode
   if (silent) { return true; }
-
-  oldIndent = state.blkIndent;
-  state.blkIndent = 0;
 
   // skip spaces after ">" and re-calculate offset
   initial = offset = state.sCount[startLine] + pos - (state.bMarks[startLine] + state.tShift[startLine]);
@@ -16686,13 +15141,21 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
   //     >
   //     test
   //     ```
-  //  3. another tag
+  //  3. another tag:
   //     ```
   //     > test
   //      - - -
   //     ```
   for (nextLine = startLine + 1; nextLine < endLine; nextLine++) {
-    if (state.sCount[nextLine] < oldIndent) { break; }
+    // check if it's outdented, i.e. it's inside list item and indented
+    // less than said list item:
+    //
+    // ```
+    // 1. anything
+    //    > current blockquote
+    // 2. checking this line
+    // ```
+    isOutdented = state.sCount[nextLine] < state.blkIndent;
 
     pos = state.bMarks[nextLine] + state.tShift[nextLine];
     max = state.eMarks[nextLine];
@@ -16702,7 +15165,7 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
       break;
     }
 
-    if (state.src.charCodeAt(pos++) === 0x3E/* > */) {
+    if (state.src.charCodeAt(pos++) === 0x3E/* > */ && !isOutdented) {
       // This line is inside the blockquote.
 
       // skip spaces after ">" and re-calculate offset
@@ -16780,7 +15243,29 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
         break;
       }
     }
-    if (terminate) { break; }
+
+    if (terminate) {
+      // Quirk to enforce "hard termination mode" for paragraphs;
+      // normally if you call `tokenize(state, startLine, nextLine)`,
+      // paragraphs will look below nextLine for paragraph continuation,
+      // but if blockquote is terminated by another tag, they shouldn't
+      state.lineMax = nextLine;
+
+      if (state.blkIndent !== 0) {
+        // state.blkIndent was non-zero, we now set it to zero,
+        // so we need to re-calculate all offsets to appear as
+        // if indent wasn't changed
+        oldBMarks.push(state.bMarks[nextLine]);
+        oldBSCount.push(state.bsCount[nextLine]);
+        oldTShift.push(state.tShift[nextLine]);
+        oldSCount.push(state.sCount[nextLine]);
+        state.sCount[nextLine] -= state.blkIndent;
+      }
+
+      break;
+    }
+
+    if (isOutdented) break;
 
     oldBMarks.push(state.bMarks[nextLine]);
     oldBSCount.push(state.bsCount[nextLine]);
@@ -16792,6 +15277,9 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
     state.sCount[nextLine] = -1;
   }
 
+  oldIndent = state.blkIndent;
+  state.blkIndent = 0;
+
   token        = state.push('blockquote_open', 'blockquote', 1);
   token.markup = '>';
   token.map    = lines = [ startLine, 0 ];
@@ -16801,6 +15289,7 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
   token        = state.push('blockquote_close', 'blockquote', -1);
   token.markup = '>';
 
+  state.lineMax = oldLineMax;
   state.parentType = oldParentType;
   lines[1] = state.line;
 
@@ -16817,7 +15306,7 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":43}],58:[function(require,module,exports){
+},{"../common/utils":45}],60:[function(require,module,exports){
 // Code block (4 spaces padded)
 
 'use strict';
@@ -16853,7 +15342,7 @@ module.exports = function code(state, startLine, endLine/*, silent*/) {
   return true;
 };
 
-},{}],59:[function(require,module,exports){
+},{}],61:[function(require,module,exports){
 // fences (``` lang, ~~~ lang)
 
 'use strict';
@@ -16864,6 +15353,9 @@ module.exports = function fence(state, startLine, endLine, silent) {
       haveEndMarker = false,
       pos = state.bMarks[startLine] + state.tShift[startLine],
       max = state.eMarks[startLine];
+
+  // if it's indented more than 3 spaces, it should be a code block
+  if (state.sCount[startLine] - state.blkIndent >= 4) { return false; }
 
   if (pos + 3 > max) { return false; }
 
@@ -16884,7 +15376,7 @@ module.exports = function fence(state, startLine, endLine, silent) {
   markup = state.src.slice(mem, pos);
   params = state.src.slice(pos, max);
 
-  if (params.indexOf('`') >= 0) { return false; }
+  if (params.indexOf(String.fromCharCode(marker)) >= 0) { return false; }
 
   // Since start is found, we can report success here in validation mode
   if (silent) { return true; }
@@ -16946,7 +15438,7 @@ module.exports = function fence(state, startLine, endLine, silent) {
   return true;
 };
 
-},{}],60:[function(require,module,exports){
+},{}],62:[function(require,module,exports){
 // heading (#, ##, ...)
 
 'use strict';
@@ -16958,6 +15450,9 @@ module.exports = function heading(state, startLine, endLine, silent) {
   var ch, level, tmp, token,
       pos = state.bMarks[startLine] + state.tShift[startLine],
       max = state.eMarks[startLine];
+
+  // if it's indented more than 3 spaces, it should be a code block
+  if (state.sCount[startLine] - state.blkIndent >= 4) { return false; }
 
   ch  = state.src.charCodeAt(pos);
 
@@ -17000,7 +15495,7 @@ module.exports = function heading(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":43}],61:[function(require,module,exports){
+},{"../common/utils":45}],63:[function(require,module,exports){
 // Horizontal rule
 
 'use strict';
@@ -17012,6 +15507,9 @@ module.exports = function hr(state, startLine, endLine, silent) {
   var marker, cnt, ch, token,
       pos = state.bMarks[startLine] + state.tShift[startLine],
       max = state.eMarks[startLine];
+
+  // if it's indented more than 3 spaces, it should be a code block
+  if (state.sCount[startLine] - state.blkIndent >= 4) { return false; }
 
   marker = state.src.charCodeAt(pos++);
 
@@ -17044,7 +15542,7 @@ module.exports = function hr(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":43}],62:[function(require,module,exports){
+},{"../common/utils":45}],64:[function(require,module,exports){
 // HTML block
 
 'use strict';
@@ -17071,6 +15569,9 @@ module.exports = function html_block(state, startLine, endLine, silent) {
   var i, nextLine, token, lineText,
       pos = state.bMarks[startLine] + state.tShift[startLine],
       max = state.eMarks[startLine];
+
+  // if it's indented more than 3 spaces, it should be a code block
+  if (state.sCount[startLine] - state.blkIndent >= 4) { return false; }
 
   if (!state.md.options.html) { return false; }
 
@@ -17117,7 +15618,7 @@ module.exports = function html_block(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/html_blocks":41,"../common/html_re":42}],63:[function(require,module,exports){
+},{"../common/html_blocks":43,"../common/html_re":44}],65:[function(require,module,exports){
 // lheading (---, ===)
 
 'use strict';
@@ -17127,6 +15628,9 @@ module.exports = function lheading(state, startLine, endLine/*, silent*/) {
   var content, terminate, i, l, token, pos, max, level, marker,
       nextLine = startLine + 1, oldParentType,
       terminatorRules = state.md.block.ruler.getRules('paragraph');
+
+  // if it's indented more than 3 spaces, it should be a code block
+  if (state.sCount[startLine] - state.blkIndent >= 4) { return false; }
 
   oldParentType = state.parentType;
   state.parentType = 'paragraph'; // use paragraph to match terminatorRules
@@ -17199,7 +15703,7 @@ module.exports = function lheading(state, startLine, endLine/*, silent*/) {
   return true;
 };
 
-},{}],64:[function(require,module,exports){
+},{}],66:[function(require,module,exports){
 // Lists
 
 'use strict';
@@ -17330,6 +15834,9 @@ module.exports = function list(state, startLine, endLine, silent) {
       token,
       isTerminatingParagraph = false,
       tight = true;
+
+  // if it's indented more than 3 spaces, it should be a code block
+  if (state.sCount[startLine] - state.blkIndent >= 4) { return false; }
 
   // limit conditions when list can interrupt
   // a paragraph (validation mode only)
@@ -17536,7 +16043,7 @@ module.exports = function list(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":43}],65:[function(require,module,exports){
+},{"../common/utils":45}],67:[function(require,module,exports){
 // Paragraph
 
 'use strict';
@@ -17590,12 +16097,10 @@ module.exports = function paragraph(state, startLine/*, endLine*/) {
   return true;
 };
 
-},{}],66:[function(require,module,exports){
+},{}],68:[function(require,module,exports){
 'use strict';
 
 
-var parseLinkDestination = require('../helpers/parse_link_destination');
-var parseLinkTitle       = require('../helpers/parse_link_title');
 var normalizeReference   = require('../common/utils').normalizeReference;
 var isSpace              = require('../common/utils').isSpace;
 
@@ -17621,6 +16126,9 @@ module.exports = function reference(state, startLine, _endLine, silent) {
       pos = state.bMarks[startLine] + state.tShift[startLine],
       max = state.eMarks[startLine],
       nextLine = startLine + 1;
+
+  // if it's indented more than 3 spaces, it should be a code block
+  if (state.sCount[startLine] - state.blkIndent >= 4) { return false; }
 
   if (state.src.charCodeAt(pos) !== 0x5B/* [ */) { return false; }
 
@@ -17699,7 +16207,7 @@ module.exports = function reference(state, startLine, _endLine, silent) {
 
   // [label]:   destination   'title'
   //            ^^^^^^^^^^^ parse this
-  res = parseLinkDestination(str, pos, max);
+  res = state.md.helpers.parseLinkDestination(str, pos, max);
   if (!res.ok) { return false; }
 
   href = state.md.normalizeLink(res.str);
@@ -17728,7 +16236,7 @@ module.exports = function reference(state, startLine, _endLine, silent) {
 
   // [label]:   destination   'title'
   //                          ^^^^^^^ parse this
-  res = parseLinkTitle(str, pos, max);
+  res = state.md.helpers.parseLinkTitle(str, pos, max);
   if (pos < max && start !== pos && res.ok) {
     title = res.str;
     pos = res.pos;
@@ -17789,7 +16297,7 @@ module.exports = function reference(state, startLine, _endLine, silent) {
   return true;
 };
 
-},{"../common/utils":43,"../helpers/parse_link_destination":45,"../helpers/parse_link_title":47}],67:[function(require,module,exports){
+},{"../common/utils":45}],69:[function(require,module,exports){
 // Parser state class
 
 'use strict';
@@ -18021,10 +16529,12 @@ StateBlock.prototype.Token = Token;
 
 module.exports = StateBlock;
 
-},{"../common/utils":43,"../token":90}],68:[function(require,module,exports){
+},{"../common/utils":45,"../token":92}],70:[function(require,module,exports){
 // GFM table, non-standard
 
 'use strict';
+
+var isSpace = require('../common/utils').isSpace;
 
 
 function getLine(state, line) {
@@ -18047,13 +16557,22 @@ function escapedSplit(str) {
   ch  = str.charCodeAt(pos);
 
   while (pos < max) {
-    if (ch === 0x60/* ` */ && (escapes % 2 === 0)) {
-      backTicked = !backTicked;
-      lastBackTick = pos;
+    if (ch === 0x60/* ` */) {
+      if (backTicked) {
+        // make \` close code sequence, but not open it;
+        // the reason is: `\` is correct code block
+        backTicked = false;
+        lastBackTick = pos;
+      } else if (escapes % 2 === 0) {
+        backTicked = true;
+        lastBackTick = pos;
+      }
     } else if (ch === 0x7c/* | */ && (escapes % 2 === 0) && !backTicked) {
       result.push(str.substring(lastPos, pos));
       lastPos = pos + 1;
-    } else if (ch === 0x5c/* \ */) {
+    }
+
+    if (ch === 0x5c/* \ */) {
       escapes++;
     } else {
       escapes = 0;
@@ -18081,23 +16600,35 @@ module.exports = function table(state, startLine, endLine, silent) {
   var ch, lineText, pos, i, nextLine, columns, columnCount, token,
       aligns, t, tableLines, tbodyLines;
 
-  // should have at least three lines
+  // should have at least two lines
   if (startLine + 2 > endLine) { return false; }
 
   nextLine = startLine + 1;
 
   if (state.sCount[nextLine] < state.blkIndent) { return false; }
 
-  // first character of the second line should be '|' or '-'
+  // if it's indented more than 3 spaces, it should be a code block
+  if (state.sCount[nextLine] - state.blkIndent >= 4) { return false; }
+
+  // first character of the second line should be '|', '-', ':',
+  // and no other characters are allowed but spaces;
+  // basically, this is the equivalent of /^[-:|][-:|\s]*$/ regexp
 
   pos = state.bMarks[nextLine] + state.tShift[nextLine];
   if (pos >= state.eMarks[nextLine]) { return false; }
 
-  ch = state.src.charCodeAt(pos);
+  ch = state.src.charCodeAt(pos++);
   if (ch !== 0x7C/* | */ && ch !== 0x2D/* - */ && ch !== 0x3A/* : */) { return false; }
 
+  while (pos < state.eMarks[nextLine]) {
+    ch = state.src.charCodeAt(pos);
+
+    if (ch !== 0x7C/* | */ && ch !== 0x2D/* - */ && ch !== 0x3A/* : */ && !isSpace(ch)) { return false; }
+
+    pos++;
+  }
+
   lineText = getLine(state, startLine + 1);
-  if (!/^[-:| ]+$/.test(lineText)) { return false; }
 
   columns = lineText.split('|');
   aligns = [];
@@ -18125,6 +16656,7 @@ module.exports = function table(state, startLine, endLine, silent) {
 
   lineText = getLine(state, startLine).trim();
   if (lineText.indexOf('|') === -1) { return false; }
+  if (state.sCount[startLine] - state.blkIndent >= 4) { return false; }
   columns = escapedSplit(lineText.replace(/^\||\|$/g, ''));
 
   // header row will define an amount of columns in the entire table,
@@ -18167,12 +16699,10 @@ module.exports = function table(state, startLine, endLine, silent) {
   for (nextLine = startLine + 2; nextLine < endLine; nextLine++) {
     if (state.sCount[nextLine] < state.blkIndent) { break; }
 
-    lineText = getLine(state, nextLine);
+    lineText = getLine(state, nextLine).trim();
     if (lineText.indexOf('|') === -1) { break; }
-
-    // keep spaces at beginning of line to indicate an empty first cell, but
-    // strip trailing whitespace
-    columns = escapedSplit(lineText.replace(/^\||\|\s*$/g, ''));
+    if (state.sCount[nextLine] - state.blkIndent >= 4) { break; }
+    columns = escapedSplit(lineText.replace(/^\||\|$/g, ''));
 
     token = state.push('tr_open', 'tr', 1);
     for (i = 0; i < columnCount; i++) {
@@ -18197,7 +16727,7 @@ module.exports = function table(state, startLine, endLine, silent) {
   return true;
 };
 
-},{}],69:[function(require,module,exports){
+},{"../common/utils":45}],71:[function(require,module,exports){
 'use strict';
 
 
@@ -18215,7 +16745,7 @@ module.exports = function block(state) {
   }
 };
 
-},{}],70:[function(require,module,exports){
+},{}],72:[function(require,module,exports){
 'use strict';
 
 module.exports = function inline(state) {
@@ -18230,7 +16760,7 @@ module.exports = function inline(state) {
   }
 };
 
-},{}],71:[function(require,module,exports){
+},{}],73:[function(require,module,exports){
 // Replace link-like texts with link nodes.
 //
 // Currently restricted by `md.validateLink()` to http/https/ftp
@@ -18365,7 +16895,7 @@ module.exports = function linkify(state) {
   }
 };
 
-},{"../common/utils":43}],72:[function(require,module,exports){
+},{"../common/utils":45}],74:[function(require,module,exports){
 // Normalize input string
 
 'use strict';
@@ -18387,7 +16917,7 @@ module.exports = function inline(state) {
   state.src = str;
 };
 
-},{}],73:[function(require,module,exports){
+},{}],75:[function(require,module,exports){
 // Simple typographyc replacements
 //
 // (c) (C) → ©
@@ -18496,7 +17026,7 @@ module.exports = function replace(state) {
   }
 };
 
-},{}],74:[function(require,module,exports){
+},{}],76:[function(require,module,exports){
 // Convert straight quotation marks to typographic ones
 //
 'use strict';
@@ -18691,7 +17221,7 @@ module.exports = function smartquotes(state) {
   }
 };
 
-},{"../common/utils":43}],75:[function(require,module,exports){
+},{"../common/utils":45}],77:[function(require,module,exports){
 // Core state object
 //
 'use strict';
@@ -18713,7 +17243,7 @@ StateCore.prototype.Token = Token;
 
 module.exports = StateCore;
 
-},{"../token":90}],76:[function(require,module,exports){
+},{"../token":92}],78:[function(require,module,exports){
 // Process autolinks '<protocol:...>'
 
 'use strict';
@@ -18787,7 +17317,7 @@ module.exports = function autolink(state, silent) {
   return false;
 };
 
-},{}],77:[function(require,module,exports){
+},{}],79:[function(require,module,exports){
 // Parse backticks
 
 'use strict';
@@ -18832,7 +17362,7 @@ module.exports = function backtick(state, silent) {
   return true;
 };
 
-},{}],78:[function(require,module,exports){
+},{}],80:[function(require,module,exports){
 // For each opening emphasis-like marker find a matching closing one
 //
 'use strict';
@@ -18878,7 +17408,7 @@ module.exports = function link_pairs(state) {
   }
 };
 
-},{}],79:[function(require,module,exports){
+},{}],81:[function(require,module,exports){
 // Process *this* and _that_
 //
 'use strict';
@@ -19007,7 +17537,7 @@ module.exports.postProcess = function emphasis(state) {
   }
 };
 
-},{}],80:[function(require,module,exports){
+},{}],82:[function(require,module,exports){
 // Process html entity - &#123;, &#xAF;, &quot;, ...
 
 'use strict';
@@ -19057,7 +17587,7 @@ module.exports = function entity(state, silent) {
   return true;
 };
 
-},{"../common/entities":40,"../common/utils":43}],81:[function(require,module,exports){
+},{"../common/entities":42,"../common/utils":45}],83:[function(require,module,exports){
 // Proceess escaped chars and hardbreaks
 
 'use strict';
@@ -19111,7 +17641,7 @@ module.exports = function escape(state, silent) {
   return true;
 };
 
-},{"../common/utils":43}],82:[function(require,module,exports){
+},{"../common/utils":45}],84:[function(require,module,exports){
 // Process html tags
 
 'use strict';
@@ -19160,14 +17690,11 @@ module.exports = function html_inline(state, silent) {
   return true;
 };
 
-},{"../common/html_re":42}],83:[function(require,module,exports){
+},{"../common/html_re":44}],85:[function(require,module,exports){
 // Process ![image](<src> "title")
 
 'use strict';
 
-var parseLinkLabel       = require('../helpers/parse_link_label');
-var parseLinkDestination = require('../helpers/parse_link_destination');
-var parseLinkTitle       = require('../helpers/parse_link_title');
 var normalizeReference   = require('../common/utils').normalizeReference;
 var isSpace              = require('../common/utils').isSpace;
 
@@ -19194,7 +17721,7 @@ module.exports = function image(state, silent) {
   if (state.src.charCodeAt(state.pos + 1) !== 0x5B/* [ */) { return false; }
 
   labelStart = state.pos + 2;
-  labelEnd = parseLinkLabel(state, state.pos + 1, false);
+  labelEnd = state.md.helpers.parseLinkLabel(state, state.pos + 1, false);
 
   // parser failed to find ']', so it's not a valid link
   if (labelEnd < 0) { return false; }
@@ -19217,7 +17744,7 @@ module.exports = function image(state, silent) {
     // [link](  <href>  "title"  )
     //          ^^^^^^ parsing link destination
     start = pos;
-    res = parseLinkDestination(state.src, pos, state.posMax);
+    res = state.md.helpers.parseLinkDestination(state.src, pos, state.posMax);
     if (res.ok) {
       href = state.md.normalizeLink(res.str);
       if (state.md.validateLink(href)) {
@@ -19237,7 +17764,7 @@ module.exports = function image(state, silent) {
 
     // [link](  <href>  "title"  )
     //                  ^^^^^^^ parsing link title
-    res = parseLinkTitle(state.src, pos, state.posMax);
+    res = state.md.helpers.parseLinkTitle(state.src, pos, state.posMax);
     if (pos < max && start !== pos && res.ok) {
       title = res.str;
       pos = res.pos;
@@ -19265,7 +17792,7 @@ module.exports = function image(state, silent) {
 
     if (pos < max && state.src.charCodeAt(pos) === 0x5B/* [ */) {
       start = pos + 1;
-      pos = parseLinkLabel(state, pos);
+      pos = state.md.helpers.parseLinkLabel(state, pos);
       if (pos >= 0) {
         label = state.src.slice(start, pos++);
       } else {
@@ -19317,14 +17844,11 @@ module.exports = function image(state, silent) {
   return true;
 };
 
-},{"../common/utils":43,"../helpers/parse_link_destination":45,"../helpers/parse_link_label":46,"../helpers/parse_link_title":47}],84:[function(require,module,exports){
+},{"../common/utils":45}],86:[function(require,module,exports){
 // Process [link](<to> "stuff")
 
 'use strict';
 
-var parseLinkLabel       = require('../helpers/parse_link_label');
-var parseLinkDestination = require('../helpers/parse_link_destination');
-var parseLinkTitle       = require('../helpers/parse_link_title');
 var normalizeReference   = require('../common/utils').normalizeReference;
 var isSpace              = require('../common/utils').isSpace;
 
@@ -19343,12 +17867,13 @@ module.exports = function link(state, silent) {
       href = '',
       oldPos = state.pos,
       max = state.posMax,
-      start = state.pos;
+      start = state.pos,
+      parseReference = true;
 
   if (state.src.charCodeAt(state.pos) !== 0x5B/* [ */) { return false; }
 
   labelStart = state.pos + 1;
-  labelEnd = parseLinkLabel(state, state.pos, true);
+  labelEnd = state.md.helpers.parseLinkLabel(state, state.pos, true);
 
   // parser failed to find ']', so it's not a valid link
   if (labelEnd < 0) { return false; }
@@ -19358,6 +17883,9 @@ module.exports = function link(state, silent) {
     //
     // Inline link
     //
+
+    // might have found a valid shortcut link, disable reference parsing
+    parseReference = false;
 
     // [link](  <href>  "title"  )
     //        ^^ skipping these spaces
@@ -19371,7 +17899,7 @@ module.exports = function link(state, silent) {
     // [link](  <href>  "title"  )
     //          ^^^^^^ parsing link destination
     start = pos;
-    res = parseLinkDestination(state.src, pos, state.posMax);
+    res = state.md.helpers.parseLinkDestination(state.src, pos, state.posMax);
     if (res.ok) {
       href = state.md.normalizeLink(res.str);
       if (state.md.validateLink(href)) {
@@ -19391,7 +17919,7 @@ module.exports = function link(state, silent) {
 
     // [link](  <href>  "title"  )
     //                  ^^^^^^^ parsing link title
-    res = parseLinkTitle(state.src, pos, state.posMax);
+    res = state.md.helpers.parseLinkTitle(state.src, pos, state.posMax);
     if (pos < max && start !== pos && res.ok) {
       title = res.str;
       pos = res.pos;
@@ -19407,11 +17935,13 @@ module.exports = function link(state, silent) {
     }
 
     if (pos >= max || state.src.charCodeAt(pos) !== 0x29/* ) */) {
-      state.pos = oldPos;
-      return false;
+      // parsing a valid shortcut link failed, fallback to reference
+      parseReference = true;
     }
     pos++;
-  } else {
+  }
+
+  if (parseReference) {
     //
     // Link reference
     //
@@ -19419,7 +17949,7 @@ module.exports = function link(state, silent) {
 
     if (pos < max && state.src.charCodeAt(pos) === 0x5B/* [ */) {
       start = pos + 1;
-      pos = parseLinkLabel(state, pos);
+      pos = state.md.helpers.parseLinkLabel(state, pos);
       if (pos >= 0) {
         label = state.src.slice(start, pos++);
       } else {
@@ -19466,10 +17996,13 @@ module.exports = function link(state, silent) {
   return true;
 };
 
-},{"../common/utils":43,"../helpers/parse_link_destination":45,"../helpers/parse_link_label":46,"../helpers/parse_link_title":47}],85:[function(require,module,exports){
+},{"../common/utils":45}],87:[function(require,module,exports){
 // Proceess '\n'
 
 'use strict';
+
+var isSpace = require('../common/utils').isSpace;
+
 
 module.exports = function newline(state, silent) {
   var pmax, max, pos = state.pos;
@@ -19501,13 +18034,13 @@ module.exports = function newline(state, silent) {
   pos++;
 
   // skip heading spaces for next line
-  while (pos < max && state.src.charCodeAt(pos) === 0x20) { pos++; }
+  while (pos < max && isSpace(state.src.charCodeAt(pos))) { pos++; }
 
   state.pos = pos;
   return true;
 };
 
-},{}],86:[function(require,module,exports){
+},{"../common/utils":45}],88:[function(require,module,exports){
 // Inline parser state
 
 'use strict';
@@ -19639,7 +18172,7 @@ StateInline.prototype.Token = Token;
 
 module.exports = StateInline;
 
-},{"../common/utils":43,"../token":90}],87:[function(require,module,exports){
+},{"../common/utils":45,"../token":92}],89:[function(require,module,exports){
 // ~~strike through~~
 //
 'use strict';
@@ -19758,7 +18291,7 @@ module.exports.postProcess = function strikethrough(state) {
   }
 };
 
-},{}],88:[function(require,module,exports){
+},{}],90:[function(require,module,exports){
 // Skip text characters for text token, place those to pending buffer
 // and increment current pos
 
@@ -19849,7 +18382,7 @@ module.exports = function text(state, silent) {
   return true;
 };*/
 
-},{}],89:[function(require,module,exports){
+},{}],91:[function(require,module,exports){
 // Merge adjacent text nodes into one, and re-calculate all token levels
 //
 'use strict';
@@ -19884,7 +18417,7 @@ module.exports = function text_collapse(state) {
   }
 };
 
-},{}],90:[function(require,module,exports){
+},{}],92:[function(require,module,exports){
 // Token class
 
 'use strict';
@@ -20083,7 +18616,7 @@ Token.prototype.attrJoin = function attrJoin(name, value) {
 
 module.exports = Token;
 
-},{}],91:[function(require,module,exports){
+},{}],93:[function(require,module,exports){
 /** @flow */
 
 "use strict";
@@ -20126,7 +18659,7 @@ function matchAt(re, str, pos) {
 }
 
 module.exports = matchAt;
-},{}],92:[function(require,module,exports){
+},{}],94:[function(require,module,exports){
 
 'use strict';
 
@@ -20250,7 +18783,7 @@ decode.componentChars = '';
 
 module.exports = decode;
 
-},{}],93:[function(require,module,exports){
+},{}],95:[function(require,module,exports){
 
 'use strict';
 
@@ -20350,7 +18883,7 @@ encode.componentChars = "-_.!~*'()";
 
 module.exports = encode;
 
-},{}],94:[function(require,module,exports){
+},{}],96:[function(require,module,exports){
 
 'use strict';
 
@@ -20377,7 +18910,7 @@ module.exports = function format(url) {
   return result;
 };
 
-},{}],95:[function(require,module,exports){
+},{}],97:[function(require,module,exports){
 'use strict';
 
 
@@ -20386,7 +18919,7 @@ module.exports.decode = require('./decode');
 module.exports.format = require('./format');
 module.exports.parse  = require('./parse');
 
-},{"./decode":92,"./encode":93,"./format":94,"./parse":96}],96:[function(require,module,exports){
+},{"./decode":94,"./encode":95,"./format":96,"./parse":98}],98:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -20700,2244 +19233,1413 @@ Url.prototype.parseHost = function(host) {
 
 module.exports = urlParse;
 
-},{}],97:[function(require,module,exports){
-;(function (global, factory) { // eslint-disable-line
-	"use strict"
-	/* eslint-disable no-undef */
-	var m = factory(global)
-	if (typeof module === "object" && module != null && module.exports) {
-		module.exports = m
-	} else if (typeof define === "function" && define.amd) {
-		define(function () { return m })
+},{}],99:[function(require,module,exports){
+(function (global){
+;(function() {
+"use strict"
+function Vnode(tag, key, attrs0, children, text, dom) {
+	return {tag: tag, key: key, attrs: attrs0, children: children, text: text, dom: dom, domSize: undefined, state: undefined, _state: undefined, events: undefined, instance: undefined, skip: false}
+}
+Vnode.normalize = function(node) {
+	if (Array.isArray(node)) return Vnode("[", undefined, undefined, Vnode.normalizeChildren(node), undefined, undefined)
+	if (node != null && typeof node !== "object") return Vnode("#", undefined, undefined, node === false ? "" : node, undefined, undefined)
+	return node
+}
+Vnode.normalizeChildren = function normalizeChildren(children) {
+	for (var i = 0; i < children.length; i++) {
+		children[i] = Vnode.normalize(children[i])
+	}
+	return children
+}
+var selectorParser = /(?:(^|#|\.)([^#\.\[\]]+))|(\[(.+?)(?:\s*=\s*("|'|)((?:\\["'\]]|.)*?)\5)?\])/g
+var selectorCache = {}
+var hasOwn = {}.hasOwnProperty
+function compileSelector(selector) {
+	var match, tag = "div", classes = [], attrs = {}
+	while (match = selectorParser.exec(selector)) {
+		var type = match[1], value = match[2]
+		if (type === "" && value !== "") tag = value
+		else if (type === "#") attrs.id = value
+		else if (type === ".") classes.push(value)
+		else if (match[3][0] === "[") {
+			var attrValue = match[6]
+			if (attrValue) attrValue = attrValue.replace(/\\(["'])/g, "$1").replace(/\\\\/g, "\\")
+			if (match[4] === "class") classes.push(attrValue)
+			else attrs[match[4]] = attrValue || true
+		}
+	}
+	if (classes.length > 0) attrs.className = classes.join(" ")
+	return selectorCache[selector] = {tag: tag, attrs: attrs}
+}
+function execSelector(state, attrs, children) {
+	var hasAttrs = false, childList, text
+	var className = attrs.className || attrs.class
+	for (var key in state.attrs) {
+		if (hasOwn.call(state.attrs, key)) {
+			attrs[key] = state.attrs[key]
+		}
+	}
+	if (className !== undefined) {
+		if (attrs.class !== undefined) {
+			attrs.class = undefined
+			attrs.className = className
+		}
+		if (state.attrs.className != null) {
+			attrs.className = state.attrs.className + " " + className
+		}
+	}
+	for (var key in attrs) {
+		if (hasOwn.call(attrs, key) && key !== "key") {
+			hasAttrs = true
+			break
+		}
+	}
+	if (Array.isArray(children) && children.length === 1 && children[0] != null && children[0].tag === "#") {
+		text = children[0].children
 	} else {
-		global.m = m
-	}
-	/* eslint-enable no-undef */
-})(typeof window !== "undefined" ? window : this, function (global, undefined) { // eslint-disable-line
-	"use strict"
-
-	m.version = function () {
-		return "v0.2.5"
-	}
-
-	var hasOwn = {}.hasOwnProperty
-	var type = {}.toString
-
-	function isFunction(object) {
-		return typeof object === "function"
-	}
-
-	function isObject(object) {
-		return type.call(object) === "[object Object]"
-	}
-
-	function isString(object) {
-		return type.call(object) === "[object String]"
-	}
-
-	var isArray = Array.isArray || function (object) {
-		return type.call(object) === "[object Array]"
-	}
-
-	function noop() {}
-
-	var voidElements = {
-		AREA: 1,
-		BASE: 1,
-		BR: 1,
-		COL: 1,
-		COMMAND: 1,
-		EMBED: 1,
-		HR: 1,
-		IMG: 1,
-		INPUT: 1,
-		KEYGEN: 1,
-		LINK: 1,
-		META: 1,
-		PARAM: 1,
-		SOURCE: 1,
-		TRACK: 1,
-		WBR: 1
-	}
-
-	// caching commonly used variables
-	var $document, $location, $requestAnimationFrame, $cancelAnimationFrame
-
-	// self invoking function needed because of the way mocks work
-	function initialize(mock) {
-		$document = mock.document
-		$location = mock.location
-		$cancelAnimationFrame = mock.cancelAnimationFrame || mock.clearTimeout
-		$requestAnimationFrame = mock.requestAnimationFrame || mock.setTimeout
-	}
-
-	// testing API
-	m.deps = function (mock) {
-		initialize(global = mock || window)
-		return global
-	}
-
-	m.deps(global)
-
-	/**
-	 * @typedef {String} Tag
-	 * A string that looks like -> div.classname#id[param=one][param2=two]
-	 * Which describes a DOM node
-	 */
-
-	function parseTagAttrs(cell, tag) {
-		var classes = []
-		var parser = /(?:(^|#|\.)([^#\.\[\]]+))|(\[.+?\])/g
-		var match
-
-		while ((match = parser.exec(tag))) {
-			if (match[1] === "" && match[2]) {
-				cell.tag = match[2]
-			} else if (match[1] === "#") {
-				cell.attrs.id = match[2]
-			} else if (match[1] === ".") {
-				classes.push(match[2])
-			} else if (match[3][0] === "[") {
-				var pair = /\[(.+?)(?:=("|'|)(.*?)\2)?\]/.exec(match[3])
-				cell.attrs[pair[1]] = pair[3] || ""
-			}
-		}
-
-		return classes
-	}
-
-	function getVirtualChildren(args, hasAttrs) {
-		var children = hasAttrs ? args.slice(1) : args
-
-		if (children.length === 1 && isArray(children[0])) {
-			return children[0]
-		} else {
-			return children
-		}
-	}
-
-	function assignAttrs(target, attrs, classes) {
-		var classAttr = "class" in attrs ? "class" : "className"
-
-		for (var attrName in attrs) {
-			if (hasOwn.call(attrs, attrName)) {
-				if (attrName === classAttr &&
-						attrs[attrName] != null &&
-						attrs[attrName] !== "") {
-					classes.push(attrs[attrName])
-					// create key in correct iteration order
-					target[attrName] = ""
-				} else {
-					target[attrName] = attrs[attrName]
-				}
-			}
-		}
-
-		if (classes.length) target[classAttr] = classes.join(" ")
-	}
-
-	/**
-	 *
-	 * @param {Tag} The DOM node tag
-	 * @param {Object=[]} optional key-value pairs to be mapped to DOM attrs
-	 * @param {...mNode=[]} Zero or more Mithril child nodes. Can be an array,
-	 *                      or splat (optional)
-	 */
-	function m(tag, pairs) {
-		var args = []
-
-		for (var i = 1, length = arguments.length; i < length; i++) {
-			args[i - 1] = arguments[i]
-		}
-
-		if (isObject(tag)) return parameterize(tag, args)
-
-		if (!isString(tag)) {
-			throw new Error("selector in m(selector, attrs, children) should " +
-				"be a string")
-		}
-
-		var hasAttrs = pairs != null && isObject(pairs) &&
-			!("tag" in pairs || "view" in pairs || "subtree" in pairs)
-
-		var attrs = hasAttrs ? pairs : {}
-		var cell = {
-			tag: "div",
-			attrs: {},
-			children: getVirtualChildren(args, hasAttrs)
-		}
-
-		assignAttrs(cell.attrs, attrs, parseTagAttrs(cell, tag))
-		return cell
-	}
-
-	function forEach(list, f) {
-		for (var i = 0; i < list.length && !f(list[i], i++);) {
-			// function called in condition
-		}
-	}
-
-	function forKeys(list, f) {
-		forEach(list, function (attrs, i) {
-			return (attrs = attrs && attrs.attrs) &&
-				attrs.key != null &&
-				f(attrs, i)
-		})
-	}
-	// This function was causing deopts in Chrome.
-	function dataToString(data) {
-		// data.toString() might throw or return null if data is the return
-		// value of Console.log in some versions of Firefox (behavior depends on
-		// version)
-		try {
-			if (data != null && data.toString() != null) return data
-		} catch (e) {
-			// silently ignore errors
-		}
-		return ""
-	}
-
-	// This function was causing deopts in Chrome.
-	function injectTextNode(parentElement, first, index, data) {
-		try {
-			insertNode(parentElement, first, index)
-			first.nodeValue = data
-		} catch (e) {
-			// IE erroneously throws error when appending an empty text node
-			// after a null
-		}
-	}
-
-	function flatten(list) {
-		// recursively flatten array
-		for (var i = 0; i < list.length; i++) {
-			if (isArray(list[i])) {
-				list = list.concat.apply([], list)
-				// check current index again and flatten until there are no more
-				// nested arrays at that index
-				i--
-			}
-		}
-		return list
-	}
-
-	function insertNode(parentElement, node, index) {
-		parentElement.insertBefore(node,
-			parentElement.childNodes[index] || null)
-	}
-
-	var DELETION = 1
-	var INSERTION = 2
-	var MOVE = 3
-
-	function handleKeysDiffer(data, existing, cached, parentElement) {
-		forKeys(data, function (key, i) {
-			existing[key = key.key] = existing[key] ? {
-				action: MOVE,
-				index: i,
-				from: existing[key].index,
-				element: cached.nodes[existing[key].index] ||
-					$document.createElement("div")
-			} : {action: INSERTION, index: i}
-		})
-
-		var actions = []
-		for (var prop in existing) {
-			if (hasOwn.call(existing, prop)) {
-				actions.push(existing[prop])
-			}
-		}
-
-		var changes = actions.sort(sortChanges)
-		var newCached = new Array(cached.length)
-
-		newCached.nodes = cached.nodes.slice()
-
-		forEach(changes, function (change) {
-			var index = change.index
-			if (change.action === DELETION) {
-				clear(cached[index].nodes, cached[index])
-				newCached.splice(index, 1)
-			}
-			if (change.action === INSERTION) {
-				var dummy = $document.createElement("div")
-				dummy.key = data[index].attrs.key
-				insertNode(parentElement, dummy, index)
-				newCached.splice(index, 0, {
-					attrs: {key: data[index].attrs.key},
-					nodes: [dummy]
-				})
-				newCached.nodes[index] = dummy
-			}
-
-			if (change.action === MOVE) {
-				var changeElement = change.element
-				var maybeChanged = parentElement.childNodes[index]
-				if (maybeChanged !== changeElement && changeElement !== null) {
-					parentElement.insertBefore(changeElement,
-						maybeChanged || null)
-				}
-				newCached[index] = cached[change.from]
-				newCached.nodes[index] = changeElement
-			}
-		})
-
-		return newCached
-	}
-
-	function diffKeys(data, cached, existing, parentElement) {
-		var keysDiffer = data.length !== cached.length
-
-		if (!keysDiffer) {
-			forKeys(data, function (attrs, i) {
-				var cachedCell = cached[i]
-				return keysDiffer = cachedCell &&
-					cachedCell.attrs &&
-					cachedCell.attrs.key !== attrs.key
-			})
-		}
-
-		if (keysDiffer) {
-			return handleKeysDiffer(data, existing, cached, parentElement)
-		} else {
-			return cached
-		}
-	}
-
-	function diffArray(data, cached, nodes) {
-		// diff the array itself
-
-		// update the list of DOM nodes by collecting the nodes from each item
-		forEach(data, function (_, i) {
-			if (cached[i] != null) nodes.push.apply(nodes, cached[i].nodes)
-		})
-		// remove items from the end of the array if the new array is shorter
-		// than the old one. if errors ever happen here, the issue is most
-		// likely a bug in the construction of the `cached` data structure
-		// somewhere earlier in the program
-		forEach(cached.nodes, function (node, i) {
-			if (node.parentNode != null && nodes.indexOf(node) < 0) {
-				clear([node], [cached[i]])
-			}
-		})
-
-		if (data.length < cached.length) cached.length = data.length
-		cached.nodes = nodes
-	}
-
-	function buildArrayKeys(data) {
-		var guid = 0
-		forKeys(data, function () {
-			forEach(data, function (attrs) {
-				if ((attrs = attrs && attrs.attrs) && attrs.key == null) {
-					attrs.key = "__mithril__" + guid++
-				}
-			})
-			return 1
-		})
-	}
-
-	function isDifferentEnough(data, cached, dataAttrKeys) {
-		if (data.tag !== cached.tag) return true
-
-		if (dataAttrKeys.sort().join() !==
-				Object.keys(cached.attrs).sort().join()) {
-			return true
-		}
-
-		if (data.attrs.id !== cached.attrs.id) {
-			return true
-		}
-
-		if (data.attrs.key !== cached.attrs.key) {
-			return true
-		}
-
-		if (m.redraw.strategy() === "all") {
-			return !cached.configContext || cached.configContext.retain !== true
-		}
-
-		if (m.redraw.strategy() === "diff") {
-			return cached.configContext && cached.configContext.retain === false
-		}
-
-		return false
-	}
-
-	function maybeRecreateObject(data, cached, dataAttrKeys) {
-		// if an element is different enough from the one in cache, recreate it
-		if (isDifferentEnough(data, cached, dataAttrKeys)) {
-			if (cached.nodes.length) clear(cached.nodes)
-
-			if (cached.configContext &&
-					isFunction(cached.configContext.onunload)) {
-				cached.configContext.onunload()
-			}
-
-			if (cached.controllers) {
-				forEach(cached.controllers, function (controller) {
-					if (controller.onunload) {
-						controller.onunload({preventDefault: noop})
-					}
-				})
-			}
-		}
-	}
-
-	function getObjectNamespace(data, namespace) {
-		if (data.attrs.xmlns) return data.attrs.xmlns
-		if (data.tag === "svg") return "http://www.w3.org/2000/svg"
-		if (data.tag === "math") return "http://www.w3.org/1998/Math/MathML"
-		return namespace
-	}
-
-	var pendingRequests = 0
-	m.startComputation = function () { pendingRequests++ }
-	m.endComputation = function () {
-		if (pendingRequests > 1) {
-			pendingRequests--
-		} else {
-			pendingRequests = 0
-			m.redraw()
-		}
-	}
-
-	function unloadCachedControllers(cached, views, controllers) {
-		if (controllers.length) {
-			cached.views = views
-			cached.controllers = controllers
-			forEach(controllers, function (controller) {
-				if (controller.onunload && controller.onunload.$old) {
-					controller.onunload = controller.onunload.$old
-				}
-
-				if (pendingRequests && controller.onunload) {
-					var onunload = controller.onunload
-					controller.onunload = noop
-					controller.onunload.$old = onunload
-				}
-			})
-		}
-	}
-
-	function scheduleConfigsToBeCalled(configs, data, node, isNew, cached) {
-		// schedule configs to be called. They are called after `build` finishes
-		// running
-		if (isFunction(data.attrs.config)) {
-			var context = cached.configContext = cached.configContext || {}
-
-			// bind
-			configs.push(function () {
-				return data.attrs.config.call(data, node, !isNew, context,
-					cached)
-			})
-		}
-	}
-
-	function buildUpdatedNode(
-		cached,
-		data,
-		editable,
-		hasKeys,
-		namespace,
-		views,
-		configs,
-		controllers
-	) {
-		var node = cached.nodes[0]
-
-		if (hasKeys) {
-			setAttributes(node, data.tag, data.attrs, cached.attrs, namespace)
-		}
-
-		cached.children = build(
-			node,
-			data.tag,
-			undefined,
-			undefined,
-			data.children,
-			cached.children,
-			false,
-			0,
-			data.attrs.contenteditable ? node : editable,
-			namespace,
-			configs
-		)
-
-		cached.nodes.intact = true
-
-		if (controllers.length) {
-			cached.views = views
-			cached.controllers = controllers
-		}
-
-		return node
-	}
-
-	function handleNonexistentNodes(data, parentElement, index) {
-		var nodes
-		if (data.$trusted) {
-			nodes = injectHTML(parentElement, index, data)
-		} else {
-			nodes = [$document.createTextNode(data)]
-			if (!(parentElement.nodeName in voidElements)) {
-				insertNode(parentElement, nodes[0], index)
-			}
-		}
-
-		var cached
-
-		if (typeof data === "string" ||
-				typeof data === "number" ||
-				typeof data === "boolean") {
-			cached = new data.constructor(data)
-		} else {
-			cached = data
-		}
-
-		cached.nodes = nodes
-		return cached
-	}
-
-	function reattachNodes(
-		data,
-		cached,
-		parentElement,
-		editable,
-		index,
-		parentTag
-	) {
-		var nodes = cached.nodes
-		if (!editable || editable !== $document.activeElement) {
-			if (data.$trusted) {
-				clear(nodes, cached)
-				nodes = injectHTML(parentElement, index, data)
-			} else if (parentTag === "textarea") {
-				// <textarea> uses `value` instead of `nodeValue`.
-				parentElement.value = data
-			} else if (editable) {
-				// contenteditable nodes use `innerHTML` instead of `nodeValue`.
-				editable.innerHTML = data
-			} else {
-				// was a trusted string
-				if (nodes[0].nodeType === 1 || nodes.length > 1 ||
-						(nodes[0].nodeValue.trim &&
-							!nodes[0].nodeValue.trim())) {
-					clear(cached.nodes, cached)
-					nodes = [$document.createTextNode(data)]
-				}
-
-				injectTextNode(parentElement, nodes[0], index, data)
-			}
-		}
-		cached = new data.constructor(data)
-		cached.nodes = nodes
-		return cached
-	}
-
-	function handleTextNode(
-		cached,
-		data,
-		index,
-		parentElement,
-		shouldReattach,
-		editable,
-		parentTag
-	) {
-		if (!cached.nodes.length) {
-			return handleNonexistentNodes(data, parentElement, index)
-		} else if (cached.valueOf() !== data.valueOf() || shouldReattach) {
-			return reattachNodes(data, cached, parentElement, editable, index,
-				parentTag)
-		} else {
-			return (cached.nodes.intact = true, cached)
-		}
-	}
-
-	function getSubArrayCount(item) {
-		if (item.$trusted) {
-			// fix offset of next element if item was a trusted string w/ more
-			// than one html element
-			// the first clause in the regexp matches elements
-			// the second clause (after the pipe) matches text nodes
-			var match = item.match(/<[^\/]|\>\s*[^<]/g)
-			if (match != null) return match.length
-		} else if (isArray(item)) {
-			return item.length
-		}
-		return 1
-	}
-
-	function buildArray(
-		data,
-		cached,
-		parentElement,
-		index,
-		parentTag,
-		shouldReattach,
-		editable,
-		namespace,
-		configs
-	) {
-		data = flatten(data)
-		var nodes = []
-		var intact = cached.length === data.length
-		var subArrayCount = 0
-
-		// keys algorithm: sort elements without recreating them if keys are
-		// present
-		//
-		// 1) create a map of all existing keys, and mark all for deletion
-		// 2) add new keys to map and mark them for addition
-		// 3) if key exists in new list, change action from deletion to a move
-		// 4) for each key, handle its corresponding action as marked in
-		//    previous steps
-
-		var existing = {}
-		var shouldMaintainIdentities = false
-
-		forKeys(cached, function (attrs, i) {
-			shouldMaintainIdentities = true
-			existing[cached[i].attrs.key] = {action: DELETION, index: i}
-		})
-
-		buildArrayKeys(data)
-		if (shouldMaintainIdentities) {
-			cached = diffKeys(data, cached, existing, parentElement)
-		}
-		// end key algorithm
-
-		var cacheCount = 0
-		// faster explicitly written
-		for (var i = 0, len = data.length; i < len; i++) {
-			// diff each item in the array
-			var item = build(
-				parentElement,
-				parentTag,
-				cached,
-				index,
-				data[i],
-				cached[cacheCount],
-				shouldReattach,
-				index + subArrayCount || subArrayCount,
-				editable,
-				namespace,
-				configs)
-
-			if (item !== undefined) {
-				intact = intact && item.nodes.intact
-				subArrayCount += getSubArrayCount(item)
-				cached[cacheCount++] = item
-			}
-		}
-
-		if (!intact) diffArray(data, cached, nodes)
-		return cached
-	}
-
-	function makeCache(data, cached, index, parentIndex, parentCache) {
-		if (cached != null) {
-			if (type.call(cached) === type.call(data)) return cached
-
-			if (parentCache && parentCache.nodes) {
-				var offset = index - parentIndex
-				var end = offset + (isArray(data) ? data : cached.nodes).length
-				clear(
-					parentCache.nodes.slice(offset, end),
-					parentCache.slice(offset, end))
-			} else if (cached.nodes) {
-				clear(cached.nodes, cached)
-			}
-		}
-
-		cached = new data.constructor()
-		// if constructor creates a virtual dom element, use a blank object as
-		// the base cached node instead of copying the virtual el (#277)
-		if (cached.tag) cached = {}
-		cached.nodes = []
-		return cached
-	}
-
-	function constructNode(data, namespace) {
-		if (data.attrs.is) {
-			if (namespace == null) {
-				return $document.createElement(data.tag, data.attrs.is)
-			} else {
-				return $document.createElementNS(namespace, data.tag,
-					data.attrs.is)
-			}
-		} else if (namespace == null) {
-			return $document.createElement(data.tag)
-		} else {
-			return $document.createElementNS(namespace, data.tag)
-		}
-	}
-
-	function constructAttrs(data, node, namespace, hasKeys) {
-		if (hasKeys) {
-			return setAttributes(node, data.tag, data.attrs, {}, namespace)
-		} else {
-			return data.attrs
-		}
-	}
-
-	function constructChildren(
-		data,
-		node,
-		cached,
-		editable,
-		namespace,
-		configs
-	) {
-		if (data.children != null && data.children.length > 0) {
-			return build(
-				node,
-				data.tag,
-				undefined,
-				undefined,
-				data.children,
-				cached.children,
-				true,
-				0,
-				data.attrs.contenteditable ? node : editable,
-				namespace,
-				configs)
-		} else {
-			return data.children
-		}
-	}
-
-	function reconstructCached(
-		data,
-		attrs,
-		children,
-		node,
-		namespace,
-		views,
-		controllers
-	) {
-		var cached = {
-			tag: data.tag,
-			attrs: attrs,
-			children: children,
-			nodes: [node]
-		}
-
-		unloadCachedControllers(cached, views, controllers)
-
-		if (cached.children && !cached.children.nodes) {
-			cached.children.nodes = []
-		}
-
-		// edge case: setting value on <select> doesn't work before children
-		// exist, so set it again after children have been created
-		if (data.tag === "select" && "value" in data.attrs) {
-			setAttributes(node, data.tag, {value: data.attrs.value}, {},
-				namespace)
-		}
-
-		return cached
-	}
-
-	function getController(views, view, cachedControllers, controller) {
-		var controllerIndex
-
-		if (m.redraw.strategy() === "diff" && views) {
-			controllerIndex = views.indexOf(view)
-		} else {
-			controllerIndex = -1
-		}
-
-		if (controllerIndex > -1) {
-			return cachedControllers[controllerIndex]
-		} else if (isFunction(controller)) {
-			return new controller()
-		} else {
-			return {}
-		}
-	}
-
-	var unloaders = []
-
-	function updateLists(views, controllers, view, controller) {
-		if (controller.onunload != null &&
-				unloaders.map(function (u) { return u.handler })
-					.indexOf(controller.onunload) < 0) {
-			unloaders.push({
-				controller: controller,
-				handler: controller.onunload
-			})
-		}
-
-		views.push(view)
-		controllers.push(controller)
-	}
-
-	var forcing = false
-	function checkView(
-		data,
-		view,
-		cached,
-		cachedControllers,
-		controllers,
-		views
-	) {
-		var controller = getController(
-			cached.views,
-			view,
-			cachedControllers,
-			data.controller)
-
-		var key = data && data.attrs && data.attrs.key
-
-		if (pendingRequests === 0 ||
-				forcing ||
-				cachedControllers &&
-					cachedControllers.indexOf(controller) > -1) {
-			data = data.view(controller)
-		} else {
-			data = {tag: "placeholder"}
-		}
-
-		if (data.subtree === "retain") return data
-		data.attrs = data.attrs || {}
-		data.attrs.key = key
-		updateLists(views, controllers, view, controller)
-		return data
-	}
-
-	function markViews(data, cached, views, controllers) {
-		var cachedControllers = cached && cached.controllers
-
-		while (data.view != null) {
-			data = checkView(
-				data,
-				data.view.$original || data.view,
-				cached,
-				cachedControllers,
-				controllers,
-				views)
-		}
-
-		return data
-	}
-
-	function buildObject( // eslint-disable-line max-statements
-		data,
-		cached,
-		editable,
-		parentElement,
-		index,
-		shouldReattach,
-		namespace,
-		configs
-	) {
-		var views = []
-		var controllers = []
-
-		data = markViews(data, cached, views, controllers)
-
-		if (data.subtree === "retain") return cached
-
-		if (!data.tag && controllers.length) {
-			throw new Error("Component template must return a virtual " +
-				"element, not an array, string, etc.")
-		}
-
-		data.attrs = data.attrs || {}
-		cached.attrs = cached.attrs || {}
-
-		var dataAttrKeys = Object.keys(data.attrs)
-		var hasKeys = dataAttrKeys.length > ("key" in data.attrs ? 1 : 0)
-
-		maybeRecreateObject(data, cached, dataAttrKeys)
-
-		if (!isString(data.tag)) return
-
-		var isNew = cached.nodes.length === 0
-
-		namespace = getObjectNamespace(data, namespace)
-
-		var node
-		if (isNew) {
-			node = constructNode(data, namespace)
-			// set attributes first, then create children
-			var attrs = constructAttrs(data, node, namespace, hasKeys)
-
-			// add the node to its parent before attaching children to it
-			insertNode(parentElement, node, index)
-
-			var children = constructChildren(data, node, cached, editable,
-				namespace, configs)
-
-			cached = reconstructCached(
-				data,
-				attrs,
-				children,
-				node,
-				namespace,
-				views,
-				controllers)
-		} else {
-			node = buildUpdatedNode(
-				cached,
-				data,
-				editable,
-				hasKeys,
-				namespace,
-				views,
-				configs,
-				controllers)
-		}
-
-		if (!isNew && shouldReattach === true && node != null) {
-			insertNode(parentElement, node, index)
-		}
-
-		// The configs are called after `build` finishes running
-		scheduleConfigsToBeCalled(configs, data, node, isNew, cached)
-
-		return cached
-	}
-
-	function build(
-		parentElement,
-		parentTag,
-		parentCache,
-		parentIndex,
-		data,
-		cached,
-		shouldReattach,
-		index,
-		editable,
-		namespace,
-		configs
-	) {
-		/*
-		 * `build` is a recursive function that manages creation/diffing/removal
-		 * of DOM elements based on comparison between `data` and `cached` the
-		 * diff algorithm can be summarized as this:
-		 *
-		 * 1 - compare `data` and `cached`
-		 * 2 - if they are different, copy `data` to `cached` and update the DOM
-		 *     based on what the difference is
-		 * 3 - recursively apply this algorithm for every array and for the
-		 *     children of every virtual element
-		 *
-		 * The `cached` data structure is essentially the same as the previous
-		 * redraw's `data` data structure, with a few additions:
-		 * - `cached` always has a property called `nodes`, which is a list of
-		 *    DOM elements that correspond to the data represented by the
-		 *    respective virtual element
-		 * - in order to support attaching `nodes` as a property of `cached`,
-		 *    `cached` is *always* a non-primitive object, i.e. if the data was
-		 *    a string, then cached is a String instance. If data was `null` or
-		 *    `undefined`, cached is `new String("")`
-		 * - `cached also has a `configContext` property, which is the state
-		 *    storage object exposed by config(element, isInitialized, context)
-		 * - when `cached` is an Object, it represents a virtual element; when
-		 *    it's an Array, it represents a list of elements; when it's a
-		 *    String, Number or Boolean, it represents a text node
-		 *
-		 * `parentElement` is a DOM element used for W3C DOM API calls
-		 * `parentTag` is only used for handling a corner case for textarea
-		 * values
-		 * `parentCache` is used to remove nodes in some multi-node cases
-		 * `parentIndex` and `index` are used to figure out the offset of nodes.
-		 * They're artifacts from before arrays started being flattened and are
-		 * likely refactorable
-		 * `data` and `cached` are, respectively, the new and old nodes being
-		 * diffed
-		 * `shouldReattach` is a flag indicating whether a parent node was
-		 * recreated (if so, and if this node is reused, then this node must
-		 * reattach itself to the new parent)
-		 * `editable` is a flag that indicates whether an ancestor is
-		 * contenteditable
-		 * `namespace` indicates the closest HTML namespace as it cascades down
-		 * from an ancestor
-		 * `configs` is a list of config functions to run after the topmost
-		 * `build` call finishes running
-		 *
-		 * there's logic that relies on the assumption that null and undefined
-		 * data are equivalent to empty strings
-		 * - this prevents lifecycle surprises from procedural helpers that mix
-		 *   implicit and explicit return statements (e.g.
-		 *   function foo() {if (cond) return m("div")}
-		 * - it simplifies diffing code
-		 */
-		data = dataToString(data)
-		if (data.subtree === "retain") return cached
-		cached = makeCache(data, cached, index, parentIndex, parentCache)
-
-		if (isArray(data)) {
-			return buildArray(
-				data,
-				cached,
-				parentElement,
-				index,
-				parentTag,
-				shouldReattach,
-				editable,
-				namespace,
-				configs)
-		} else if (data != null && isObject(data)) {
-			return buildObject(
-				data,
-				cached,
-				editable,
-				parentElement,
-				index,
-				shouldReattach,
-				namespace,
-				configs)
-		} else if (!isFunction(data)) {
-			return handleTextNode(
-				cached,
-				data,
-				index,
-				parentElement,
-				shouldReattach,
-				editable,
-				parentTag)
-		} else {
-			return cached
-		}
-	}
-
-	function sortChanges(a, b) {
-		return a.action - b.action || a.index - b.index
-	}
-
-	function copyStyleAttrs(node, dataAttr, cachedAttr) {
-		for (var rule in dataAttr) {
-			if (hasOwn.call(dataAttr, rule)) {
-				if (cachedAttr == null || cachedAttr[rule] !== dataAttr[rule]) {
-					node.style[rule] = dataAttr[rule]
-				}
-			}
-		}
-
-		for (rule in cachedAttr) {
-			if (hasOwn.call(cachedAttr, rule)) {
-				if (!hasOwn.call(dataAttr, rule)) node.style[rule] = ""
-			}
-		}
-	}
-
-	var shouldUseSetAttribute = {
-		list: 1,
-		style: 1,
-		form: 1,
-		type: 1,
-		width: 1,
-		height: 1
-	}
-
-	function setSingleAttr(
-		node,
-		attrName,
-		dataAttr,
-		cachedAttr,
-		tag,
-		namespace
-	) {
-		if (attrName === "config" || attrName === "key") {
-			// `config` isn't a real attribute, so ignore it
-			return true
-		} else if (isFunction(dataAttr) && attrName.slice(0, 2) === "on") {
-			// hook event handlers to the auto-redrawing system
-			node[attrName] = autoredraw(dataAttr, node)
-		} else if (attrName === "style" && dataAttr != null &&
-				isObject(dataAttr)) {
-			// handle `style: {...}`
-			copyStyleAttrs(node, dataAttr, cachedAttr)
-		} else if (namespace != null) {
-			// handle SVG
-			if (attrName === "href") {
-				node.setAttributeNS("http://www.w3.org/1999/xlink",
-					"href", dataAttr)
-			} else {
-				node.setAttribute(
-					attrName === "className" ? "class" : attrName,
-					dataAttr)
-			}
-		} else if (attrName in node && !shouldUseSetAttribute[attrName]) {
-			// handle cases that are properties (but ignore cases where we
-			// should use setAttribute instead)
-			//
-			// - list and form are typically used as strings, but are DOM
-			//   element references in js
-			//
-			// - when using CSS selectors (e.g. `m("[style='']")`), style is
-			//   used as a string, but it's an object in js
-			//
-			// #348 don't set the value if not needed - otherwise, cursor
-			// placement breaks in Chrome
-			try {
-				if (tag !== "input" || node[attrName] !== dataAttr) {
-					node[attrName] = dataAttr
-				}
-			} catch (e) {
-				node.setAttribute(attrName, dataAttr)
-			}
-		}
-		else node.setAttribute(attrName, dataAttr)
-	}
-
-	function trySetAttr(
-		node,
-		attrName,
-		dataAttr,
-		cachedAttr,
-		cachedAttrs,
-		tag,
-		namespace
-	) {
-		if (!(attrName in cachedAttrs) || (cachedAttr !== dataAttr) || ($document.activeElement === node)) {
-			cachedAttrs[attrName] = dataAttr
-			try {
-				return setSingleAttr(
-					node,
-					attrName,
-					dataAttr,
-					cachedAttr,
-					tag,
-					namespace)
-			} catch (e) {
-				// swallow IE's invalid argument errors to mimic HTML's
-				// fallback-to-doing-nothing-on-invalid-attributes behavior
-				if (e.message.indexOf("Invalid argument") < 0) throw e
-			}
-		} else if (attrName === "value" && tag === "input" &&
-				node.value !== dataAttr) {
-			// #348 dataAttr may not be a string, so use loose comparison
-			node.value = dataAttr
-		}
-	}
-
-	function setAttributes(node, tag, dataAttrs, cachedAttrs, namespace) {
-		for (var attrName in dataAttrs) {
-			if (hasOwn.call(dataAttrs, attrName)) {
-				if (trySetAttr(
-						node,
-						attrName,
-						dataAttrs[attrName],
-						cachedAttrs[attrName],
-						cachedAttrs,
-						tag,
-						namespace)) {
-					continue
-				}
-			}
-		}
-		return cachedAttrs
-	}
-
-	function clear(nodes, cached) {
-		for (var i = nodes.length - 1; i > -1; i--) {
-			if (nodes[i] && nodes[i].parentNode) {
-				try {
-					nodes[i].parentNode.removeChild(nodes[i])
-				} catch (e) {
-					/* eslint-disable max-len */
-					// ignore if this fails due to order of events (see
-					// http://stackoverflow.com/questions/21926083/failed-to-execute-removechild-on-node)
-					/* eslint-enable max-len */
-				}
-				cached = [].concat(cached)
-				if (cached[i]) unload(cached[i])
-			}
-		}
-		// release memory if nodes is an array. This check should fail if nodes
-		// is a NodeList (see loop above)
-		if (nodes.length) {
-			nodes.length = 0
-		}
-	}
-
-	function unload(cached) {
-		if (cached.configContext && isFunction(cached.configContext.onunload)) {
-			cached.configContext.onunload()
-			cached.configContext.onunload = null
-		}
-		if (cached.controllers) {
-			forEach(cached.controllers, function (controller) {
-				if (isFunction(controller.onunload)) {
-					controller.onunload({preventDefault: noop})
-				}
-			})
-		}
-		if (cached.children) {
-			if (isArray(cached.children)) forEach(cached.children, unload)
-			else if (cached.children.tag) unload(cached.children)
-		}
-	}
-
-	function appendTextFragment(parentElement, data) {
-		try {
-			parentElement.appendChild(
-				$document.createRange().createContextualFragment(data))
-		} catch (e) {
-			parentElement.insertAdjacentHTML("beforeend", data)
-			replaceScriptNodes(parentElement)
-		}
-	}
-
-	// Replace script tags inside given DOM element with executable ones.
-	// Will also check children recursively and replace any found script
-	// tags in same manner.
-	function replaceScriptNodes(node) {
-		if (node.tagName === "SCRIPT") {
-			node.parentNode.replaceChild(buildExecutableNode(node), node)
-		} else {
-			var children = node.childNodes
-			if (children && children.length) {
-				for (var i = 0; i < children.length; i++) {
-					replaceScriptNodes(children[i])
-				}
-			}
-		}
-
-		return node
-	}
-
-	// Replace script element with one whose contents are executable.
-	function buildExecutableNode(node){
-		var scriptEl = document.createElement("script")
-		var attrs = node.attributes
-
-		for (var i = 0; i < attrs.length; i++) {
-			scriptEl.setAttribute(attrs[i].name, attrs[i].value)
-		}
-
-		scriptEl.text = node.innerHTML
-		return scriptEl
-	}
-
-	function injectHTML(parentElement, index, data) {
-		var nextSibling = parentElement.childNodes[index]
-		if (nextSibling) {
-			var isElement = nextSibling.nodeType !== 1
-			var placeholder = $document.createElement("span")
-			if (isElement) {
-				parentElement.insertBefore(placeholder, nextSibling || null)
-				placeholder.insertAdjacentHTML("beforebegin", data)
-				parentElement.removeChild(placeholder)
-			} else {
-				nextSibling.insertAdjacentHTML("beforebegin", data)
-			}
-		} else {
-			appendTextFragment(parentElement, data)
-		}
-
-		var nodes = []
-
-		while (parentElement.childNodes[index] !== nextSibling) {
-			nodes.push(parentElement.childNodes[index])
-			index++
-		}
-
-		return nodes
-	}
-
-	function autoredraw(callback, object) {
-		return function (e) {
-			e = e || event
-			m.redraw.strategy("diff")
-			m.startComputation()
-			try {
-				return callback.call(object, e)
-			} finally {
-				endFirstComputation()
-			}
-		}
-	}
-
-	var html
-	var documentNode = {
-		appendChild: function (node) {
-			if (html === undefined) html = $document.createElement("html")
-			if ($document.documentElement &&
-					$document.documentElement !== node) {
-				$document.replaceChild(node, $document.documentElement)
-			} else {
-				$document.appendChild(node)
-			}
-
-			this.childNodes = $document.childNodes
-		},
-
-		insertBefore: function (node) {
-			this.appendChild(node)
-		},
-
-		childNodes: []
-	}
-
-	var nodeCache = []
-	var cellCache = {}
-
-	m.render = function (root, cell, forceRecreation) {
-		if (!root) {
-			throw new Error("Ensure the DOM element being passed to " +
-				"m.route/m.mount/m.render is not undefined.")
-		}
-		var configs = []
-		var id = getCellCacheKey(root)
-		var isDocumentRoot = root === $document
-		var node
-
-		if (isDocumentRoot || root === $document.documentElement) {
-			node = documentNode
-		} else {
-			node = root
-		}
-
-		if (isDocumentRoot && cell.tag !== "html") {
-			cell = {tag: "html", attrs: {}, children: cell}
-		}
-
-		if (cellCache[id] === undefined) clear(node.childNodes)
-		if (forceRecreation === true) reset(root)
-
-		cellCache[id] = build(
-			node,
-			null,
-			undefined,
-			undefined,
-			cell,
-			cellCache[id],
-			false,
-			0,
-			null,
-			undefined,
-			configs)
-
-		forEach(configs, function (config) { config() })
-	}
-
-	function getCellCacheKey(element) {
-		var index = nodeCache.indexOf(element)
-		return index < 0 ? nodeCache.push(element) - 1 : index
-	}
-
-	m.trust = function (value) {
-		value = new String(value) // eslint-disable-line no-new-wrappers
-		value.$trusted = true
-		return value
-	}
-
-	function gettersetter(store) {
-		function prop() {
-			if (arguments.length) store = arguments[0]
-			return store
-		}
-
-		prop.toJSON = function () {
-			return store
-		}
-
-		return prop
-	}
-
-	m.prop = function (store) {
-		if ((store != null && (isObject(store) || isFunction(store)) || ((typeof Promise !== "undefined") && (store instanceof Promise))) &&
-				isFunction(store.then)) {
-			return propify(store)
-		}
-
-		return gettersetter(store)
-	}
-
-	var roots = []
-	var components = []
-	var controllers = []
-	var lastRedrawId = null
-	var lastRedrawCallTime = 0
-	var computePreRedrawHook = null
-	var computePostRedrawHook = null
-	var topComponent
-	var FRAME_BUDGET = 16 // 60 frames per second = 1 call per 16 ms
-
-	function parameterize(component, args) {
-		function controller() {
-			/* eslint-disable no-invalid-this */
-			return (component.controller || noop).apply(this, args) || this
-			/* eslint-enable no-invalid-this */
-		}
-
-		if (component.controller) {
-			controller.prototype = component.controller.prototype
-		}
-
-		function view(ctrl) {
-			var currentArgs = [ctrl].concat(args)
-			for (var i = 1; i < arguments.length; i++) {
-				currentArgs.push(arguments[i])
-			}
-
-			return component.view.apply(component, currentArgs)
-		}
-
-		view.$original = component.view
-		var output = {controller: controller, view: view}
-		if (args[0] && args[0].key != null) output.attrs = {key: args[0].key}
-		return output
-	}
-
-	m.component = function (component) {
-		var args = new Array(arguments.length - 1)
-
-		for (var i = 1; i < arguments.length; i++) {
-			args[i - 1] = arguments[i]
-		}
-
-		return parameterize(component, args)
-	}
-
-	function checkPrevented(component, root, index, isPrevented) {
-		if (!isPrevented) {
-			m.redraw.strategy("all")
-			m.startComputation()
-			roots[index] = root
-			var currentComponent
-
-			if (component) {
-				currentComponent = topComponent = component
-			} else {
-				currentComponent = topComponent = component = {controller: noop}
-			}
-
-			var controller = new (component.controller || noop)()
-
-			// controllers may call m.mount recursively (via m.route redirects,
-			// for example)
-			// this conditional ensures only the last recursive m.mount call is
-			// applied
-			if (currentComponent === topComponent) {
-				controllers[index] = controller
-				components[index] = component
-			}
-			endFirstComputation()
-			if (component === null) {
-				removeRootElement(root, index)
-			}
-			return controllers[index]
-		} else if (component == null) {
-			removeRootElement(root, index)
-		}
-	}
-
-	m.mount = m.module = function (root, component) {
-		if (!root) {
-			throw new Error("Please ensure the DOM element exists before " +
-				"rendering a template into it.")
-		}
-
-		var index = roots.indexOf(root)
-		if (index < 0) index = roots.length
-
-		var isPrevented = false
-		var event = {
-			preventDefault: function () {
-				isPrevented = true
-				computePreRedrawHook = computePostRedrawHook = null
-			}
-		}
-
-		forEach(unloaders, function (unloader) {
-			unloader.handler.call(unloader.controller, event)
-			unloader.controller.onunload = null
-		})
-
-		if (isPrevented) {
-			forEach(unloaders, function (unloader) {
-				unloader.controller.onunload = unloader.handler
-			})
-		} else {
-			unloaders = []
-		}
-
-		if (controllers[index] && isFunction(controllers[index].onunload)) {
-			controllers[index].onunload(event)
-		}
-
-		return checkPrevented(component, root, index, isPrevented)
-	}
-
-	function removeRootElement(root, index) {
-		roots.splice(index, 1)
-		controllers.splice(index, 1)
-		components.splice(index, 1)
-		reset(root)
-		nodeCache.splice(getCellCacheKey(root), 1)
-	}
-
-	var redrawing = false
-	m.redraw = function (force) {
-		if (redrawing) return
-		redrawing = true
-		if (force) forcing = true
-
-		try {
-			// lastRedrawId is a positive number if a second redraw is requested
-			// before the next animation frame
-			// lastRedrawId is null if it's the first redraw and not an event
-			// handler
-			if (lastRedrawId && !force) {
-				// when setTimeout: only reschedule redraw if time between now
-				// and previous redraw is bigger than a frame, otherwise keep
-				// currently scheduled timeout
-				// when rAF: always reschedule redraw
-				if ($requestAnimationFrame === global.requestAnimationFrame ||
-						new Date() - lastRedrawCallTime > FRAME_BUDGET) {
-					if (lastRedrawId > 0) $cancelAnimationFrame(lastRedrawId)
-					lastRedrawId = $requestAnimationFrame(redraw, FRAME_BUDGET)
-				}
-			} else {
-				redraw()
-				lastRedrawId = $requestAnimationFrame(function () {
-					lastRedrawId = null
-				}, FRAME_BUDGET)
-			}
-		} finally {
-			redrawing = forcing = false
-		}
-	}
-
-	m.redraw.strategy = m.prop()
-	function redraw() {
-		if (computePreRedrawHook) {
-			computePreRedrawHook()
-			computePreRedrawHook = null
-		}
-		forEach(roots, function (root, i) {
-			var component = components[i]
-			if (controllers[i]) {
-				var args = [controllers[i]]
-				m.render(root,
-					component.view ? component.view(controllers[i], args) : "")
-			}
-		})
-		// after rendering within a routed context, we need to scroll back to
-		// the top, and fetch the document title for history.pushState
-		if (computePostRedrawHook) {
-			computePostRedrawHook()
-			computePostRedrawHook = null
-		}
-		lastRedrawId = null
-		lastRedrawCallTime = new Date()
-		m.redraw.strategy("diff")
-	}
-
-	function endFirstComputation() {
-		if (m.redraw.strategy() === "none") {
-			pendingRequests--
-			m.redraw.strategy("diff")
-		} else {
-			m.endComputation()
-		}
-	}
-
-	m.withAttr = function (prop, withAttrCallback, callbackThis) {
-		return function (e) {
-			e = e || window.event
-			/* eslint-disable no-invalid-this */
-			var currentTarget = e.currentTarget || this
-			var _this = callbackThis || this
-			/* eslint-enable no-invalid-this */
-			var target = prop in currentTarget ?
-				currentTarget[prop] :
-				currentTarget.getAttribute(prop)
-			withAttrCallback.call(_this, target)
-		}
-	}
-
-	// routing
-	var modes = {pathname: "", hash: "#", search: "?"}
-	var redirect = noop
-	var isDefaultRoute = false
-	var routeParams, currentRoute
-
-	m.route = function (root, arg1, arg2, vdom) { // eslint-disable-line
-		// m.route()
-		if (arguments.length === 0) return currentRoute
-		// m.route(el, defaultRoute, routes)
-		if (arguments.length === 3 && isString(arg1)) {
-			redirect = function (source) {
-				var path = currentRoute = normalizeRoute(source)
-				if (!routeByValue(root, arg2, path)) {
-					if (isDefaultRoute) {
-						throw new Error("Ensure the default route matches " +
-							"one of the routes defined in m.route")
-					}
-
-					isDefaultRoute = true
-					m.route(arg1, true)
-					isDefaultRoute = false
-				}
-			}
-
-			var listener = m.route.mode === "hash" ?
-				"onhashchange" :
-				"onpopstate"
-
-			global[listener] = function () {
-				var path = $location[m.route.mode]
-				if (m.route.mode === "pathname") path += $location.search
-				if (currentRoute !== normalizeRoute(path)) redirect(path)
-			}
-
-			computePreRedrawHook = setScroll
-			global[listener]()
-
-			return
-		}
-
-		// config: m.route
-		if (root.addEventListener || root.attachEvent) {
-			var base = m.route.mode !== "pathname" ? $location.pathname : ""
-			root.href = base + modes[m.route.mode] + vdom.attrs.href
-			if (root.addEventListener) {
-				root.removeEventListener("click", routeUnobtrusive)
-				root.addEventListener("click", routeUnobtrusive)
-			} else {
-				root.detachEvent("onclick", routeUnobtrusive)
-				root.attachEvent("onclick", routeUnobtrusive)
-			}
-
-			return
-		}
-		// m.route(route, params, shouldReplaceHistoryEntry)
-		if (isString(root)) {
-			var oldRoute = currentRoute
-			currentRoute = root
-
-			var args = arg1 || {}
-			var queryIndex = currentRoute.indexOf("?")
-			var params
-
-			if (queryIndex > -1) {
-				params = parseQueryString(currentRoute.slice(queryIndex + 1))
-			} else {
-				params = {}
-			}
-
-			for (var i in args) {
-				if (hasOwn.call(args, i)) {
-					params[i] = args[i]
-				}
-			}
-
-			var querystring = buildQueryString(params)
-			var currentPath
-
-			if (queryIndex > -1) {
-				currentPath = currentRoute.slice(0, queryIndex)
-			} else {
-				currentPath = currentRoute
-			}
-
-			if (querystring) {
-				currentRoute = currentPath +
-					(currentPath.indexOf("?") === -1 ? "?" : "&") +
-					querystring
-			}
-
-			var replaceHistory =
-				(arguments.length === 3 ? arg2 : arg1) === true ||
-				oldRoute === root
-
-			if (global.history.pushState) {
-				var method = replaceHistory ? "replaceState" : "pushState"
-				computePreRedrawHook = setScroll
-				computePostRedrawHook = function () {
-					try {
-						global.history[method](null, $document.title,
-							modes[m.route.mode] + currentRoute)
-					} catch (err) {
-						// In the event of a pushState or replaceState failure,
-						// fallback to a standard redirect. This is specifically
-						// to address a Safari security error when attempting to
-						// call pushState more than 100 times.
-						$location[m.route.mode] = currentRoute
-					}
-				}
-				redirect(modes[m.route.mode] + currentRoute)
-			} else {
-				$location[m.route.mode] = currentRoute
-				redirect(modes[m.route.mode] + currentRoute)
-			}
-		}
-	}
-
-	m.route.param = function (key) {
-		if (!routeParams) {
-			throw new Error("You must call m.route(element, defaultRoute, " +
-				"routes) before calling m.route.param()")
-		}
-
-		if (!key) {
-			return routeParams
-		}
-
-		return routeParams[key]
-	}
-
-	m.route.mode = "search"
-
-	function normalizeRoute(route) {
-		return route.slice(modes[m.route.mode].length)
-	}
-
-	function routeByValue(root, router, path) {
-		routeParams = {}
-
-		var queryStart = path.indexOf("?")
-		if (queryStart !== -1) {
-			routeParams = parseQueryString(
-				path.substr(queryStart + 1, path.length))
-			path = path.substr(0, queryStart)
-		}
-
-		// Get all routes and check if there's
-		// an exact match for the current path
-		var keys = Object.keys(router)
-		var index = keys.indexOf(path)
-
-		if (index !== -1){
-			m.mount(root, router[keys [index]])
-			return true
-		}
-
-		for (var route in router) {
-			if (hasOwn.call(router, route)) {
-				if (route === path) {
-					m.mount(root, router[route])
-					return true
-				}
-
-				var matcher = new RegExp("^" + route
-					.replace(/:[^\/]+?\.{3}/g, "(.*?)")
-					.replace(/:[^\/]+/g, "([^\\/]+)") + "\/?$")
-
-				if (matcher.test(path)) {
-					/* eslint-disable no-loop-func */
-					path.replace(matcher, function () {
-						var keys = route.match(/:[^\/]+/g) || []
-						var values = [].slice.call(arguments, 1, -2)
-						forEach(keys, function (key, i) {
-							routeParams[key.replace(/:|\./g, "")] =
-								decodeURIComponent(values[i])
-						})
-						m.mount(root, router[route])
-					})
-					/* eslint-enable no-loop-func */
-					return true
-				}
-			}
-		}
-	}
-
-	function routeUnobtrusive(e) {
-		e = e || event
-		if (e.ctrlKey || e.metaKey || e.shiftKey || e.which === 2) return
-
-		if (e.preventDefault) {
-			e.preventDefault()
-		} else {
-			e.returnValue = false
-		}
-
-		var currentTarget = e.currentTarget || e.srcElement
-		var args
-
-		if (m.route.mode === "pathname" && currentTarget.search) {
-			args = parseQueryString(currentTarget.search.slice(1))
-		} else {
-			args = {}
-		}
-
-		while (currentTarget && !/a/i.test(currentTarget.nodeName)) {
-			currentTarget = currentTarget.parentNode
-		}
-
-		// clear pendingRequests because we want an immediate route change
-		pendingRequests = 0
-		m.route(currentTarget[m.route.mode]
-			.slice(modes[m.route.mode].length), args)
-	}
-
-	function setScroll() {
-		if (m.route.mode !== "hash" && $location.hash) {
-			$location.hash = $location.hash
-		} else {
-			global.scrollTo(0, 0)
-		}
-	}
-
-	function buildQueryString(object, prefix) {
-		var duplicates = {}
-		var str = []
-
-		for (var prop in object) {
-			if (hasOwn.call(object, prop)) {
-				var key = prefix ? prefix + "[" + prop + "]" : prop
-				var value = object[prop]
-
-				if (value === null) {
-					str.push(encodeURIComponent(key))
-				} else if (isObject(value)) {
-					str.push(buildQueryString(value, key))
-				} else if (isArray(value)) {
-					var keys = []
-					duplicates[key] = duplicates[key] || {}
-					/* eslint-disable no-loop-func */
-					forEach(value, function (item) {
-						/* eslint-enable no-loop-func */
-						if (!duplicates[key][item]) {
-							duplicates[key][item] = true
-							keys.push(encodeURIComponent(key) + "=" +
-								encodeURIComponent(item))
-						}
-					})
-					str.push(keys.join("&"))
-				} else if (value !== undefined) {
-					str.push(encodeURIComponent(key) + "=" +
-						encodeURIComponent(value))
-				}
-			}
-		}
-
-		return str.join("&")
-	}
-
-	function parseQueryString(str) {
-		if (str === "" || str == null) return {}
-		if (str.charAt(0) === "?") str = str.slice(1)
-
-		var pairs = str.split("&")
-		var params = {}
-
-		forEach(pairs, function (string) {
-			var pair = string.split("=")
-			var key = decodeURIComponent(pair[0])
-			var value = pair.length === 2 ? decodeURIComponent(pair[1]) : null
-			if (params[key] != null) {
-				if (!isArray(params[key])) params[key] = [params[key]]
-				params[key].push(value)
-			}
-			else params[key] = value
-		})
-
-		return params
-	}
-
-	m.route.buildQueryString = buildQueryString
-	m.route.parseQueryString = parseQueryString
-
-	function reset(root) {
-		var cacheKey = getCellCacheKey(root)
-		clear(root.childNodes, cellCache[cacheKey])
-		cellCache[cacheKey] = undefined
-	}
-
-	m.deferred = function () {
-		var deferred = new Deferred()
-		deferred.promise = propify(deferred.promise)
-		return deferred
-	}
-
-	function propify(promise, initialValue) {
-		var prop = m.prop(initialValue)
-		promise.then(prop)
-		prop.then = function (resolve, reject) {
-			return propify(promise.then(resolve, reject), initialValue)
-		}
-
-		prop.catch = prop.then.bind(null, null)
-		return prop
-	}
-	// Promiz.mithril.js | Zolmeister | MIT
-	// a modified version of Promiz.js, which does not conform to Promises/A+
-	// for two reasons:
-	//
-	// 1) `then` callbacks are called synchronously (because setTimeout is too
-	//    slow, and the setImmediate polyfill is too big
-	//
-	// 2) throwing subclasses of Error cause the error to be bubbled up instead
-	//    of triggering rejection (because the spec does not account for the
-	//    important use case of default browser error handling, i.e. message w/
-	//    line number)
-
-	var RESOLVING = 1
-	var REJECTING = 2
-	var RESOLVED = 3
-	var REJECTED = 4
-
-	function Deferred(onSuccess, onFailure) {
-		var self = this
-		var state = 0
-		var promiseValue = 0
-		var next = []
-
-		self.promise = {}
-
-		self.resolve = function (value) {
-			if (!state) {
-				promiseValue = value
-				state = RESOLVING
-
-				fire()
-			}
-
-			return self
-		}
-
-		self.reject = function (value) {
-			if (!state) {
-				promiseValue = value
-				state = REJECTING
-
-				fire()
-			}
-
-			return self
-		}
-
-		self.promise.then = function (onSuccess, onFailure) {
-			var deferred = new Deferred(onSuccess, onFailure)
-
-			if (state === RESOLVED) {
-				deferred.resolve(promiseValue)
-			} else if (state === REJECTED) {
-				deferred.reject(promiseValue)
-			} else {
-				next.push(deferred)
-			}
-
-			return deferred.promise
-		}
-
-		function finish(type) {
-			state = type || REJECTED
-			next.map(function (deferred) {
-				if (state === RESOLVED) {
-					deferred.resolve(promiseValue)
-				} else {
-					deferred.reject(promiseValue)
-				}
-			})
-		}
-
-		function thennable(then, success, failure, notThennable) {
-			if (((promiseValue != null && isObject(promiseValue)) ||
-					isFunction(promiseValue)) && isFunction(then)) {
-				try {
-					// count protects against abuse calls from spec checker
-					var count = 0
-					then.call(promiseValue, function (value) {
-						if (count++) return
-						promiseValue = value
-						success()
-					}, function (value) {
-						if (count++) return
-						promiseValue = value
-						failure()
-					})
-				} catch (e) {
-					m.deferred.onerror(e)
-					promiseValue = e
-					failure()
-				}
-			} else {
-				notThennable()
-			}
-		}
-
-		function fire() {
-			// check if it's a thenable
+		childList = children
+	}
+	return Vnode(state.tag, attrs.key, hasAttrs ? attrs : undefined, childList, text)
+}
+function hyperscript(selector) {
+	// Because sloppy mode sucks
+	var attrs = arguments[1], start = 2, children
+	if (selector == null || typeof selector !== "string" && typeof selector !== "function" && typeof selector.view !== "function") {
+		throw Error("The selector must be either a string or a component.");
+	}
+	if (typeof selector === "string") {
+		var cached = selectorCache[selector] || compileSelector(selector)
+	}
+	if (attrs == null) {
+		attrs = {}
+	} else if (typeof attrs !== "object" || attrs.tag != null || Array.isArray(attrs)) {
+		attrs = {}
+		start = 1
+	}
+	if (arguments.length === start + 1) {
+		children = arguments[start]
+		if (!Array.isArray(children)) children = [children]
+	} else {
+		children = []
+		while (start < arguments.length) children.push(arguments[start++])
+	}
+	var normalized = Vnode.normalizeChildren(children)
+	if (typeof selector === "string") {
+		return execSelector(cached, attrs, normalized)
+	} else {
+		return Vnode(selector, attrs.key, attrs, normalized)
+	}
+}
+hyperscript.trust = function(html) {
+	if (html == null) html = ""
+	return Vnode("<", undefined, undefined, html, undefined, undefined)
+}
+hyperscript.fragment = function(attrs1, children) {
+	return Vnode("[", attrs1.key, attrs1, Vnode.normalizeChildren(children), undefined, undefined)
+}
+var m = hyperscript
+/** @constructor */
+var PromisePolyfill = function(executor) {
+	if (!(this instanceof PromisePolyfill)) throw new Error("Promise must be called with `new`")
+	if (typeof executor !== "function") throw new TypeError("executor must be a function")
+	var self = this, resolvers = [], rejectors = [], resolveCurrent = handler(resolvers, true), rejectCurrent = handler(rejectors, false)
+	var instance = self._instance = {resolvers: resolvers, rejectors: rejectors}
+	var callAsync = typeof setImmediate === "function" ? setImmediate : setTimeout
+	function handler(list, shouldAbsorb) {
+		return function execute(value) {
 			var then
 			try {
-				then = promiseValue && promiseValue.then
-			} catch (e) {
-				m.deferred.onerror(e)
-				promiseValue = e
-				state = REJECTING
-				return fire()
+				if (shouldAbsorb && value != null && (typeof value === "object" || typeof value === "function") && typeof (then = value.then) === "function") {
+					if (value === self) throw new TypeError("Promise can't be resolved w/ itself")
+					executeOnce(then.bind(value))
+				}
+				else {
+					callAsync(function() {
+						if (!shouldAbsorb && list.length === 0) console.error("Possible unhandled promise rejection:", value)
+						for (var i = 0; i < list.length; i++) list[i](value)
+						resolvers.length = 0, rejectors.length = 0
+						instance.state = shouldAbsorb
+						instance.retry = function() {execute(value)}
+					})
+				}
 			}
-
-			if (state === REJECTING) {
-				m.deferred.onerror(promiseValue)
+			catch (e) {
+				rejectCurrent(e)
 			}
-
-			thennable(then, function () {
-				state = RESOLVING
-				fire()
-			}, function () {
-				state = REJECTING
-				fire()
-			}, function () {
-				try {
-					if (state === RESOLVING && isFunction(onSuccess)) {
-						promiseValue = onSuccess(promiseValue)
-					} else if (state === REJECTING && isFunction(onFailure)) {
-						promiseValue = onFailure(promiseValue)
-						state = RESOLVING
+		}
+	}
+	function executeOnce(then) {
+		var runs = 0
+		function run(fn) {
+			return function(value) {
+				if (runs++ > 0) return
+				fn(value)
+			}
+		}
+		var onerror = run(rejectCurrent)
+		try {then(run(resolveCurrent), onerror)} catch (e) {onerror(e)}
+	}
+	executeOnce(executor)
+}
+PromisePolyfill.prototype.then = function(onFulfilled, onRejection) {
+	var self = this, instance = self._instance
+	function handle(callback, list, next, state) {
+		list.push(function(value) {
+			if (typeof callback !== "function") next(value)
+			else try {resolveNext(callback(value))} catch (e) {if (rejectNext) rejectNext(e)}
+		})
+		if (typeof instance.retry === "function" && state === instance.state) instance.retry()
+	}
+	var resolveNext, rejectNext
+	var promise = new PromisePolyfill(function(resolve, reject) {resolveNext = resolve, rejectNext = reject})
+	handle(onFulfilled, instance.resolvers, resolveNext, true), handle(onRejection, instance.rejectors, rejectNext, false)
+	return promise
+}
+PromisePolyfill.prototype.catch = function(onRejection) {
+	return this.then(null, onRejection)
+}
+PromisePolyfill.resolve = function(value) {
+	if (value instanceof PromisePolyfill) return value
+	return new PromisePolyfill(function(resolve) {resolve(value)})
+}
+PromisePolyfill.reject = function(value) {
+	return new PromisePolyfill(function(resolve, reject) {reject(value)})
+}
+PromisePolyfill.all = function(list) {
+	return new PromisePolyfill(function(resolve, reject) {
+		var total = list.length, count = 0, values = []
+		if (list.length === 0) resolve([])
+		else for (var i = 0; i < list.length; i++) {
+			(function(i) {
+				function consume(value) {
+					count++
+					values[i] = value
+					if (count === total) resolve(values)
+				}
+				if (list[i] != null && (typeof list[i] === "object" || typeof list[i] === "function") && typeof list[i].then === "function") {
+					list[i].then(consume, reject)
+				}
+				else consume(list[i])
+			})(i)
+		}
+	})
+}
+PromisePolyfill.race = function(list) {
+	return new PromisePolyfill(function(resolve, reject) {
+		for (var i = 0; i < list.length; i++) {
+			list[i].then(resolve, reject)
+		}
+	})
+}
+if (typeof window !== "undefined") {
+	if (typeof window.Promise === "undefined") window.Promise = PromisePolyfill
+	var PromisePolyfill = window.Promise
+} else if (typeof global !== "undefined") {
+	if (typeof global.Promise === "undefined") global.Promise = PromisePolyfill
+	var PromisePolyfill = global.Promise
+} else {
+}
+var buildQueryString = function(object) {
+	if (Object.prototype.toString.call(object) !== "[object Object]") return ""
+	var args = []
+	for (var key0 in object) {
+		destructure(key0, object[key0])
+	}
+	return args.join("&")
+	function destructure(key0, value) {
+		if (Array.isArray(value)) {
+			for (var i = 0; i < value.length; i++) {
+				destructure(key0 + "[" + i + "]", value[i])
+			}
+		}
+		else if (Object.prototype.toString.call(value) === "[object Object]") {
+			for (var i in value) {
+				destructure(key0 + "[" + i + "]", value[i])
+			}
+		}
+		else args.push(encodeURIComponent(key0) + (value != null && value !== "" ? "=" + encodeURIComponent(value) : ""))
+	}
+}
+var FILE_PROTOCOL_REGEX = new RegExp("^file://", "i")
+var _8 = function($window, Promise) {
+	var callbackCount = 0
+	var oncompletion
+	function setCompletionCallback(callback) {oncompletion = callback}
+	function finalizer() {
+		var count = 0
+		function complete() {if (--count === 0 && typeof oncompletion === "function") oncompletion()}
+		return function finalize(promise0) {
+			var then0 = promise0.then
+			promise0.then = function() {
+				count++
+				var next = then0.apply(promise0, arguments)
+				next.then(complete, function(e) {
+					complete()
+					if (count === 0) throw e
+				})
+				return finalize(next)
+			}
+			return promise0
+		}
+	}
+	function normalize(args, extra) {
+		if (typeof args === "string") {
+			var url = args
+			args = extra || {}
+			if (args.url == null) args.url = url
+		}
+		return args
+	}
+	function request(args, extra) {
+		var finalize = finalizer()
+		args = normalize(args, extra)
+		var promise0 = new Promise(function(resolve, reject) {
+			if (args.method == null) args.method = "GET"
+			args.method = args.method.toUpperCase()
+			var useBody = (args.method === "GET" || args.method === "TRACE") ? false : (typeof args.useBody === "boolean" ? args.useBody : true)
+			if (typeof args.serialize !== "function") args.serialize = typeof FormData !== "undefined" && args.data instanceof FormData ? function(value) {return value} : JSON.stringify
+			if (typeof args.deserialize !== "function") args.deserialize = deserialize
+			if (typeof args.extract !== "function") args.extract = extract
+			args.url = interpolate(args.url, args.data)
+			if (useBody) args.data = args.serialize(args.data)
+			else args.url = assemble(args.url, args.data)
+			var xhr = new $window.XMLHttpRequest(),
+				aborted = false,
+				_abort = xhr.abort
+			xhr.abort = function abort() {
+				aborted = true
+				_abort.call(xhr)
+			}
+			xhr.open(args.method, args.url, typeof args.async === "boolean" ? args.async : true, typeof args.user === "string" ? args.user : undefined, typeof args.password === "string" ? args.password : undefined)
+			if (args.serialize === JSON.stringify && useBody) {
+				xhr.setRequestHeader("Content-Type", "application/json; charset=utf-8")
+			}
+			if (args.deserialize === deserialize) {
+				xhr.setRequestHeader("Accept", "application/json, text/*")
+			}
+			if (args.withCredentials) xhr.withCredentials = args.withCredentials
+			for (var key in args.headers) if ({}.hasOwnProperty.call(args.headers, key)) {
+				xhr.setRequestHeader(key, args.headers[key])
+			}
+			if (typeof args.config === "function") xhr = args.config(xhr, args) || xhr
+			xhr.onreadystatechange = function() {
+				// Don't throw errors on xhr.abort().
+				if(aborted) return
+				if (xhr.readyState === 4) {
+					try {
+						var response = (args.extract !== extract) ? args.extract(xhr, args) : args.deserialize(args.extract(xhr, args))
+						if ((xhr.status >= 200 && xhr.status < 300) || xhr.status === 304 || FILE_PROTOCOL_REGEX.test(args.url)) {
+							resolve(cast(args.type, response))
+						}
+						else {
+							var error = new Error(xhr.responseText)
+							for (var key in response) error[key] = response[key]
+							reject(error)
+						}
 					}
-				} catch (e) {
-					m.deferred.onerror(e)
-					promiseValue = e
-					return finish()
-				}
-
-				if (promiseValue === self) {
-					promiseValue = TypeError()
-					finish()
-				} else {
-					thennable(then, function () {
-						finish(RESOLVED)
-					}, finish, function () {
-						finish(state === RESOLVING && RESOLVED)
-					})
-				}
-			})
-		}
-	}
-
-	m.deferred.onerror = function (e) {
-		if (type.call(e) === "[object Error]" &&
-				!/ Error/.test(e.constructor.toString())) {
-			pendingRequests = 0
-			throw e
-		}
-	}
-
-	m.sync = function (args) {
-		var deferred = m.deferred()
-		var outstanding = args.length
-		var results = []
-		var method = "resolve"
-
-		function synchronizer(pos, resolved) {
-			return function (value) {
-				results[pos] = value
-				if (!resolved) method = "reject"
-				if (--outstanding === 0) {
-					deferred.promise(results)
-					deferred[method](results)
-				}
-				return value
-			}
-		}
-
-		if (args.length > 0) {
-			forEach(args, function (arg, i) {
-				arg.then(synchronizer(i, true), synchronizer(i, false))
-			})
-		} else {
-			deferred.resolve([])
-		}
-
-		return deferred.promise
-	}
-
-	function identity(value) { return value }
-
-	function handleJsonp(options) {
-		var callbackKey = options.callbackName || "mithril_callback_" +
-			new Date().getTime() + "_" +
-			(Math.round(Math.random() * 1e16)).toString(36)
-
-		var script = $document.createElement("script")
-
-		global[callbackKey] = function (resp) {
-			script.parentNode.removeChild(script)
-			options.onload({
-				type: "load",
-				target: {
-					responseText: resp
-				}
-			})
-			global[callbackKey] = undefined
-		}
-
-		script.onerror = function () {
-			script.parentNode.removeChild(script)
-
-			options.onerror({
-				type: "error",
-				target: {
-					status: 500,
-					responseText: JSON.stringify({
-						error: "Error making jsonp request"
-					})
-				}
-			})
-			global[callbackKey] = undefined
-
-			return false
-		}
-
-		script.onload = function () {
-			return false
-		}
-
-		script.src = options.url +
-			(options.url.indexOf("?") > 0 ? "&" : "?") +
-			(options.callbackKey ? options.callbackKey : "callback") +
-			"=" + callbackKey +
-			"&" + buildQueryString(options.data || {})
-
-		$document.body.appendChild(script)
-	}
-
-	function createXhr(options) {
-		var xhr = new global.XMLHttpRequest()
-		xhr.open(options.method, options.url, true, options.user,
-			options.password)
-
-		xhr.onreadystatechange = function () {
-			if (xhr.readyState === 4) {
-				if (xhr.status >= 200 && xhr.status < 300) {
-					options.onload({type: "load", target: xhr})
-				} else {
-					options.onerror({type: "error", target: xhr})
+					catch (e) {
+						reject(e)
+					}
 				}
 			}
-		}
-
-		if (options.serialize === JSON.stringify &&
-				options.data &&
-				options.method !== "GET") {
-			xhr.setRequestHeader("Content-Type",
-				"application/json; charset=utf-8")
-		}
-
-		if (options.deserialize === JSON.parse) {
-			xhr.setRequestHeader("Accept", "application/json, text/*")
-		}
-
-		if (isFunction(options.config)) {
-			var maybeXhr = options.config(xhr, options)
-			if (maybeXhr != null) xhr = maybeXhr
-		}
-
-		var data = options.method === "GET" || !options.data ? "" : options.data
-
-		if (data && !isString(data) && data.constructor !== global.FormData) {
-			throw new Error("Request data should be either be a string or " +
-				"FormData. Check the `serialize` option in `m.request`")
-		}
-
-		xhr.send(data)
-		return xhr
+			if (useBody && (args.data != null)) xhr.send(args.data)
+			else xhr.send()
+		})
+		return args.background === true ? promise0 : finalize(promise0)
 	}
-
-	function ajax(options) {
-		if (options.dataType && options.dataType.toLowerCase() === "jsonp") {
-			return handleJsonp(options)
-		} else {
-			return createXhr(options)
-		}
+	function jsonp(args, extra) {
+		var finalize = finalizer()
+		args = normalize(args, extra)
+		var promise0 = new Promise(function(resolve, reject) {
+			var callbackName = args.callbackName || "_mithril_" + Math.round(Math.random() * 1e16) + "_" + callbackCount++
+			var script = $window.document.createElement("script")
+			$window[callbackName] = function(data) {
+				script.parentNode.removeChild(script)
+				resolve(cast(args.type, data))
+				delete $window[callbackName]
+			}
+			script.onerror = function() {
+				script.parentNode.removeChild(script)
+				reject(new Error("JSONP request failed"))
+				delete $window[callbackName]
+			}
+			if (args.data == null) args.data = {}
+			args.url = interpolate(args.url, args.data)
+			args.data[args.callbackKey || "callback"] = callbackName
+			script.src = assemble(args.url, args.data)
+			$window.document.documentElement.appendChild(script)
+		})
+		return args.background === true? promise0 : finalize(promise0)
 	}
-
-	function bindData(options, data, serialize) {
-		if (options.method === "GET" && options.dataType !== "jsonp") {
-			var prefix = options.url.indexOf("?") < 0 ? "?" : "&"
-			var querystring = buildQueryString(data)
-			options.url += (querystring ? prefix + querystring : "")
-		} else {
-			options.data = serialize(data)
-		}
-	}
-
-	function parameterizeUrl(url, data) {
-		if (data) {
-			url = url.replace(/:[a-z]\w+/gi, function (token){
-				var key = token.slice(1)
-				var value = data[key] || token
-				delete data[key]
-				return value
-			})
+	function interpolate(url, data) {
+		if (data == null) return url
+		var tokens = url.match(/:[^\/]+/gi) || []
+		for (var i = 0; i < tokens.length; i++) {
+			var key = tokens[i].slice(1)
+			if (data[key] != null) {
+				url = url.replace(tokens[i], data[key])
+			}
 		}
 		return url
 	}
-
-	m.request = function (options) {
-		if (options.background !== true) m.startComputation()
-		var deferred = new Deferred()
-		var isJSONP = options.dataType &&
-			options.dataType.toLowerCase() === "jsonp"
-
-		var serialize, deserialize, extract
-
-		if (isJSONP) {
-			serialize = options.serialize =
-			deserialize = options.deserialize = identity
-
-			extract = function (jsonp) { return jsonp.responseText }
-		} else {
-			serialize = options.serialize = options.serialize || JSON.stringify
-
-			deserialize = options.deserialize =
-				options.deserialize || JSON.parse
-			extract = options.extract || function (xhr) {
-				if (xhr.responseText.length || deserialize !== JSON.parse) {
-					return xhr.responseText
-				} else {
-					return null
-				}
-			}
+	function assemble(url, data) {
+		var querystring = buildQueryString(data)
+		if (querystring !== "") {
+			var prefix = url.indexOf("?") < 0 ? "?" : "&"
+			url += prefix + querystring
 		}
-
-		options.method = (options.method || "GET").toUpperCase()
-		options.url = parameterizeUrl(options.url, options.data)
-		bindData(options, options.data, serialize)
-		options.onload = options.onerror = function (ev) {
-			try {
-				ev = ev || event
-				var response = deserialize(extract(ev.target, options))
-				if (ev.type === "load") {
-					if (options.unwrapSuccess) {
-						response = options.unwrapSuccess(response, ev.target)
-					}
-
-					if (isArray(response) && options.type) {
-						forEach(response, function (res, i) {
-							response[i] = new options.type(res)
-						})
-					} else if (options.type) {
-						response = new options.type(response)
-					}
-
-					deferred.resolve(response)
-				} else {
-					if (options.unwrapError) {
-						response = options.unwrapError(response, ev.target)
-					}
-
-					deferred.reject(response)
-				}
-			} catch (e) {
-				deferred.reject(e)
-				m.deferred.onerror(e)
-			} finally {
-				if (options.background !== true) m.endComputation()
-			}
-		}
-
-		ajax(options)
-		deferred.promise = propify(deferred.promise, options.initialValue)
-		return deferred.promise
+		return url
 	}
+	function deserialize(data) {
+		try {return data !== "" ? JSON.parse(data) : null}
+		catch (e) {throw new Error(data)}
+	}
+	function extract(xhr) {return xhr.responseText}
+	function cast(type0, data) {
+		if (typeof type0 === "function") {
+			if (Array.isArray(data)) {
+				for (var i = 0; i < data.length; i++) {
+					data[i] = new type0(data[i])
+				}
+			}
+			else return new type0(data)
+		}
+		return data
+	}
+	return {request: request, jsonp: jsonp, setCompletionCallback: setCompletionCallback}
+}
+var requestService = _8(window, PromisePolyfill)
+var coreRenderer = function($window) {
+	var $doc = $window.document
+	var $emptyFragment = $doc.createDocumentFragment()
+	var onevent
+	function setEventCallback(callback) {return onevent = callback}
+	//create
+	function createNodes(parent, vnodes, start, end, hooks, nextSibling, ns) {
+		for (var i = start; i < end; i++) {
+			var vnode = vnodes[i]
+			if (vnode != null) {
+				createNode(parent, vnode, hooks, ns, nextSibling)
+			}
+		}
+	}
+	function createNode(parent, vnode, hooks, ns, nextSibling) {
+		var tag = vnode.tag
+		if (typeof tag === "string") {
+			vnode.state = {}
+			if (vnode.attrs != null) initLifecycle(vnode.attrs, vnode, hooks)
+			switch (tag) {
+				case "#": return createText(parent, vnode, nextSibling)
+				case "<": return createHTML(parent, vnode, nextSibling)
+				case "[": return createFragment(parent, vnode, hooks, ns, nextSibling)
+				default: return createElement(parent, vnode, hooks, ns, nextSibling)
+			}
+		}
+		else return createComponent(parent, vnode, hooks, ns, nextSibling)
+	}
+	function createText(parent, vnode, nextSibling) {
+		vnode.dom = $doc.createTextNode(vnode.children)
+		insertNode(parent, vnode.dom, nextSibling)
+		return vnode.dom
+	}
+	function createHTML(parent, vnode, nextSibling) {
+		var match1 = vnode.children.match(/^\s*?<(\w+)/im) || []
+		var parent1 = {caption: "table", thead: "table", tbody: "table", tfoot: "table", tr: "tbody", th: "tr", td: "tr", colgroup: "table", col: "colgroup"}[match1[1]] || "div"
+		var temp = $doc.createElement(parent1)
+		temp.innerHTML = vnode.children
+		vnode.dom = temp.firstChild
+		vnode.domSize = temp.childNodes.length
+		var fragment = $doc.createDocumentFragment()
+		var child
+		while (child = temp.firstChild) {
+			fragment.appendChild(child)
+		}
+		insertNode(parent, fragment, nextSibling)
+		return fragment
+	}
+	function createFragment(parent, vnode, hooks, ns, nextSibling) {
+		var fragment = $doc.createDocumentFragment()
+		if (vnode.children != null) {
+			var children = vnode.children
+			createNodes(fragment, children, 0, children.length, hooks, null, ns)
+		}
+		vnode.dom = fragment.firstChild
+		vnode.domSize = fragment.childNodes.length
+		insertNode(parent, fragment, nextSibling)
+		return fragment
+	}
+	function createElement(parent, vnode, hooks, ns, nextSibling) {
+		var tag = vnode.tag
+		switch (vnode.tag) {
+			case "svg": ns = "http://www.w3.org/2000/svg"; break
+			case "math": ns = "http://www.w3.org/1998/Math/MathML"; break
+		}
+		var attrs2 = vnode.attrs
+		var is = attrs2 && attrs2.is
+		var element = ns ?
+			is ? $doc.createElementNS(ns, tag, {is: is}) : $doc.createElementNS(ns, tag) :
+			is ? $doc.createElement(tag, {is: is}) : $doc.createElement(tag)
+		vnode.dom = element
+		if (attrs2 != null) {
+			setAttrs(vnode, attrs2, ns)
+		}
+		insertNode(parent, element, nextSibling)
+		if (vnode.attrs != null && vnode.attrs.contenteditable != null) {
+			setContentEditable(vnode)
+		}
+		else {
+			if (vnode.text != null) {
+				if (vnode.text !== "") element.textContent = vnode.text
+				else vnode.children = [Vnode("#", undefined, undefined, vnode.text, undefined, undefined)]
+			}
+			if (vnode.children != null) {
+				var children = vnode.children
+				createNodes(element, children, 0, children.length, hooks, null, ns)
+				setLateAttrs(vnode)
+			}
+		}
+		return element
+	}
+	function initComponent(vnode, hooks) {
+		var sentinel
+		if (typeof vnode.tag.view === "function") {
+			vnode.state = Object.create(vnode.tag)
+			sentinel = vnode.state.view
+			if (sentinel.$$reentrantLock$$ != null) return $emptyFragment
+			sentinel.$$reentrantLock$$ = true
+		} else {
+			vnode.state = void 0
+			sentinel = vnode.tag
+			if (sentinel.$$reentrantLock$$ != null) return $emptyFragment
+			sentinel.$$reentrantLock$$ = true
+			vnode.state = (vnode.tag.prototype != null && typeof vnode.tag.prototype.view === "function") ? new vnode.tag(vnode) : vnode.tag(vnode)
+		}
+		vnode._state = vnode.state
+		if (vnode.attrs != null) initLifecycle(vnode.attrs, vnode, hooks)
+		initLifecycle(vnode._state, vnode, hooks)
+		vnode.instance = Vnode.normalize(vnode._state.view.call(vnode.state, vnode))
+		if (vnode.instance === vnode) throw Error("A view cannot return the vnode it received as argument")
+		sentinel.$$reentrantLock$$ = null
+	}
+	function createComponent(parent, vnode, hooks, ns, nextSibling) {
+		initComponent(vnode, hooks)
+		if (vnode.instance != null) {
+			var element = createNode(parent, vnode.instance, hooks, ns, nextSibling)
+			vnode.dom = vnode.instance.dom
+			vnode.domSize = vnode.dom != null ? vnode.instance.domSize : 0
+			insertNode(parent, element, nextSibling)
+			return element
+		}
+		else {
+			vnode.domSize = 0
+			return $emptyFragment
+		}
+	}
+	//update
+	function updateNodes(parent, old, vnodes, recycling, hooks, nextSibling, ns) {
+		if (old === vnodes || old == null && vnodes == null) return
+		else if (old == null) createNodes(parent, vnodes, 0, vnodes.length, hooks, nextSibling, undefined)
+		else if (vnodes == null) removeNodes(old, 0, old.length, vnodes)
+		else {
+			if (old.length === vnodes.length) {
+				var isUnkeyed = false
+				for (var i = 0; i < vnodes.length; i++) {
+					if (vnodes[i] != null && old[i] != null) {
+						isUnkeyed = vnodes[i].key == null && old[i].key == null
+						break
+					}
+				}
+				if (isUnkeyed) {
+					for (var i = 0; i < old.length; i++) {
+						if (old[i] === vnodes[i]) continue
+						else if (old[i] == null && vnodes[i] != null) createNode(parent, vnodes[i], hooks, ns, getNextSibling(old, i + 1, nextSibling))
+						else if (vnodes[i] == null) removeNodes(old, i, i + 1, vnodes)
+						else updateNode(parent, old[i], vnodes[i], hooks, getNextSibling(old, i + 1, nextSibling), recycling, ns)
+					}
+					return
+				}
+			}
+			recycling = recycling || isRecyclable(old, vnodes)
+			if (recycling) {
+				var pool = old.pool
+				old = old.concat(old.pool)
+			}
+			var oldStart = 0, start = 0, oldEnd = old.length - 1, end = vnodes.length - 1, map
+			while (oldEnd >= oldStart && end >= start) {
+				var o = old[oldStart], v = vnodes[start]
+				if (o === v && !recycling) oldStart++, start++
+				else if (o == null) oldStart++
+				else if (v == null) start++
+				else if (o.key === v.key) {
+					var shouldRecycle = (pool != null && oldStart >= old.length - pool.length) || ((pool == null) && recycling)
+					oldStart++, start++
+					updateNode(parent, o, v, hooks, getNextSibling(old, oldStart, nextSibling), shouldRecycle, ns)
+					if (recycling && o.tag === v.tag) insertNode(parent, toFragment(o), nextSibling)
+				}
+				else {
+					var o = old[oldEnd]
+					if (o === v && !recycling) oldEnd--, start++
+					else if (o == null) oldEnd--
+					else if (v == null) start++
+					else if (o.key === v.key) {
+						var shouldRecycle = (pool != null && oldEnd >= old.length - pool.length) || ((pool == null) && recycling)
+						updateNode(parent, o, v, hooks, getNextSibling(old, oldEnd + 1, nextSibling), shouldRecycle, ns)
+						if (recycling || start < end) insertNode(parent, toFragment(o), getNextSibling(old, oldStart, nextSibling))
+						oldEnd--, start++
+					}
+					else break
+				}
+			}
+			while (oldEnd >= oldStart && end >= start) {
+				var o = old[oldEnd], v = vnodes[end]
+				if (o === v && !recycling) oldEnd--, end--
+				else if (o == null) oldEnd--
+				else if (v == null) end--
+				else if (o.key === v.key) {
+					var shouldRecycle = (pool != null && oldEnd >= old.length - pool.length) || ((pool == null) && recycling)
+					updateNode(parent, o, v, hooks, getNextSibling(old, oldEnd + 1, nextSibling), shouldRecycle, ns)
+					if (recycling && o.tag === v.tag) insertNode(parent, toFragment(o), nextSibling)
+					if (o.dom != null) nextSibling = o.dom
+					oldEnd--, end--
+				}
+				else {
+					if (!map) map = getKeyMap(old, oldEnd)
+					if (v != null) {
+						var oldIndex = map[v.key]
+						if (oldIndex != null) {
+							var movable = old[oldIndex]
+							var shouldRecycle = (pool != null && oldIndex >= old.length - pool.length) || ((pool == null) && recycling)
+							updateNode(parent, movable, v, hooks, getNextSibling(old, oldEnd + 1, nextSibling), recycling, ns)
+							insertNode(parent, toFragment(movable), nextSibling)
+							old[oldIndex].skip = true
+							if (movable.dom != null) nextSibling = movable.dom
+						}
+						else {
+							var dom = createNode(parent, v, hooks, undefined, nextSibling)
+							nextSibling = dom
+						}
+					}
+					end--
+				}
+				if (end < start) break
+			}
+			createNodes(parent, vnodes, start, end + 1, hooks, nextSibling, ns)
+			removeNodes(old, oldStart, oldEnd + 1, vnodes)
+		}
+	}
+	function updateNode(parent, old, vnode, hooks, nextSibling, recycling, ns) {
+		var oldTag = old.tag, tag = vnode.tag
+		if (oldTag === tag) {
+			vnode.state = old.state
+			vnode._state = old._state
+			vnode.events = old.events
+			if (!recycling && shouldNotUpdate(vnode, old)) return
+			if (typeof oldTag === "string") {
+				if (vnode.attrs != null) {
+					if (recycling) {
+						vnode.state = {}
+						initLifecycle(vnode.attrs, vnode, hooks)
+					}
+					else updateLifecycle(vnode.attrs, vnode, hooks)
+				}
+				switch (oldTag) {
+					case "#": updateText(old, vnode); break
+					case "<": updateHTML(parent, old, vnode, nextSibling); break
+					case "[": updateFragment(parent, old, vnode, recycling, hooks, nextSibling, ns); break
+					default: updateElement(old, vnode, recycling, hooks, ns)
+				}
+			}
+			else updateComponent(parent, old, vnode, hooks, nextSibling, recycling, ns)
+		}
+		else {
+			removeNode(old, null)
+			createNode(parent, vnode, hooks, ns, nextSibling)
+		}
+	}
+	function updateText(old, vnode) {
+		if (old.children.toString() !== vnode.children.toString()) {
+			old.dom.nodeValue = vnode.children
+		}
+		vnode.dom = old.dom
+	}
+	function updateHTML(parent, old, vnode, nextSibling) {
+		if (old.children !== vnode.children) {
+			toFragment(old)
+			createHTML(parent, vnode, nextSibling)
+		}
+		else vnode.dom = old.dom, vnode.domSize = old.domSize
+	}
+	function updateFragment(parent, old, vnode, recycling, hooks, nextSibling, ns) {
+		updateNodes(parent, old.children, vnode.children, recycling, hooks, nextSibling, ns)
+		var domSize = 0, children = vnode.children
+		vnode.dom = null
+		if (children != null) {
+			for (var i = 0; i < children.length; i++) {
+				var child = children[i]
+				if (child != null && child.dom != null) {
+					if (vnode.dom == null) vnode.dom = child.dom
+					domSize += child.domSize || 1
+				}
+			}
+			if (domSize !== 1) vnode.domSize = domSize
+		}
+	}
+	function updateElement(old, vnode, recycling, hooks, ns) {
+		var element = vnode.dom = old.dom
+		switch (vnode.tag) {
+			case "svg": ns = "http://www.w3.org/2000/svg"; break
+			case "math": ns = "http://www.w3.org/1998/Math/MathML"; break
+		}
+		if (vnode.tag === "textarea") {
+			if (vnode.attrs == null) vnode.attrs = {}
+			if (vnode.text != null) {
+				vnode.attrs.value = vnode.text //FIXME handle0 multiple children
+				vnode.text = undefined
+			}
+		}
+		updateAttrs(vnode, old.attrs, vnode.attrs, ns)
+		if (vnode.attrs != null && vnode.attrs.contenteditable != null) {
+			setContentEditable(vnode)
+		}
+		else if (old.text != null && vnode.text != null && vnode.text !== "") {
+			if (old.text.toString() !== vnode.text.toString()) old.dom.firstChild.nodeValue = vnode.text
+		}
+		else {
+			if (old.text != null) old.children = [Vnode("#", undefined, undefined, old.text, undefined, old.dom.firstChild)]
+			if (vnode.text != null) vnode.children = [Vnode("#", undefined, undefined, vnode.text, undefined, undefined)]
+			updateNodes(element, old.children, vnode.children, recycling, hooks, null, ns)
+		}
+	}
+	function updateComponent(parent, old, vnode, hooks, nextSibling, recycling, ns) {
+		if (recycling) {
+			initComponent(vnode, hooks)
+		} else {
+			vnode.instance = Vnode.normalize(vnode._state.view.call(vnode.state, vnode))
+			if (vnode.instance === vnode) throw Error("A view cannot return the vnode it received as argument")
+			if (vnode.attrs != null) updateLifecycle(vnode.attrs, vnode, hooks)
+			updateLifecycle(vnode._state, vnode, hooks)
+		}
+		if (vnode.instance != null) {
+			if (old.instance == null) createNode(parent, vnode.instance, hooks, ns, nextSibling)
+			else updateNode(parent, old.instance, vnode.instance, hooks, nextSibling, recycling, ns)
+			vnode.dom = vnode.instance.dom
+			vnode.domSize = vnode.instance.domSize
+		}
+		else if (old.instance != null) {
+			removeNode(old.instance, null)
+			vnode.dom = undefined
+			vnode.domSize = 0
+		}
+		else {
+			vnode.dom = old.dom
+			vnode.domSize = old.domSize
+		}
+	}
+	function isRecyclable(old, vnodes) {
+		if (old.pool != null && Math.abs(old.pool.length - vnodes.length) <= Math.abs(old.length - vnodes.length)) {
+			var oldChildrenLength = old[0] && old[0].children && old[0].children.length || 0
+			var poolChildrenLength = old.pool[0] && old.pool[0].children && old.pool[0].children.length || 0
+			var vnodesChildrenLength = vnodes[0] && vnodes[0].children && vnodes[0].children.length || 0
+			if (Math.abs(poolChildrenLength - vnodesChildrenLength) <= Math.abs(oldChildrenLength - vnodesChildrenLength)) {
+				return true
+			}
+		}
+		return false
+	}
+	function getKeyMap(vnodes, end) {
+		var map = {}, i = 0
+		for (var i = 0; i < end; i++) {
+			var vnode = vnodes[i]
+			if (vnode != null) {
+				var key2 = vnode.key
+				if (key2 != null) map[key2] = i
+			}
+		}
+		return map
+	}
+	function toFragment(vnode) {
+		var count0 = vnode.domSize
+		if (count0 != null || vnode.dom == null) {
+			var fragment = $doc.createDocumentFragment()
+			if (count0 > 0) {
+				var dom = vnode.dom
+				while (--count0) fragment.appendChild(dom.nextSibling)
+				fragment.insertBefore(dom, fragment.firstChild)
+			}
+			return fragment
+		}
+		else return vnode.dom
+	}
+	function getNextSibling(vnodes, i, nextSibling) {
+		for (; i < vnodes.length; i++) {
+			if (vnodes[i] != null && vnodes[i].dom != null) return vnodes[i].dom
+		}
+		return nextSibling
+	}
+	function insertNode(parent, dom, nextSibling) {
+		if (nextSibling && nextSibling.parentNode) parent.insertBefore(dom, nextSibling)
+		else parent.appendChild(dom)
+	}
+	function setContentEditable(vnode) {
+		var children = vnode.children
+		if (children != null && children.length === 1 && children[0].tag === "<") {
+			var content = children[0].children
+			if (vnode.dom.innerHTML !== content) vnode.dom.innerHTML = content
+		}
+		else if (vnode.text != null || children != null && children.length !== 0) throw new Error("Child node of a contenteditable must be trusted")
+	}
+	//remove
+	function removeNodes(vnodes, start, end, context) {
+		for (var i = start; i < end; i++) {
+			var vnode = vnodes[i]
+			if (vnode != null) {
+				if (vnode.skip) vnode.skip = false
+				else removeNode(vnode, context)
+			}
+		}
+	}
+	function removeNode(vnode, context) {
+		var expected = 1, called = 0
+		if (vnode.attrs && typeof vnode.attrs.onbeforeremove === "function") {
+			var result = vnode.attrs.onbeforeremove.call(vnode.state, vnode)
+			if (result != null && typeof result.then === "function") {
+				expected++
+				result.then(continuation, continuation)
+			}
+		}
+		if (typeof vnode.tag !== "string" && typeof vnode._state.onbeforeremove === "function") {
+			var result = vnode._state.onbeforeremove.call(vnode.state, vnode)
+			if (result != null && typeof result.then === "function") {
+				expected++
+				result.then(continuation, continuation)
+			}
+		}
+		continuation()
+		function continuation() {
+			if (++called === expected) {
+				onremove(vnode)
+				if (vnode.dom) {
+					var count0 = vnode.domSize || 1
+					if (count0 > 1) {
+						var dom = vnode.dom
+						while (--count0) {
+							removeNodeFromDOM(dom.nextSibling)
+						}
+					}
+					removeNodeFromDOM(vnode.dom)
+					if (context != null && vnode.domSize == null && !hasIntegrationMethods(vnode.attrs) && typeof vnode.tag === "string") { //TODO test custom elements
+						if (!context.pool) context.pool = [vnode]
+						else context.pool.push(vnode)
+					}
+				}
+			}
+		}
+	}
+	function removeNodeFromDOM(node) {
+		var parent = node.parentNode
+		if (parent != null) parent.removeChild(node)
+	}
+	function onremove(vnode) {
+		if (vnode.attrs && typeof vnode.attrs.onremove === "function") vnode.attrs.onremove.call(vnode.state, vnode)
+		if (typeof vnode.tag !== "string" && typeof vnode._state.onremove === "function") vnode._state.onremove.call(vnode.state, vnode)
+		if (vnode.instance != null) onremove(vnode.instance)
+		else {
+			var children = vnode.children
+			if (Array.isArray(children)) {
+				for (var i = 0; i < children.length; i++) {
+					var child = children[i]
+					if (child != null) onremove(child)
+				}
+			}
+		}
+	}
+	//attrs2
+	function setAttrs(vnode, attrs2, ns) {
+		for (var key2 in attrs2) {
+			setAttr(vnode, key2, null, attrs2[key2], ns)
+		}
+	}
+	function setAttr(vnode, key2, old, value, ns) {
+		var element = vnode.dom
+		if (key2 === "key" || key2 === "is" || (old === value && !isFormAttribute(vnode, key2)) && typeof value !== "object" || typeof value === "undefined" || isLifecycleMethod(key2)) return
+		var nsLastIndex = key2.indexOf(":")
+		if (nsLastIndex > -1 && key2.substr(0, nsLastIndex) === "xlink") {
+			element.setAttributeNS("http://www.w3.org/1999/xlink", key2.slice(nsLastIndex + 1), value)
+		}
+		else if (key2[0] === "o" && key2[1] === "n" && typeof value === "function") updateEvent(vnode, key2, value)
+		else if (key2 === "style") updateStyle(element, old, value)
+		else if (key2 in element && !isAttribute(key2) && ns === undefined && !isCustomElement(vnode)) {
+			//setting input[value] to same value by typing on focused element moves cursor to end in Chrome
+			if (vnode.tag === "input" && key2 === "value" && vnode.dom.value == value && vnode.dom === $doc.activeElement) return
+			//setting select[value] to same value while having select open blinks select dropdown in Chrome
+			if (vnode.tag === "select" && key2 === "value" && vnode.dom.value == value && vnode.dom === $doc.activeElement) return
+			//setting option[value] to same value while having select open blinks select dropdown in Chrome
+			if (vnode.tag === "option" && key2 === "value" && vnode.dom.value == value) return
+			// If you assign an input type1 that is not supported by IE 11 with an assignment expression, an error0 will occur.
+			if (vnode.tag === "input" && key2 === "type") {
+				element.setAttribute(key2, value)
+				return
+			}
+			element[key2] = value
+		}
+		else {
+			if (typeof value === "boolean") {
+				if (value) element.setAttribute(key2, "")
+				else element.removeAttribute(key2)
+			}
+			else element.setAttribute(key2 === "className" ? "class" : key2, value)
+		}
+	}
+	function setLateAttrs(vnode) {
+		var attrs2 = vnode.attrs
+		if (vnode.tag === "select" && attrs2 != null) {
+			if ("value" in attrs2) setAttr(vnode, "value", null, attrs2.value, undefined)
+			if ("selectedIndex" in attrs2) setAttr(vnode, "selectedIndex", null, attrs2.selectedIndex, undefined)
+		}
+	}
+	function updateAttrs(vnode, old, attrs2, ns) {
+		if (attrs2 != null) {
+			for (var key2 in attrs2) {
+				setAttr(vnode, key2, old && old[key2], attrs2[key2], ns)
+			}
+		}
+		if (old != null) {
+			for (var key2 in old) {
+				if (attrs2 == null || !(key2 in attrs2)) {
+					if (key2 === "className") key2 = "class"
+					if (key2[0] === "o" && key2[1] === "n" && !isLifecycleMethod(key2)) updateEvent(vnode, key2, undefined)
+					else if (key2 !== "key") vnode.dom.removeAttribute(key2)
+				}
+			}
+		}
+	}
+	function isFormAttribute(vnode, attr) {
+		return attr === "value" || attr === "checked" || attr === "selectedIndex" || attr === "selected" && vnode.dom === $doc.activeElement
+	}
+	function isLifecycleMethod(attr) {
+		return attr === "oninit" || attr === "oncreate" || attr === "onupdate" || attr === "onremove" || attr === "onbeforeremove" || attr === "onbeforeupdate"
+	}
+	function isAttribute(attr) {
+		return attr === "href" || attr === "list" || attr === "form" || attr === "width" || attr === "height"// || attr === "type"
+	}
+	function isCustomElement(vnode){
+		return vnode.attrs.is || vnode.tag.indexOf("-") > -1
+	}
+	function hasIntegrationMethods(source) {
+		return source != null && (source.oncreate || source.onupdate || source.onbeforeremove || source.onremove)
+	}
+	//style
+	function updateStyle(element, old, style) {
+		if (old === style) element.style.cssText = "", old = null
+		if (style == null) element.style.cssText = ""
+		else if (typeof style === "string") element.style.cssText = style
+		else {
+			if (typeof old === "string") element.style.cssText = ""
+			for (var key2 in style) {
+				element.style[key2] = style[key2]
+			}
+			if (old != null && typeof old !== "string") {
+				for (var key2 in old) {
+					if (!(key2 in style)) element.style[key2] = ""
+				}
+			}
+		}
+	}
+	//event
+	function updateEvent(vnode, key2, value) {
+		var element = vnode.dom
+		var callback = typeof onevent !== "function" ? value : function(e) {
+			var result = value.call(element, e)
+			onevent.call(element, e)
+			return result
+		}
+		if (key2 in element) element[key2] = typeof value === "function" ? callback : null
+		else {
+			var eventName = key2.slice(2)
+			if (vnode.events === undefined) vnode.events = {}
+			if (vnode.events[key2] === callback) return
+			if (vnode.events[key2] != null) element.removeEventListener(eventName, vnode.events[key2], false)
+			if (typeof value === "function") {
+				vnode.events[key2] = callback
+				element.addEventListener(eventName, vnode.events[key2], false)
+			}
+		}
+	}
+	//lifecycle
+	function initLifecycle(source, vnode, hooks) {
+		if (typeof source.oninit === "function") source.oninit.call(vnode.state, vnode)
+		if (typeof source.oncreate === "function") hooks.push(source.oncreate.bind(vnode.state, vnode))
+	}
+	function updateLifecycle(source, vnode, hooks) {
+		if (typeof source.onupdate === "function") hooks.push(source.onupdate.bind(vnode.state, vnode))
+	}
+	function shouldNotUpdate(vnode, old) {
+		var forceVnodeUpdate, forceComponentUpdate
+		if (vnode.attrs != null && typeof vnode.attrs.onbeforeupdate === "function") forceVnodeUpdate = vnode.attrs.onbeforeupdate.call(vnode.state, vnode, old)
+		if (typeof vnode.tag !== "string" && typeof vnode._state.onbeforeupdate === "function") forceComponentUpdate = vnode._state.onbeforeupdate.call(vnode.state, vnode, old)
+		if (!(forceVnodeUpdate === undefined && forceComponentUpdate === undefined) && !forceVnodeUpdate && !forceComponentUpdate) {
+			vnode.dom = old.dom
+			vnode.domSize = old.domSize
+			vnode.instance = old.instance
+			return true
+		}
+		return false
+	}
+	function render(dom, vnodes) {
+		if (!dom) throw new Error("Ensure the DOM element being passed to m.route/m.mount/m.render is not undefined.")
+		var hooks = []
+		var active = $doc.activeElement
+		// First time0 rendering into a node clears it out
+		if (dom.vnodes == null) dom.textContent = ""
+		if (!Array.isArray(vnodes)) vnodes = [vnodes]
+		updateNodes(dom, dom.vnodes, Vnode.normalizeChildren(vnodes), false, hooks, null, undefined)
+		dom.vnodes = vnodes
+		for (var i = 0; i < hooks.length; i++) hooks[i]()
+		if ($doc.activeElement !== active) active.focus()
+	}
+	return {render: render, setEventCallback: setEventCallback}
+}
+function throttle(callback) {
+	//60fps translates to 16.6ms, round it down since setTimeout requires int
+	var time = 16
+	var last = 0, pending = null
+	var timeout = typeof requestAnimationFrame === "function" ? requestAnimationFrame : setTimeout
+	return function() {
+		var now = Date.now()
+		if (last === 0 || now - last >= time) {
+			last = now
+			callback()
+		}
+		else if (pending === null) {
+			pending = timeout(function() {
+				pending = null
+				callback()
+				last = Date.now()
+			}, time - (now - last))
+		}
+	}
+}
+var _11 = function($window) {
+	var renderService = coreRenderer($window)
+	renderService.setEventCallback(function(e) {
+		if (e.redraw !== false) redraw()
+	})
+	var callbacks = []
+	function subscribe(key1, callback) {
+		unsubscribe(key1)
+		callbacks.push(key1, throttle(callback))
+	}
+	function unsubscribe(key1) {
+		var index = callbacks.indexOf(key1)
+		if (index > -1) callbacks.splice(index, 2)
+	}
+	function redraw() {
+		for (var i = 1; i < callbacks.length; i += 2) {
+			callbacks[i]()
+		}
+	}
+	return {subscribe: subscribe, unsubscribe: unsubscribe, redraw: redraw, render: renderService.render}
+}
+var redrawService = _11(window)
+requestService.setCompletionCallback(redrawService.redraw)
+var _16 = function(redrawService0) {
+	return function(root, component) {
+		if (component === null) {
+			redrawService0.render(root, [])
+			redrawService0.unsubscribe(root)
+			return
+		}
+		
+		if (component.view == null && typeof component !== "function") throw new Error("m.mount(element, component) expects a component, not a vnode")
+		
+		var run0 = function() {
+			redrawService0.render(root, Vnode(component))
+		}
+		redrawService0.subscribe(root, run0)
+		redrawService0.redraw()
+	}
+}
+m.mount = _16(redrawService)
+var Promise = PromisePolyfill
+var parseQueryString = function(string) {
+	if (string === "" || string == null) return {}
+	if (string.charAt(0) === "?") string = string.slice(1)
+	var entries = string.split("&"), data0 = {}, counters = {}
+	for (var i = 0; i < entries.length; i++) {
+		var entry = entries[i].split("=")
+		var key5 = decodeURIComponent(entry[0])
+		var value = entry.length === 2 ? decodeURIComponent(entry[1]) : ""
+		if (value === "true") value = true
+		else if (value === "false") value = false
+		var levels = key5.split(/\]\[?|\[/)
+		var cursor = data0
+		if (key5.indexOf("[") > -1) levels.pop()
+		for (var j = 0; j < levels.length; j++) {
+			var level = levels[j], nextLevel = levels[j + 1]
+			var isNumber = nextLevel == "" || !isNaN(parseInt(nextLevel, 10))
+			var isValue = j === levels.length - 1
+			if (level === "") {
+				var key5 = levels.slice(0, j).join()
+				if (counters[key5] == null) counters[key5] = 0
+				level = counters[key5]++
+			}
+			if (cursor[level] == null) {
+				cursor[level] = isValue ? value : isNumber ? [] : {}
+			}
+			cursor = cursor[level]
+		}
+	}
+	return data0
+}
+var coreRouter = function($window) {
+	var supportsPushState = typeof $window.history.pushState === "function"
+	var callAsync0 = typeof setImmediate === "function" ? setImmediate : setTimeout
+	function normalize1(fragment0) {
+		var data = $window.location[fragment0].replace(/(?:%[a-f89][a-f0-9])+/gim, decodeURIComponent)
+		if (fragment0 === "pathname" && data[0] !== "/") data = "/" + data
+		return data
+	}
+	var asyncId
+	function debounceAsync(callback0) {
+		return function() {
+			if (asyncId != null) return
+			asyncId = callAsync0(function() {
+				asyncId = null
+				callback0()
+			})
+		}
+	}
+	function parsePath(path, queryData, hashData) {
+		var queryIndex = path.indexOf("?")
+		var hashIndex = path.indexOf("#")
+		var pathEnd = queryIndex > -1 ? queryIndex : hashIndex > -1 ? hashIndex : path.length
+		if (queryIndex > -1) {
+			var queryEnd = hashIndex > -1 ? hashIndex : path.length
+			var queryParams = parseQueryString(path.slice(queryIndex + 1, queryEnd))
+			for (var key4 in queryParams) queryData[key4] = queryParams[key4]
+		}
+		if (hashIndex > -1) {
+			var hashParams = parseQueryString(path.slice(hashIndex + 1))
+			for (var key4 in hashParams) hashData[key4] = hashParams[key4]
+		}
+		return path.slice(0, pathEnd)
+	}
+	var router = {prefix: "#!"}
+	router.getPath = function() {
+		var type2 = router.prefix.charAt(0)
+		switch (type2) {
+			case "#": return normalize1("hash").slice(router.prefix.length)
+			case "?": return normalize1("search").slice(router.prefix.length) + normalize1("hash")
+			default: return normalize1("pathname").slice(router.prefix.length) + normalize1("search") + normalize1("hash")
+		}
+	}
+	router.setPath = function(path, data, options) {
+		var queryData = {}, hashData = {}
+		path = parsePath(path, queryData, hashData)
+		if (data != null) {
+			for (var key4 in data) queryData[key4] = data[key4]
+			path = path.replace(/:([^\/]+)/g, function(match2, token) {
+				delete queryData[token]
+				return data[token]
+			})
+		}
+		var query = buildQueryString(queryData)
+		if (query) path += "?" + query
+		var hash = buildQueryString(hashData)
+		if (hash) path += "#" + hash
+		if (supportsPushState) {
+			var state = options ? options.state : null
+			var title = options ? options.title : null
+			$window.onpopstate()
+			if (options && options.replace) $window.history.replaceState(state, title, router.prefix + path)
+			else $window.history.pushState(state, title, router.prefix + path)
+		}
+		else $window.location.href = router.prefix + path
+	}
+	router.defineRoutes = function(routes, resolve, reject) {
+		function resolveRoute() {
+			var path = router.getPath()
+			var params = {}
+			var pathname = parsePath(path, params, params)
+			var state = $window.history.state
+			if (state != null) {
+				for (var k in state) params[k] = state[k]
+			}
+			for (var route0 in routes) {
+				var matcher = new RegExp("^" + route0.replace(/:[^\/]+?\.{3}/g, "(.*?)").replace(/:[^\/]+/g, "([^\\/]+)") + "\/?$")
+				if (matcher.test(pathname)) {
+					pathname.replace(matcher, function() {
+						var keys = route0.match(/:[^\/]+/g) || []
+						var values = [].slice.call(arguments, 1, -2)
+						for (var i = 0; i < keys.length; i++) {
+							params[keys[i].replace(/:|\./g, "")] = decodeURIComponent(values[i])
+						}
+						resolve(routes[route0], params, path, route0)
+					})
+					return
+				}
+			}
+			reject(path, params)
+		}
+		if (supportsPushState) $window.onpopstate = debounceAsync(resolveRoute)
+		else if (router.prefix.charAt(0) === "#") $window.onhashchange = resolveRoute
+		resolveRoute()
+	}
+	return router
+}
+var _20 = function($window, redrawService0) {
+	var routeService = coreRouter($window)
+	var identity = function(v) {return v}
+	var render1, component, attrs3, currentPath, lastUpdate
+	var route = function(root, defaultRoute, routes) {
+		if (root == null) throw new Error("Ensure the DOM element that was passed to `m.route` is not undefined")
+		var run1 = function() {
+			if (render1 != null) redrawService0.render(root, render1(Vnode(component, attrs3.key, attrs3)))
+		}
+		var bail = function(path) {
+			if (path !== defaultRoute) routeService.setPath(defaultRoute, null, {replace: true})
+			else throw new Error("Could not resolve default route " + defaultRoute)
+		}
+		routeService.defineRoutes(routes, function(payload, params, path) {
+			var update = lastUpdate = function(routeResolver, comp) {
+				if (update !== lastUpdate) return
+				component = comp != null && (typeof comp.view === "function" || typeof comp === "function")? comp : "div"
+				attrs3 = params, currentPath = path, lastUpdate = null
+				render1 = (routeResolver.render || identity).bind(routeResolver)
+				run1()
+			}
+			if (payload.view || typeof payload === "function") update({}, payload)
+			else {
+				if (payload.onmatch) {
+					Promise.resolve(payload.onmatch(params, path)).then(function(resolved) {
+						update(payload, resolved)
+					}, bail)
+				}
+				else update(payload, "div")
+			}
+		}, bail)
+		redrawService0.subscribe(root, run1)
+	}
+	route.set = function(path, data, options) {
+		if (lastUpdate != null) options = {replace: true}
+		lastUpdate = null
+		routeService.setPath(path, data, options)
+	}
+	route.get = function() {return currentPath}
+	route.prefix = function(prefix0) {routeService.prefix = prefix0}
+	route.link = function(vnode1) {
+		vnode1.dom.setAttribute("href", routeService.prefix + vnode1.attrs.href)
+		vnode1.dom.onclick = function(e) {
+			if (e.ctrlKey || e.metaKey || e.shiftKey || e.which === 2) return
+			e.preventDefault()
+			e.redraw = false
+			var href = this.getAttribute("href")
+			if (href.indexOf(routeService.prefix) === 0) href = href.slice(routeService.prefix.length)
+			route.set(href, undefined, undefined)
+		}
+	}
+	route.param = function(key3) {
+		if(typeof attrs3 !== "undefined" && typeof key3 !== "undefined") return attrs3[key3]
+		return attrs3
+	}
+	return route
+}
+m.route = _20(window, redrawService)
+m.withAttr = function(attrName, callback1, context) {
+	return function(e) {
+		callback1.call(context || this, attrName in e.currentTarget ? e.currentTarget[attrName] : e.currentTarget.getAttribute(attrName))
+	}
+}
+var _28 = coreRenderer(window)
+m.render = _28.render
+m.redraw = redrawService.redraw
+m.request = requestService.request
+m.jsonp = requestService.jsonp
+m.parseQueryString = parseQueryString
+m.buildQueryString = buildQueryString
+m.version = "1.1.1"
+m.vnode = Vnode
+if (typeof module !== "undefined") module["exports"] = m
+else window.m = m
+}());
+}).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{}],100:[function(require,module,exports){
+"use strict"
 
-	return m
-}); // eslint-disable-line
+module.exports = require("./stream/stream")
 
-},{}],98:[function(require,module,exports){
+},{"./stream/stream":101}],101:[function(require,module,exports){
+"use strict"
+
+;(function() {
+
+var guid = 0, HALT = {}
+function createStream() {
+	function stream() {
+		if (arguments.length > 0 && arguments[0] !== HALT) updateStream(stream, arguments[0])
+		return stream._state.value
+	}
+	initStream(stream)
+
+	if (arguments.length > 0 && arguments[0] !== HALT) updateStream(stream, arguments[0])
+
+	return stream
+}
+function initStream(stream) {
+	stream.constructor = createStream
+	stream._state = {id: guid++, value: undefined, state: 0, derive: undefined, recover: undefined, deps: {}, parents: [], endStream: undefined, unregister: undefined}
+	stream.map = stream["fantasy-land/map"] = map, stream["fantasy-land/ap"] = ap, stream["fantasy-land/of"] = createStream
+	stream.valueOf = valueOf, stream.toJSON = toJSON, stream.toString = valueOf
+
+	Object.defineProperties(stream, {
+		end: {get: function() {
+			if (!stream._state.endStream) {
+				var endStream = createStream()
+				endStream.map(function(value) {
+					if (value === true) {
+						unregisterStream(stream)
+						endStream._state.unregister = function(){unregisterStream(endStream)}
+					}
+					return value
+				})
+				stream._state.endStream = endStream
+			}
+			return stream._state.endStream
+		}}
+	})
+}
+function updateStream(stream, value) {
+	updateState(stream, value)
+	for (var id in stream._state.deps) updateDependency(stream._state.deps[id], false)
+	if (stream._state.unregister != null) stream._state.unregister()
+	finalize(stream)
+}
+function updateState(stream, value) {
+	stream._state.value = value
+	stream._state.changed = true
+	if (stream._state.state !== 2) stream._state.state = 1
+}
+function updateDependency(stream, mustSync) {
+	var state = stream._state, parents = state.parents
+	if (parents.length > 0 && parents.every(active) && (mustSync || parents.some(changed))) {
+		var value = stream._state.derive()
+		if (value === HALT) return false
+		updateState(stream, value)
+	}
+}
+function finalize(stream) {
+	stream._state.changed = false
+	for (var id in stream._state.deps) stream._state.deps[id]._state.changed = false
+}
+
+function combine(fn, streams) {
+	if (!streams.every(valid)) throw new Error("Ensure that each item passed to stream.combine/stream.merge is a stream")
+	return initDependency(createStream(), streams, function() {
+		return fn.apply(this, streams.concat([streams.filter(changed)]))
+	})
+}
+
+function initDependency(dep, streams, derive) {
+	var state = dep._state
+	state.derive = derive
+	state.parents = streams.filter(notEnded)
+
+	registerDependency(dep, state.parents)
+	updateDependency(dep, true)
+
+	return dep
+}
+function registerDependency(stream, parents) {
+	for (var i = 0; i < parents.length; i++) {
+		parents[i]._state.deps[stream._state.id] = stream
+		registerDependency(stream, parents[i]._state.parents)
+	}
+}
+function unregisterStream(stream) {
+	for (var i = 0; i < stream._state.parents.length; i++) {
+		var parent = stream._state.parents[i]
+		delete parent._state.deps[stream._state.id]
+	}
+	for (var id in stream._state.deps) {
+		var dependent = stream._state.deps[id]
+		var index = dependent._state.parents.indexOf(stream)
+		if (index > -1) dependent._state.parents.splice(index, 1)
+	}
+	stream._state.state = 2 //ended
+	stream._state.deps = {}
+}
+
+function map(fn) {return combine(function(stream) {return fn(stream())}, [this])}
+function ap(stream) {return combine(function(s1, s2) {return s1()(s2())}, [stream, this])}
+function valueOf() {return this._state.value}
+function toJSON() {return this._state.value != null && typeof this._state.value.toJSON === "function" ? this._state.value.toJSON() : this._state.value}
+
+function valid(stream) {return stream._state }
+function active(stream) {return stream._state.state === 1}
+function changed(stream) {return stream._state.changed}
+function notEnded(stream) {return stream._state.state !== 2}
+
+function merge(streams) {
+	return combine(function() {
+		return streams.map(function(s) {return s()})
+	}, streams)
+}
+
+function scan(reducer, seed, stream) {
+	var newStream = combine(function (s) {
+		return seed = reducer(seed, s._state.value)
+	}, [stream])
+
+	if (newStream._state.state === 0) newStream(seed)
+
+	return newStream
+}
+
+function scanMerge(tuples, seed) {
+	var streams = tuples.map(function(tuple) {
+		var stream = tuple[0]
+		if (stream._state.state === 0) stream(undefined)
+		return stream
+	})
+
+	var newStream = combine(function() {
+		var changed = arguments[arguments.length - 1]
+
+		streams.forEach(function(stream, idx) {
+			if (changed.indexOf(stream) > -1) {
+				seed = tuples[idx][1](seed, stream._state.value)
+			}
+		})
+
+		return seed
+	}, streams)
+
+	return newStream
+}
+
+createStream["fantasy-land/of"] = createStream
+createStream.merge = merge
+createStream.combine = combine
+createStream.scan = scan
+createStream.scanMerge = scanMerge
+createStream.HALT = HALT
+
+if (typeof module !== "undefined") module["exports"] = createStream
+else if (typeof window.m === "function" && !("stream" in window.m)) window.m.stream = createStream
+else window.m = {stream : createStream}
+
+}());
+
+},{}],102:[function(require,module,exports){
+/*
+object-assign
+(c) Sindre Sorhus
+@license MIT
+*/
+
 'use strict';
 /* eslint-disable no-unused-vars */
+var getOwnPropertySymbols = Object.getOwnPropertySymbols;
 var hasOwnProperty = Object.prototype.hasOwnProperty;
 var propIsEnumerable = Object.prototype.propertyIsEnumerable;
 
@@ -22958,7 +20660,7 @@ function shouldUseNative() {
 		// Detect buggy property enumeration order in older V8 versions.
 
 		// https://bugs.chromium.org/p/v8/issues/detail?id=4118
-		var test1 = new String('abc');  // eslint-disable-line
+		var test1 = new String('abc');  // eslint-disable-line no-new-wrappers
 		test1[5] = 'de';
 		if (Object.getOwnPropertyNames(test1)[0] === '5') {
 			return false;
@@ -22987,7 +20689,7 @@ function shouldUseNative() {
 		}
 
 		return true;
-	} catch (e) {
+	} catch (err) {
 		// We don't expect any of the above to throw, but better to be safe.
 		return false;
 	}
@@ -23007,8 +20709,8 @@ module.exports = shouldUseNative() ? Object.assign : function (target, source) {
 			}
 		}
 
-		if (Object.getOwnPropertySymbols) {
-			symbols = Object.getOwnPropertySymbols(from);
+		if (getOwnPropertySymbols) {
+			symbols = getOwnPropertySymbols(from);
 			for (var i = 0; i < symbols.length; i++) {
 				if (propIsEnumerable.call(from, symbols[i])) {
 					to[symbols[i]] = from[symbols[i]];
@@ -23020,7 +20722,7 @@ module.exports = shouldUseNative() ? Object.assign : function (target, source) {
 	return to;
 };
 
-},{}],99:[function(require,module,exports){
+},{}],103:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -23032,25 +20734,40 @@ var process = module.exports = {};
 var cachedSetTimeout;
 var cachedClearTimeout;
 
+function defaultSetTimout() {
+    throw new Error('setTimeout has not been defined');
+}
+function defaultClearTimeout () {
+    throw new Error('clearTimeout has not been defined');
+}
 (function () {
     try {
-        cachedSetTimeout = setTimeout;
-    } catch (e) {
-        cachedSetTimeout = function () {
-            throw new Error('setTimeout is not defined');
+        if (typeof setTimeout === 'function') {
+            cachedSetTimeout = setTimeout;
+        } else {
+            cachedSetTimeout = defaultSetTimout;
         }
+    } catch (e) {
+        cachedSetTimeout = defaultSetTimout;
     }
     try {
-        cachedClearTimeout = clearTimeout;
-    } catch (e) {
-        cachedClearTimeout = function () {
-            throw new Error('clearTimeout is not defined');
+        if (typeof clearTimeout === 'function') {
+            cachedClearTimeout = clearTimeout;
+        } else {
+            cachedClearTimeout = defaultClearTimeout;
         }
+    } catch (e) {
+        cachedClearTimeout = defaultClearTimeout;
     }
 } ())
 function runTimeout(fun) {
     if (cachedSetTimeout === setTimeout) {
         //normal enviroments in sane situations
+        return setTimeout(fun, 0);
+    }
+    // if setTimeout wasn't available but was latter defined
+    if ((cachedSetTimeout === defaultSetTimout || !cachedSetTimeout) && setTimeout) {
+        cachedSetTimeout = setTimeout;
         return setTimeout(fun, 0);
     }
     try {
@@ -23071,6 +20788,11 @@ function runTimeout(fun) {
 function runClearTimeout(marker) {
     if (cachedClearTimeout === clearTimeout) {
         //normal enviroments in sane situations
+        return clearTimeout(marker);
+    }
+    // if clearTimeout wasn't available but was latter defined
+    if ((cachedClearTimeout === defaultClearTimeout || !cachedClearTimeout) && clearTimeout) {
+        cachedClearTimeout = clearTimeout;
         return clearTimeout(marker);
     }
     try {
@@ -23171,6 +20893,10 @@ process.off = noop;
 process.removeListener = noop;
 process.removeAllListeners = noop;
 process.emit = noop;
+process.prependListener = noop;
+process.prependOnceListener = noop;
+
+process.listeners = function (name) { return [] }
 
 process.binding = function (name) {
     throw new Error('process.binding is not supported');
@@ -23182,7 +20908,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],100:[function(require,module,exports){
+},{}],104:[function(require,module,exports){
 (function (global){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -23719,10 +21445,98 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],101:[function(require,module,exports){
+},{}],105:[function(require,module,exports){
 'use strict';
 var strictUriEncode = require('strict-uri-encode');
 var objectAssign = require('object-assign');
+
+function encoderForArrayFormat(opts) {
+	switch (opts.arrayFormat) {
+		case 'index':
+			return function (key, value, index) {
+				return value === null ? [
+					encode(key, opts),
+					'[',
+					index,
+					']'
+				].join('') : [
+					encode(key, opts),
+					'[',
+					encode(index, opts),
+					']=',
+					encode(value, opts)
+				].join('');
+			};
+
+		case 'bracket':
+			return function (key, value) {
+				return value === null ? encode(key, opts) : [
+					encode(key, opts),
+					'[]=',
+					encode(value, opts)
+				].join('');
+			};
+
+		default:
+			return function (key, value) {
+				return value === null ? encode(key, opts) : [
+					encode(key, opts),
+					'=',
+					encode(value, opts)
+				].join('');
+			};
+	}
+}
+
+function parserForArrayFormat(opts) {
+	var result;
+
+	switch (opts.arrayFormat) {
+		case 'index':
+			return function (key, value, accumulator) {
+				result = /\[(\d*)\]$/.exec(key);
+
+				key = key.replace(/\[\d*\]$/, '');
+
+				if (!result) {
+					accumulator[key] = value;
+					return;
+				}
+
+				if (accumulator[key] === undefined) {
+					accumulator[key] = {};
+				}
+
+				accumulator[key][result[1]] = value;
+			};
+
+		case 'bracket':
+			return function (key, value, accumulator) {
+				result = /(\[\])$/.exec(key);
+				key = key.replace(/\[\]$/, '');
+
+				if (!result) {
+					accumulator[key] = value;
+					return;
+				} else if (accumulator[key] === undefined) {
+					accumulator[key] = [value];
+					return;
+				}
+
+				accumulator[key] = [].concat(accumulator[key], value);
+			};
+
+		default:
+			return function (key, value, accumulator) {
+				if (accumulator[key] === undefined) {
+					accumulator[key] = value;
+					return;
+				}
+
+				accumulator[key] = [].concat(accumulator[key], value);
+			};
+	}
+}
 
 function encode(value, opts) {
 	if (opts.encode) {
@@ -23732,11 +21546,29 @@ function encode(value, opts) {
 	return value;
 }
 
+function keysSorter(input) {
+	if (Array.isArray(input)) {
+		return input.sort();
+	} else if (typeof input === 'object') {
+		return keysSorter(Object.keys(input)).sort(function (a, b) {
+			return Number(a) - Number(b);
+		}).map(function (key) {
+			return input[key];
+		});
+	}
+
+	return input;
+}
+
 exports.extract = function (str) {
 	return str.split('?')[1] || '';
 };
 
-exports.parse = function (str) {
+exports.parse = function (str, opts) {
+	opts = objectAssign({arrayFormat: 'none'}, opts);
+
+	var formatter = parserForArrayFormat(opts);
+
 	// Create an object with no prototype
 	// https://github.com/sindresorhus/query-string/issues/47
 	var ret = Object.create(null);
@@ -23758,31 +21590,36 @@ exports.parse = function (str) {
 		var key = parts.shift();
 		var val = parts.length > 0 ? parts.join('=') : undefined;
 
-		key = decodeURIComponent(key);
-
 		// missing `=` should be `null`:
 		// http://w3.org/TR/2012/WD-url-20120524/#collect-url-parameters
 		val = val === undefined ? null : decodeURIComponent(val);
 
-		if (ret[key] === undefined) {
-			ret[key] = val;
-		} else if (Array.isArray(ret[key])) {
-			ret[key].push(val);
-		} else {
-			ret[key] = [ret[key], val];
-		}
+		formatter(decodeURIComponent(key), val, ret);
 	});
 
-	return ret;
+	return Object.keys(ret).sort().reduce(function (result, key) {
+		var val = ret[key];
+		if (Boolean(val) && typeof val === 'object' && !Array.isArray(val)) {
+			// Sort object keys, not values
+			result[key] = keysSorter(val);
+		} else {
+			result[key] = val;
+		}
+
+		return result;
+	}, Object.create(null));
 };
 
 exports.stringify = function (obj, opts) {
 	var defaults = {
 		encode: true,
-		strict: true
+		strict: true,
+		arrayFormat: 'none'
 	};
 
 	opts = objectAssign(defaults, opts);
+
+	var formatter = encoderForArrayFormat(opts);
 
 	return obj ? Object.keys(obj).sort().map(function (key) {
 		var val = obj[key];
@@ -23803,11 +21640,7 @@ exports.stringify = function (obj, opts) {
 					return;
 				}
 
-				if (val2 === null) {
-					result.push(encode(key, opts));
-				} else {
-					result.push(encode(key, opts) + '=' + encode(val2, opts));
-				}
+				result.push(formatter(key, val2, result.length));
 			});
 
 			return result.join('&');
@@ -23819,7 +21652,7 @@ exports.stringify = function (obj, opts) {
 	}).join('&') : '';
 };
 
-},{"object-assign":98,"strict-uri-encode":103}],102:[function(require,module,exports){
+},{"object-assign":102,"strict-uri-encode":107}],106:[function(require,module,exports){
 
 /**
  * Reduce `arr` with `fn`.
@@ -23844,7 +21677,7 @@ module.exports = function(arr, fn, initial){
   
   return curr;
 };
-},{}],103:[function(require,module,exports){
+},{}],107:[function(require,module,exports){
 'use strict';
 module.exports = function (str) {
 	return encodeURIComponent(str).replace(/[!'()*]/g, function (c) {
@@ -23852,7 +21685,7 @@ module.exports = function (str) {
 	});
 };
 
-},{}],104:[function(require,module,exports){
+},{}],108:[function(require,module,exports){
 /**
  * Module dependencies.
  */
@@ -24931,7 +22764,7 @@ request.put = function(url, data, fn){
   return req;
 };
 
-},{"./is-object":105,"./request":107,"./request-base":106,"emitter":1,"reduce":102}],105:[function(require,module,exports){
+},{"./is-object":109,"./request":111,"./request-base":110,"emitter":1,"reduce":106}],109:[function(require,module,exports){
 /**
  * Check if `obj` is an object.
  *
@@ -24946,7 +22779,7 @@ function isObject(obj) {
 
 module.exports = isObject;
 
-},{}],106:[function(require,module,exports){
+},{}],110:[function(require,module,exports){
 /**
  * Module of mixed-in functions shared between node and client code
  */
@@ -25114,7 +22947,7 @@ exports.field = function(name, val) {
   return this;
 };
 
-},{"./is-object":105}],107:[function(require,module,exports){
+},{"./is-object":109}],111:[function(require,module,exports){
 // The node and browser modules expose versions of this with the
 // appropriate constructor function bound as first argument
 /**
@@ -25148,15 +22981,15 @@ function request(RequestConstructor, method, url) {
 
 module.exports = request;
 
-},{}],108:[function(require,module,exports){
-module.exports=/[\0-\x1F\x7F-\x9F]/
-},{}],109:[function(require,module,exports){
-module.exports=/[\xAD\u0600-\u0605\u061C\u06DD\u070F\u08E2\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uD804\uDCBD|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|\uDB40[\uDC01\uDC20-\uDC7F]/
-},{}],110:[function(require,module,exports){
-module.exports=/[!-#%-\*,-/:;\?@\[-\]_\{\}\xA1\xA7\xAB\xB6\xB7\xBB\xBF\u037E\u0387\u055A-\u055F\u0589\u058A\u05BE\u05C0\u05C3\u05C6\u05F3\u05F4\u0609\u060A\u060C\u060D\u061B\u061E\u061F\u066A-\u066D\u06D4\u0700-\u070D\u07F7-\u07F9\u0830-\u083E\u085E\u0964\u0965\u0970\u0AF0\u0DF4\u0E4F\u0E5A\u0E5B\u0F04-\u0F12\u0F14\u0F3A-\u0F3D\u0F85\u0FD0-\u0FD4\u0FD9\u0FDA\u104A-\u104F\u10FB\u1360-\u1368\u1400\u166D\u166E\u169B\u169C\u16EB-\u16ED\u1735\u1736\u17D4-\u17D6\u17D8-\u17DA\u1800-\u180A\u1944\u1945\u1A1E\u1A1F\u1AA0-\u1AA6\u1AA8-\u1AAD\u1B5A-\u1B60\u1BFC-\u1BFF\u1C3B-\u1C3F\u1C7E\u1C7F\u1CC0-\u1CC7\u1CD3\u2010-\u2027\u2030-\u2043\u2045-\u2051\u2053-\u205E\u207D\u207E\u208D\u208E\u2308-\u230B\u2329\u232A\u2768-\u2775\u27C5\u27C6\u27E6-\u27EF\u2983-\u2998\u29D8-\u29DB\u29FC\u29FD\u2CF9-\u2CFC\u2CFE\u2CFF\u2D70\u2E00-\u2E2E\u2E30-\u2E44\u3001-\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\u30A0\u30FB\uA4FE\uA4FF\uA60D-\uA60F\uA673\uA67E\uA6F2-\uA6F7\uA874-\uA877\uA8CE\uA8CF\uA8F8-\uA8FA\uA8FC\uA92E\uA92F\uA95F\uA9C1-\uA9CD\uA9DE\uA9DF\uAA5C-\uAA5F\uAADE\uAADF\uAAF0\uAAF1\uABEB\uFD3E\uFD3F\uFE10-\uFE19\uFE30-\uFE52\uFE54-\uFE61\uFE63\uFE68\uFE6A\uFE6B\uFF01-\uFF03\uFF05-\uFF0A\uFF0C-\uFF0F\uFF1A\uFF1B\uFF1F\uFF20\uFF3B-\uFF3D\uFF3F\uFF5B\uFF5D\uFF5F-\uFF65]|\uD800[\uDD00-\uDD02\uDF9F\uDFD0]|\uD801\uDD6F|\uD802[\uDC57\uDD1F\uDD3F\uDE50-\uDE58\uDE7F\uDEF0-\uDEF6\uDF39-\uDF3F\uDF99-\uDF9C]|\uD804[\uDC47-\uDC4D\uDCBB\uDCBC\uDCBE-\uDCC1\uDD40-\uDD43\uDD74\uDD75\uDDC5-\uDDC9\uDDCD\uDDDB\uDDDD-\uDDDF\uDE38-\uDE3D\uDEA9]|\uD805[\uDC4B-\uDC4F\uDC5B\uDC5D\uDCC6\uDDC1-\uDDD7\uDE41-\uDE43\uDE60-\uDE6C\uDF3C-\uDF3E]|\uD807[\uDC41-\uDC45\uDC70\uDC71]|\uD809[\uDC70-\uDC74]|\uD81A[\uDE6E\uDE6F\uDEF5\uDF37-\uDF3B\uDF44]|\uD82F\uDC9F|\uD836[\uDE87-\uDE8B]|\uD83A[\uDD5E\uDD5F]/
-},{}],111:[function(require,module,exports){
-module.exports=/[ \xA0\u1680\u2000-\u200A\u202F\u205F\u3000]/
 },{}],112:[function(require,module,exports){
+module.exports=/[\0-\x1F\x7F-\x9F]/
+},{}],113:[function(require,module,exports){
+module.exports=/[\xAD\u0600-\u0605\u061C\u06DD\u070F\u08E2\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uD804\uDCBD|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|\uDB40[\uDC01\uDC20-\uDC7F]/
+},{}],114:[function(require,module,exports){
+module.exports=/[!-#%-\*,-/:;\?@\[-\]_\{\}\xA1\xA7\xAB\xB6\xB7\xBB\xBF\u037E\u0387\u055A-\u055F\u0589\u058A\u05BE\u05C0\u05C3\u05C6\u05F3\u05F4\u0609\u060A\u060C\u060D\u061B\u061E\u061F\u066A-\u066D\u06D4\u0700-\u070D\u07F7-\u07F9\u0830-\u083E\u085E\u0964\u0965\u0970\u0AF0\u0DF4\u0E4F\u0E5A\u0E5B\u0F04-\u0F12\u0F14\u0F3A-\u0F3D\u0F85\u0FD0-\u0FD4\u0FD9\u0FDA\u104A-\u104F\u10FB\u1360-\u1368\u1400\u166D\u166E\u169B\u169C\u16EB-\u16ED\u1735\u1736\u17D4-\u17D6\u17D8-\u17DA\u1800-\u180A\u1944\u1945\u1A1E\u1A1F\u1AA0-\u1AA6\u1AA8-\u1AAD\u1B5A-\u1B60\u1BFC-\u1BFF\u1C3B-\u1C3F\u1C7E\u1C7F\u1CC0-\u1CC7\u1CD3\u2010-\u2027\u2030-\u2043\u2045-\u2051\u2053-\u205E\u207D\u207E\u208D\u208E\u2308-\u230B\u2329\u232A\u2768-\u2775\u27C5\u27C6\u27E6-\u27EF\u2983-\u2998\u29D8-\u29DB\u29FC\u29FD\u2CF9-\u2CFC\u2CFE\u2CFF\u2D70\u2E00-\u2E2E\u2E30-\u2E44\u3001-\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\u30A0\u30FB\uA4FE\uA4FF\uA60D-\uA60F\uA673\uA67E\uA6F2-\uA6F7\uA874-\uA877\uA8CE\uA8CF\uA8F8-\uA8FA\uA8FC\uA92E\uA92F\uA95F\uA9C1-\uA9CD\uA9DE\uA9DF\uAA5C-\uAA5F\uAADE\uAADF\uAAF0\uAAF1\uABEB\uFD3E\uFD3F\uFE10-\uFE19\uFE30-\uFE52\uFE54-\uFE61\uFE63\uFE68\uFE6A\uFE6B\uFF01-\uFF03\uFF05-\uFF0A\uFF0C-\uFF0F\uFF1A\uFF1B\uFF1F\uFF20\uFF3B-\uFF3D\uFF3F\uFF5B\uFF5D\uFF5F-\uFF65]|\uD800[\uDD00-\uDD02\uDF9F\uDFD0]|\uD801\uDD6F|\uD802[\uDC57\uDD1F\uDD3F\uDE50-\uDE58\uDE7F\uDEF0-\uDEF6\uDF39-\uDF3F\uDF99-\uDF9C]|\uD804[\uDC47-\uDC4D\uDCBB\uDCBC\uDCBE-\uDCC1\uDD40-\uDD43\uDD74\uDD75\uDDC5-\uDDC9\uDDCD\uDDDB\uDDDD-\uDDDF\uDE38-\uDE3D\uDEA9]|\uD805[\uDC4B-\uDC4F\uDC5B\uDC5D\uDCC6\uDDC1-\uDDD7\uDE41-\uDE43\uDE60-\uDE6C\uDF3C-\uDF3E]|\uD807[\uDC41-\uDC45\uDC70\uDC71]|\uD809[\uDC70-\uDC74]|\uD81A[\uDE6E\uDE6F\uDEF5\uDF37-\uDF3B\uDF44]|\uD82F\uDC9F|\uD836[\uDE87-\uDE8B]|\uD83A[\uDD5E\uDD5F]/
+},{}],115:[function(require,module,exports){
+module.exports=/[ \xA0\u1680\u2000-\u200A\u202F\u205F\u3000]/
+},{}],116:[function(require,module,exports){
 'use strict';
 
 exports.Any = require('./properties/Any/regex');
@@ -25165,9 +22998,9 @@ exports.Cf  = require('./categories/Cf/regex');
 exports.P   = require('./categories/P/regex');
 exports.Z   = require('./categories/Z/regex');
 
-},{"./categories/Cc/regex":108,"./categories/Cf/regex":109,"./categories/P/regex":110,"./categories/Z/regex":111,"./properties/Any/regex":113}],113:[function(require,module,exports){
+},{"./categories/Cc/regex":112,"./categories/Cf/regex":113,"./categories/P/regex":114,"./categories/Z/regex":115,"./properties/Any/regex":117}],117:[function(require,module,exports){
 module.exports=/[\0-\uD7FF\uE000-\uFFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/
-},{}],114:[function(require,module,exports){
+},{}],118:[function(require,module,exports){
 'use strict'
 
 var m = require('mithril')
@@ -25177,24 +23010,22 @@ var Dropbox = require('dropbox')
 var auth = {}
 auth.config = {}
 
-auth.controller = function () {
-  return {
-    auth: function(e) {
-      e.preventDefault()
-      var dbx = new Dropbox({ clientId: auth.config.CLIENT_ID })
-      var authUrl = dbx.getAuthenticationUrl(auth.config.REDIRECT_URI)
-      location.href = authUrl
-      return false
-    }
+auth.oninit = function (vnode) {
+  vnode.state.auth = function(e) {
+    e.preventDefault()
+    var dbx = new Dropbox({ clientId: auth.config.CLIENT_ID })
+    var authUrl = dbx.getAuthenticationUrl(auth.config.REDIRECT_URI)
+    location.href = authUrl
+    return false
   }
 }
 
-auth.view = function(ctrl) {
+auth.view = function (vnode) {
   return [
     m('div', { 'id': "main", 'class': "container grid-960" }, [
       m('header', { 'class': "navbar" }, [
         m('section', { 'class': "navbar-section" }, [
-          m('a', { 'href': "#", 'class': "navbar-brand", 'id': "page-name" }, m.route().substr(1).replace(/\?.*$/, ''))
+          m('a', { 'href': "#", 'class': "navbar-brand", 'id': "page-name" }, m.route.get().substr(1).replace(/\?.*$/, ''))
         ]),
         m('section', { 'class': "navbar-section" }, [
           m('input', { 'type': "text", 'class': "form-input input-inline", 'placeholder': "Search" }, ''),
@@ -25218,7 +23049,7 @@ auth.view = function(ctrl) {
           ]),
           m('.modal-footer', [
             m('.text-center', [
-              m('a.btn', { 'href': "", 'onclick': ctrl.auth }, 'Login with Dropbox')
+              m('a.btn', { 'href': "", 'onclick': vnode.state.auth }, 'Login with Dropbox')
             ])
           ])
         ])
@@ -25229,7 +23060,7 @@ auth.view = function(ctrl) {
 
 module.exports = auth
 
-},{"dropbox":6,"mithril":97}],115:[function(require,module,exports){
+},{"dropbox":8,"mithril":99}],119:[function(require,module,exports){
 'use strict'
 
 var Dropbox = require('dropbox')
@@ -25239,19 +23070,33 @@ var queryString = require('query-string')
 var starter = require('./starter')
 
 var m = require('mithril')
-m.route.mode = 'search'
+m.route.prefix("?")
+
+var prop = require("mithril/stream")
 
 var app = {}
 var auth = require('./auth')
 
 window.Maki = function (CLIENT_ID, REDIRECT_URI, options) {
   md = require('markdown-it')()
-           .use(require('./markdown-it-pathmod')(options.DEREFERRER_URI||""))
+           .use(require('./markdown-it-pathmod')(options.DEREFERRER_URI || ""))
            .use(require('markdown-it-deflist'))
            .use(require('markdown-it-katex'))
   auth.config.CLIENT_ID = CLIENT_ID
   auth.config.REDIRECT_URI = REDIRECT_URI
   document.addEventListener("DOMContentLoaded", function(event) {
+    if (location.pathname === '/') {
+      var a = document.createElement("a")
+      a.href = document.referrer
+      var ref = a.protocol + "//" + a.host + "/"
+      if ((ref === 'https://www.dropbox.com/' || ref === auth.config.REDIRECT_URI) &&
+          location.hash !== "") {
+        var token = queryString.parse(location.hash).access_token
+        setToken(token)
+        app.config = new app.Config({ 'token': getToken() })
+        starter.init(app.config)
+      }
+    }
     m.route(document.body, '/', {
       '/': app,
       '/:name...': app
@@ -25264,8 +23109,8 @@ app.Config = function(data) {
 }
 
 app.Page = function(data) {
-  this.name = m.prop("")
-  this.content = m.prop("")
+  this.name = prop("")
+  this.content = prop("")
 }
 
 app.vm = (function() {
@@ -25295,7 +23140,7 @@ app.renderPage = function(name) {
   })
   .catch(function(err) {
     console.log(err)
-    m.route("/HomePage?do=auth")
+    location.href = "/?/HomePage?do=auth"
   })
 }
 
@@ -25330,7 +23175,7 @@ app.listPages = function(base) {
   })
   .catch(function(err) {
     console.log(err)
-    m.route("/HomePage?do=auth")
+    location.href = "/?/HomePage?do=auth"
   })
 }
 
@@ -25346,20 +23191,9 @@ function removeToken() {
   localStorage.removeItem('token')
 }
 
-app.controller = function () {
-  if (m.route() === '/') {
-    var a = document.createElement("a")
-    a.href = document.referrer
-    var ref = a.protocol + "//" + a.host + "/"
-    // console.log(m.route(), document.referrer, location.hash, ref)
-    if ((ref === 'https://www.dropbox.com/' || ref === auth.config.REDIRECT_URI) &&
-        location.hash !== "") {
-      var token = queryString.parse(location.hash).access_token
-      setToken(token)
-      app.config = new app.Config({ 'token': getToken() })
-      starter.init(app.config)
-    }
-    m.route('/HomePage')
+app.oninit = function (vnode) {
+  if (m.route.get() === "/") {
+    location.href = "/?/HomePage"
   }
   var doArg = m.route.param("do")
   if (doArg === "auth") {
@@ -25372,7 +23206,7 @@ app.controller = function () {
     }
     removeToken()
     app.config = null
-    m.route('/HomePage')
+    location.href = "/?/HomePage"
   }
   else if (doArg === "index") {
     app.config = app.config || new app.Config({ 'token': getToken() })
@@ -25384,7 +23218,7 @@ app.controller = function () {
   else {
     app.config = app.config || new app.Config({ 'token': getToken() })
     app.vm.init()
-    var name = m.route().substr(1).replace(/\?.*$/, '')
+    var name = m.route.get().substr(1).replace(/\?.*$/, '')
     app.vm.page.name(name)
     document.title = name
     app.renderPage(name)
@@ -25392,12 +23226,15 @@ app.controller = function () {
 }
 
 app.view = function() {
-  var cur = m.route()
+  var cur = m.route.get()
   if (cur.indexOf("?") !== -1) {
     cur = "/?" + cur.substr(0, cur.indexOf("?"))
   }
   else {
     cur = "/?" + cur
+  }
+  if (app.vm.page === undefined) {
+    return []
   }
   return [
     m('div', { 'id': "main", 'class': "container grid-960" }, [
@@ -25418,7 +23255,7 @@ app.view = function() {
   ]
 }
 
-},{"./auth":114,"./markdown-it-pathmod":116,"./starter":117,"dropbox":6,"markdown-it":39,"markdown-it-deflist":37,"markdown-it-katex":38,"mithril":97,"query-string":101}],116:[function(require,module,exports){
+},{"./auth":118,"./markdown-it-pathmod":120,"./starter":121,"dropbox":8,"markdown-it":41,"markdown-it-deflist":39,"markdown-it-katex":40,"mithril":99,"mithril/stream":100,"query-string":105}],120:[function(require,module,exports){
 /*! markdown-it-linkscheme v1.0.2 | MIT License | github.com/adam-p/markdown-it-linkscheme */
 
 var Dropbox = require('dropbox');
@@ -25484,7 +23321,7 @@ module.exports = function builder(redirectorUrl) {
   };
 };
 
-},{"dropbox":6}],117:[function(require,module,exports){
+},{"dropbox":8}],121:[function(require,module,exports){
 'use strict'
 
 var files = [
@@ -25521,4 +23358,4 @@ var starter = {
 
 module.exports = starter
 
-},{}]},{},[115]);
+},{}]},{},[119]);

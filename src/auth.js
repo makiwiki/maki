@@ -7,24 +7,22 @@ var Dropbox = require('dropbox')
 var auth = {}
 auth.config = {}
 
-auth.controller = function () {
-  return {
-    auth: function(e) {
-      e.preventDefault()
-      var dbx = new Dropbox({ clientId: auth.config.CLIENT_ID })
-      var authUrl = dbx.getAuthenticationUrl(auth.config.REDIRECT_URI)
-      location.href = authUrl
-      return false
-    }
+auth.oninit = function (vnode) {
+  vnode.state.auth = function(e) {
+    e.preventDefault()
+    var dbx = new Dropbox({ clientId: auth.config.CLIENT_ID })
+    var authUrl = dbx.getAuthenticationUrl(auth.config.REDIRECT_URI)
+    location.href = authUrl
+    return false
   }
 }
 
-auth.view = function(ctrl) {
+auth.view = function (vnode) {
   return [
     m('div', { 'id': "main", 'class': "container grid-960" }, [
       m('header', { 'class': "navbar" }, [
         m('section', { 'class': "navbar-section" }, [
-          m('a', { 'href': "#", 'class': "navbar-brand", 'id': "page-name" }, m.route().substr(1).replace(/\?.*$/, ''))
+          m('a', { 'href': "#", 'class': "navbar-brand", 'id': "page-name" }, m.route.get().substr(1).replace(/\?.*$/, ''))
         ]),
         m('section', { 'class': "navbar-section" }, [
           m('input', { 'type': "text", 'class': "form-input input-inline", 'placeholder': "Search" }, ''),
@@ -48,7 +46,7 @@ auth.view = function(ctrl) {
           ]),
           m('.modal-footer', [
             m('.text-center', [
-              m('a.btn', { 'href': "", 'onclick': ctrl.auth }, 'Login with Dropbox')
+              m('a.btn', { 'href': "", 'onclick': vnode.state.auth }, 'Login with Dropbox')
             ])
           ])
         ])
