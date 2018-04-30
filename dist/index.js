@@ -18422,9 +18422,9 @@ var auth = require('./auth')
 
 window.Maki = function (CLIENT_ID, REDIRECT_URI, options) {
   md = require('markdown-it')()
-           .use(require('./markdown-it-pathmod')(options.DEREFERRER_URI || ""))
-           .use(require('markdown-it-deflist'))
-           .use(require('markdown-it-katex'))
+    .use(require('./markdown-it-pathmod')(options.DEREFERRER_URI || ""))
+    .use(require('markdown-it-deflist'))
+    .use(require('markdown-it-katex'))
   auth.config.CLIENT_ID = CLIENT_ID
   auth.config.REDIRECT_URI = REDIRECT_URI
   document.addEventListener("DOMContentLoaded", function(event) {
@@ -18469,22 +18469,22 @@ app.renderPage = function(name) {
   var path = "/" + name + ".md"
   // m.startComputation()
   dbx.filesDownload({ 'path': path })
-  .then(function(response) {
-    var blob = response.fileBlob
-    var reader = new FileReader()
-    reader.onload = function() {
-      var buffer = reader.result
-      var html = md.render(buffer)
-      app.vm.page.content(m('div', { 'id': "content" }, m.trust(html)))
-      m.redraw()
-      // m.endComputation()
-    }
-    reader.readAsText(blob, "utf-8")
-  })
-  .catch(function(err) {
-    console.log(err)
-    location.href = "/?/HomePage?do=auth"
-  })
+    .then(function(response) {
+      var blob = response.fileBlob
+      var reader = new FileReader()
+      reader.onload = function() {
+        var buffer = reader.result
+        var html = md.render(buffer)
+        app.vm.page.content(m('div', { 'id': "content" }, m.trust(html)))
+        m.redraw()
+        // m.endComputation()
+      }
+      reader.readAsText(blob, "utf-8")
+    })
+    .catch(function(err) {
+      console.log(err)
+      location.href = "/?/HomePage?do=auth"
+    })
 }
 
 app.listPages = function(base) {
@@ -18492,34 +18492,34 @@ app.listPages = function(base) {
   var path = base.replace(/\/+$/, '')
   // m.startComputation()
   dbx.filesListFolder({ 'path': path, 'recursive': true })
-  .then(function(response) {
-    // console.log(response)
-    var list = []
-    response.entries.forEach(function(el, i, ar) {
-      if (el['.tag'] === 'file') {
-        // console.log(el.path_display)
-        var name = el.path_display.substr(1).replace(/\.md$/, '')
-        var row = m('tr', [m('td', [m('a', { 'href': '/?/' + name }, name)])])
-        list.push(row)
-      }
+    .then(function(response) {
+      // console.log(response)
+      var list = []
+      response.entries.forEach(function(el, i, ar) {
+        if (el['.tag'] === 'file') {
+          // console.log(el.path_display)
+          var name = el.path_display.substr(1).replace(/\.md$/, '')
+          var row = m('tr', [m('td', [m('a', { 'href': '/?/' + name }, name)])])
+          list.push(row)
+        }
+      })
+      var listView = [
+        m('table.table.table-striped.table-hover', [
+          m('thead', [
+            m('tr', [
+              m('th', 'Name')
+            ])
+          ]),
+          m('tbody', list)
+        ])
+      ]
+      app.vm.page.content(listView)
+      m.redraw()
     })
-    var listView = [
-      m('table.table.table-striped.table-hover', [
-        m('thead', [
-          m('tr', [
-            m('th', 'Name')
-          ])
-        ]),
-        m('tbody', list)
-      ])
-    ]
-    app.vm.page.content(listView)
-    m.redraw()
-  })
-  .catch(function(err) {
-    console.log(err)
-    location.href = "/?/HomePage?do=auth"
-  })
+    .catch(function(err) {
+      console.log(err)
+      location.href = "/?/HomePage?do=auth"
+    })
 }
 
 function setToken(token) {
@@ -18648,8 +18648,7 @@ module.exports = function builder(redirectorUrl) {
             el.src = blobURL;
             // console.log('el', el);
           });
-        })
-        .catch(function(error) {
+        }).catch(function(error) {
           console.log(error);
         });
         tokens[idx].attrs[srcIndex][1] = "";
@@ -18682,20 +18681,20 @@ var starter = {
   init: function(config) {
     var dbx = config.dbx
     dbx.filesGetMetadata({ 'path': "/HomePage.md" })
-    .then(function(response) {
-      // console.log(response)
-    })
-    .catch(function(err) {
-      // console.log(err)
-      if (err.status === 409) {
-        // TODO: should be parallel
-        dbx.filesSaveUrl(files[0]).then(function() {
-          dbx.filesSaveUrl(files[1]).then(function() {
-            location.reload()
+      .then(function(response) {
+        // console.log(response)
+      })
+      .catch(function(err) {
+        // console.log(err)
+        if (err.status === 409) {
+          // TODO: should be parallel
+          dbx.filesSaveUrl(files[0]).then(function() {
+            dbx.filesSaveUrl(files[1]).then(function() {
+              location.reload()
+            })
           })
-        })
-      }
-    })
+        }
+      })
   }
 }
 

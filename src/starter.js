@@ -15,20 +15,20 @@ var starter = {
   init: function(config) {
     var dbx = config.dbx
     dbx.filesGetMetadata({ 'path': "/HomePage.md" })
-    .then(function(response) {
-      // console.log(response)
-    })
-    .catch(function(err) {
-      // console.log(err)
-      if (err.status === 409) {
-        // TODO: should be parallel
-        dbx.filesSaveUrl(files[0]).then(function() {
-          dbx.filesSaveUrl(files[1]).then(function() {
-            location.reload()
+      .then(function(response) {
+        // console.log(response)
+      })
+      .catch(function(err) {
+        // console.log(err)
+        if (err.status === 409) {
+          // TODO: should be parallel
+          dbx.filesSaveUrl(files[0]).then(function() {
+            dbx.filesSaveUrl(files[1]).then(function() {
+              location.reload()
+            })
           })
-        })
-      }
-    })
+        }
+      })
   }
 }
 

@@ -47,8 +47,7 @@ module.exports = function builder(redirectorUrl) {
             el.src = blobURL;
             // console.log('el', el);
           });
-        })
-        .catch(function(error) {
+        }).catch(function(error) {
           console.log(error);
         });
         tokens[idx].attrs[srcIndex][1] = "";
