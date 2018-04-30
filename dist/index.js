@@ -1,3168 +1,105 @@
 (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+'use strict';
+var token = '%[a-f0-9]{2}';
+var singleMatcher = new RegExp(token, 'gi');
+var multiMatcher = new RegExp('(' + token + ')+', 'gi');
 
-/**
- * Expose `Emitter`.
- */
+function decodeComponents(components, split) {
+	try {
+		// Try to decode the entire string first
+		return decodeURIComponent(components.join(''));
+	} catch (err) {
+		// Do nothing
+	}
 
-if (typeof module !== 'undefined') {
-  module.exports = Emitter;
+	if (components.length === 1) {
+		return components;
+	}
+
+	split = split || 1;
+
+	// Split the array in 2 parts
+	var left = components.slice(0, split);
+	var right = components.slice(split);
+
+	return Array.prototype.concat.call([], decodeComponents(left), decodeComponents(right));
 }
 
-/**
- * Initialize a new `Emitter`.
- *
- * @api public
- */
+function decode(input) {
+	try {
+		return decodeURIComponent(input);
+	} catch (err) {
+		var tokens = input.match(singleMatcher);
 
-function Emitter(obj) {
-  if (obj) return mixin(obj);
-};
+		for (var i = 1; i < tokens.length; i++) {
+			input = decodeComponents(tokens, i).join('');
 
-/**
- * Mixin the emitter properties.
- *
- * @param {Object} obj
- * @return {Object}
- * @api private
- */
+			tokens = input.match(singleMatcher);
+		}
 
-function mixin(obj) {
-  for (var key in Emitter.prototype) {
-    obj[key] = Emitter.prototype[key];
-  }
-  return obj;
+		return input;
+	}
 }
 
-/**
- * Listen on the given `event` with `fn`.
- *
- * @param {String} event
- * @param {Function} fn
- * @return {Emitter}
- * @api public
- */
+function customDecodeURIComponent(input) {
+	// Keep track of all the replacements and prefill the map with the `BOM`
+	var replaceMap = {
+		'%FE%FF': '\uFFFD\uFFFD',
+		'%FF%FE': '\uFFFD\uFFFD'
+	};
 
-Emitter.prototype.on =
-Emitter.prototype.addEventListener = function(event, fn){
-  this._callbacks = this._callbacks || {};
-  (this._callbacks['$' + event] = this._callbacks['$' + event] || [])
-    .push(fn);
-  return this;
-};
+	var match = multiMatcher.exec(input);
+	while (match) {
+		try {
+			// Decode as big chunks as possible
+			replaceMap[match[0]] = decodeURIComponent(match[0]);
+		} catch (err) {
+			var result = decode(match[0]);
 
-/**
- * Adds an `event` listener that will be invoked a single
- * time then automatically removed.
- *
- * @param {String} event
- * @param {Function} fn
- * @return {Emitter}
- * @api public
- */
+			if (result !== match[0]) {
+				replaceMap[match[0]] = result;
+			}
+		}
 
-Emitter.prototype.once = function(event, fn){
-  function on() {
-    this.off(event, on);
-    fn.apply(this, arguments);
-  }
+		match = multiMatcher.exec(input);
+	}
 
-  on.fn = fn;
-  this.on(event, on);
-  return this;
-};
+	// Add `%C2` at the end of the map to make sure it does not replace the combinator before everything else
+	replaceMap['%C2'] = '\uFFFD';
 
-/**
- * Remove the given callback for `event` or all
- * registered callbacks.
- *
- * @param {String} event
- * @param {Function} fn
- * @return {Emitter}
- * @api public
- */
+	var entries = Object.keys(replaceMap);
 
-Emitter.prototype.off =
-Emitter.prototype.removeListener =
-Emitter.prototype.removeAllListeners =
-Emitter.prototype.removeEventListener = function(event, fn){
-  this._callbacks = this._callbacks || {};
+	for (var i = 0; i < entries.length; i++) {
+		// Replace all decoded components
+		var key = entries[i];
+		input = input.replace(new RegExp(key, 'g'), replaceMap[key]);
+	}
 
-  // all
-  if (0 == arguments.length) {
-    this._callbacks = {};
-    return this;
-  }
+	return input;
+}
 
-  // specific event
-  var callbacks = this._callbacks['$' + event];
-  if (!callbacks) return this;
+module.exports = function (encodedURI) {
+	if (typeof encodedURI !== 'string') {
+		throw new TypeError('Expected `encodedURI` to be of type `string`, got `' + typeof encodedURI + '`');
+	}
 
-  // remove all handlers
-  if (1 == arguments.length) {
-    delete this._callbacks['$' + event];
-    return this;
-  }
+	try {
+		encodedURI = encodedURI.replace(/\+/g, ' ');
 
-  // remove specific handler
-  var cb;
-  for (var i = 0; i < callbacks.length; i++) {
-    cb = callbacks[i];
-    if (cb === fn || cb.fn === fn) {
-      callbacks.splice(i, 1);
-      break;
-    }
-  }
-  return this;
-};
-
-/**
- * Emit `event` with the given args.
- *
- * @param {String} event
- * @param {Mixed} ...
- * @return {Emitter}
- */
-
-Emitter.prototype.emit = function(event){
-  this._callbacks = this._callbacks || {};
-  var args = [].slice.call(arguments, 1)
-    , callbacks = this._callbacks['$' + event];
-
-  if (callbacks) {
-    callbacks = callbacks.slice(0);
-    for (var i = 0, len = callbacks.length; i < len; ++i) {
-      callbacks[i].apply(this, args);
-    }
-  }
-
-  return this;
-};
-
-/**
- * Return array of callbacks for `event`.
- *
- * @param {String} event
- * @return {Array}
- * @api public
- */
-
-Emitter.prototype.listeners = function(event){
-  this._callbacks = this._callbacks || {};
-  return this._callbacks['$' + event] || [];
-};
-
-/**
- * Check if this emitter has `event` handlers.
- *
- * @param {String} event
- * @return {Boolean}
- * @api public
- */
-
-Emitter.prototype.hasListeners = function(event){
-  return !! this.listeners(event).length;
+		// Try the built in decoder first
+		return decodeURIComponent(encodedURI);
+	} catch (err) {
+		// Fallback to a more advanced decoder
+		return customDecodeURIComponent(encodedURI);
+	}
 };
 
 },{}],2:[function(require,module,exports){
-(function (process,global){
-/*!
- * @overview es6-promise - a tiny implementation of Promises/A+.
- * @copyright Copyright (c) 2014 Yehuda Katz, Tom Dale, Stefan Penner and contributors (Conversion to ES6 API by Jake Archibald)
- * @license   Licensed under MIT license
- *            See https://raw.githubusercontent.com/stefanpenner/es6-promise/master/LICENSE
- * @version   3.3.1
- */
+!function(e,t){"object"==typeof exports&&"undefined"!=typeof module?module.exports=t():"function"==typeof define&&define.amd?define(t):e.Dropbox=t()}(this,function(){"use strict";function e(){return"undefined"!=typeof WorkerGlobalScope&&self instanceof WorkerGlobalScope||"undefined"==typeof module||"undefined"!=typeof window}function t(e){return"https://"+e+".dropboxapi.com/2/"}function r(e){return JSON.stringify(e).replace(/[\u007f-\uffff]/g,function(e){return"\\u"+("000"+e.charCodeAt(0).toString(16)).slice(-4)})}function n(e){var t=e.length;if(t%4>0)throw Error("Invalid string. Length must be a multiple of 4");return"="===e[t-2]?2:"="===e[t-1]?1:0}var i={};i.authTokenFromOauth1=function(e){return this.request("auth/token/from_oauth1",e,"app","api","rpc")},i.authTokenRevoke=function(e){return this.request("auth/token/revoke",e,"user","api","rpc")},i.filePropertiesPropertiesAdd=function(e){return this.request("file_properties/properties/add",e,"user","api","rpc")},i.filePropertiesPropertiesOverwrite=function(e){return this.request("file_properties/properties/overwrite",e,"user","api","rpc")},i.filePropertiesPropertiesRemove=function(e){return this.request("file_properties/properties/remove",e,"user","api","rpc")},i.filePropertiesPropertiesSearch=function(e){return this.request("file_properties/properties/search",e,"user","api","rpc")},i.filePropertiesPropertiesSearchContinue=function(e){return this.request("file_properties/properties/search/continue",e,"user","api","rpc")},i.filePropertiesPropertiesUpdate=function(e){return this.request("file_properties/properties/update",e,"user","api","rpc")},i.filePropertiesTemplatesAddForTeam=function(e){return this.request("file_properties/templates/add_for_team",e,"team","api","rpc")},i.filePropertiesTemplatesAddForUser=function(e){return this.request("file_properties/templates/add_for_user",e,"user","api","rpc")},i.filePropertiesTemplatesGetForTeam=function(e){return this.request("file_properties/templates/get_for_team",e,"team","api","rpc")},i.filePropertiesTemplatesGetForUser=function(e){return this.request("file_properties/templates/get_for_user",e,"user","api","rpc")},i.filePropertiesTemplatesListForTeam=function(e){return this.request("file_properties/templates/list_for_team",e,"team","api","rpc")},i.filePropertiesTemplatesListForUser=function(e){return this.request("file_properties/templates/list_for_user",e,"user","api","rpc")},i.filePropertiesTemplatesRemoveForTeam=function(e){return this.request("file_properties/templates/remove_for_team",e,"team","api","rpc")},i.filePropertiesTemplatesRemoveForUser=function(e){return this.request("file_properties/templates/remove_for_user",e,"user","api","rpc")},i.filePropertiesTemplatesUpdateForTeam=function(e){return this.request("file_properties/templates/update_for_team",e,"team","api","rpc")},i.filePropertiesTemplatesUpdateForUser=function(e){return this.request("file_properties/templates/update_for_user",e,"user","api","rpc")},i.fileRequestsCreate=function(e){return this.request("file_requests/create",e,"user","api","rpc")},i.fileRequestsGet=function(e){return this.request("file_requests/get",e,"user","api","rpc")},i.fileRequestsList=function(e){return this.request("file_requests/list",e,"user","api","rpc")},i.fileRequestsUpdate=function(e){return this.request("file_requests/update",e,"user","api","rpc")},i.filesAlphaGetMetadata=function(e){return this.request("files/alpha/get_metadata",e,"user","api","rpc")},i.filesAlphaUpload=function(e){return this.request("files/alpha/upload",e,"user","content","upload")},i.filesCopy=function(e){return this.request("files/copy",e,"user","api","rpc")},i.filesCopyBatch=function(e){return this.request("files/copy_batch",e,"user","api","rpc")},i.filesCopyBatchCheck=function(e){return this.request("files/copy_batch/check",e,"user","api","rpc")},i.filesCopyReferenceGet=function(e){return this.request("files/copy_reference/get",e,"user","api","rpc")},i.filesCopyReferenceSave=function(e){return this.request("files/copy_reference/save",e,"user","api","rpc")},i.filesCopyV2=function(e){return this.request("files/copy_v2",e,"user","api","rpc")},i.filesCreateFolder=function(e){return this.request("files/create_folder",e,"user","api","rpc")},i.filesCreateFolderBatch=function(e){return this.request("files/create_folder_batch",e,"user","api","rpc")},i.filesCreateFolderBatchCheck=function(e){return this.request("files/create_folder_batch/check",e,"user","api","rpc")},i.filesCreateFolderV2=function(e){return this.request("files/create_folder_v2",e,"user","api","rpc")},i.filesDelete=function(e){return this.request("files/delete",e,"user","api","rpc")},i.filesDeleteBatch=function(e){return this.request("files/delete_batch",e,"user","api","rpc")},i.filesDeleteBatchCheck=function(e){return this.request("files/delete_batch/check",e,"user","api","rpc")},i.filesDeleteV2=function(e){return this.request("files/delete_v2",e,"user","api","rpc")},i.filesDownload=function(e){return this.request("files/download",e,"user","content","download")},i.filesDownloadZip=function(e){return this.request("files/download_zip",e,"user","content","download")},i.filesGetMetadata=function(e){return this.request("files/get_metadata",e,"user","api","rpc")},i.filesGetPreview=function(e){return this.request("files/get_preview",e,"user","content","download")},i.filesGetTemporaryLink=function(e){return this.request("files/get_temporary_link",e,"user","api","rpc")},i.filesGetThumbnail=function(e){return this.request("files/get_thumbnail",e,"user","content","download")},i.filesGetThumbnailBatch=function(e){return this.request("files/get_thumbnail_batch",e,"user","content","rpc")},i.filesListFolder=function(e){return this.request("files/list_folder",e,"user","api","rpc")},i.filesListFolderContinue=function(e){return this.request("files/list_folder/continue",e,"user","api","rpc")},i.filesListFolderGetLatestCursor=function(e){return this.request("files/list_folder/get_latest_cursor",e,"user","api","rpc")},i.filesListFolderLongpoll=function(e){return this.request("files/list_folder/longpoll",e,"noauth","notify","rpc")},i.filesListRevisions=function(e){return this.request("files/list_revisions",e,"user","api","rpc")},i.filesMove=function(e){return this.request("files/move",e,"user","api","rpc")},i.filesMoveBatch=function(e){return this.request("files/move_batch",e,"user","api","rpc")},i.filesMoveBatchCheck=function(e){return this.request("files/move_batch/check",e,"user","api","rpc")},i.filesMoveV2=function(e){return this.request("files/move_v2",e,"user","api","rpc")},i.filesPermanentlyDelete=function(e){return this.request("files/permanently_delete",e,"user","api","rpc")},i.filesPropertiesAdd=function(e){return this.request("files/properties/add",e,"user","api","rpc")},i.filesPropertiesOverwrite=function(e){return this.request("files/properties/overwrite",e,"user","api","rpc")},i.filesPropertiesRemove=function(e){return this.request("files/properties/remove",e,"user","api","rpc")},i.filesPropertiesTemplateGet=function(e){return this.request("files/properties/template/get",e,"user","api","rpc")},i.filesPropertiesTemplateList=function(e){return this.request("files/properties/template/list",e,"user","api","rpc")},i.filesPropertiesUpdate=function(e){return this.request("files/properties/update",e,"user","api","rpc")},i.filesRestore=function(e){return this.request("files/restore",e,"user","api","rpc")},i.filesSaveUrl=function(e){return this.request("files/save_url",e,"user","api","rpc")},i.filesSaveUrlCheckJobStatus=function(e){return this.request("files/save_url/check_job_status",e,"user","api","rpc")},i.filesSearch=function(e){return this.request("files/search",e,"user","api","rpc")},i.filesUpload=function(e){return this.request("files/upload",e,"user","content","upload")},i.filesUploadSessionAppend=function(e){return this.request("files/upload_session/append",e,"user","content","upload")},i.filesUploadSessionAppendV2=function(e){return this.request("files/upload_session/append_v2",e,"user","content","upload")},i.filesUploadSessionFinish=function(e){return this.request("files/upload_session/finish",e,"user","content","upload")},i.filesUploadSessionFinishBatch=function(e){return this.request("files/upload_session/finish_batch",e,"user","api","rpc")},i.filesUploadSessionFinishBatchCheck=function(e){return this.request("files/upload_session/finish_batch/check",e,"user","api","rpc")},i.filesUploadSessionStart=function(e){return this.request("files/upload_session/start",e,"user","content","upload")},i.paperDocsArchive=function(e){return this.request("paper/docs/archive",e,"user","api","rpc")},i.paperDocsCreate=function(e){return this.request("paper/docs/create",e,"user","api","upload")},i.paperDocsDownload=function(e){return this.request("paper/docs/download",e,"user","api","download")},i.paperDocsFolderUsersList=function(e){return this.request("paper/docs/folder_users/list",e,"user","api","rpc")},i.paperDocsFolderUsersListContinue=function(e){return this.request("paper/docs/folder_users/list/continue",e,"user","api","rpc")},i.paperDocsGetFolderInfo=function(e){return this.request("paper/docs/get_folder_info",e,"user","api","rpc")},i.paperDocsList=function(e){return this.request("paper/docs/list",e,"user","api","rpc")},i.paperDocsListContinue=function(e){return this.request("paper/docs/list/continue",e,"user","api","rpc")},i.paperDocsPermanentlyDelete=function(e){return this.request("paper/docs/permanently_delete",e,"user","api","rpc")},i.paperDocsSharingPolicyGet=function(e){return this.request("paper/docs/sharing_policy/get",e,"user","api","rpc")},i.paperDocsSharingPolicySet=function(e){return this.request("paper/docs/sharing_policy/set",e,"user","api","rpc")},i.paperDocsUpdate=function(e){return this.request("paper/docs/update",e,"user","api","upload")},i.paperDocsUsersAdd=function(e){return this.request("paper/docs/users/add",e,"user","api","rpc")},i.paperDocsUsersList=function(e){return this.request("paper/docs/users/list",e,"user","api","rpc")},i.paperDocsUsersListContinue=function(e){return this.request("paper/docs/users/list/continue",e,"user","api","rpc")},i.paperDocsUsersRemove=function(e){return this.request("paper/docs/users/remove",e,"user","api","rpc")},i.sharingAddFileMember=function(e){return this.request("sharing/add_file_member",e,"user","api","rpc")},i.sharingAddFolderMember=function(e){return this.request("sharing/add_folder_member",e,"user","api","rpc")},i.sharingChangeFileMemberAccess=function(e){return this.request("sharing/change_file_member_access",e,"user","api","rpc")},i.sharingCheckJobStatus=function(e){return this.request("sharing/check_job_status",e,"user","api","rpc")},i.sharingCheckRemoveMemberJobStatus=function(e){return this.request("sharing/check_remove_member_job_status",e,"user","api","rpc")},i.sharingCheckShareJobStatus=function(e){return this.request("sharing/check_share_job_status",e,"user","api","rpc")},i.sharingCreateSharedLink=function(e){return this.request("sharing/create_shared_link",e,"user","api","rpc")},i.sharingCreateSharedLinkWithSettings=function(e){return this.request("sharing/create_shared_link_with_settings",e,"user","api","rpc")},i.sharingGetFileMetadata=function(e){return this.request("sharing/get_file_metadata",e,"user","api","rpc")},i.sharingGetFileMetadataBatch=function(e){return this.request("sharing/get_file_metadata/batch",e,"user","api","rpc")},i.sharingGetFolderMetadata=function(e){return this.request("sharing/get_folder_metadata",e,"user","api","rpc")},i.sharingGetSharedLinkFile=function(e){return this.request("sharing/get_shared_link_file",e,"user","content","download")},i.sharingGetSharedLinkMetadata=function(e){return this.request("sharing/get_shared_link_metadata",e,"user","api","rpc")},i.sharingGetSharedLinks=function(e){return this.request("sharing/get_shared_links",e,"user","api","rpc")},i.sharingListFileMembers=function(e){return this.request("sharing/list_file_members",e,"user","api","rpc")},i.sharingListFileMembersBatch=function(e){return this.request("sharing/list_file_members/batch",e,"user","api","rpc")},i.sharingListFileMembersContinue=function(e){return this.request("sharing/list_file_members/continue",e,"user","api","rpc")},i.sharingListFolderMembers=function(e){return this.request("sharing/list_folder_members",e,"user","api","rpc")},i.sharingListFolderMembersContinue=function(e){return this.request("sharing/list_folder_members/continue",e,"user","api","rpc")},i.sharingListFolders=function(e){return this.request("sharing/list_folders",e,"user","api","rpc")},i.sharingListFoldersContinue=function(e){return this.request("sharing/list_folders/continue",e,"user","api","rpc")},i.sharingListMountableFolders=function(e){return this.request("sharing/list_mountable_folders",e,"user","api","rpc")},i.sharingListMountableFoldersContinue=function(e){return this.request("sharing/list_mountable_folders/continue",e,"user","api","rpc")},i.sharingListReceivedFiles=function(e){return this.request("sharing/list_received_files",e,"user","api","rpc")},i.sharingListReceivedFilesContinue=function(e){return this.request("sharing/list_received_files/continue",e,"user","api","rpc")},i.sharingListSharedLinks=function(e){return this.request("sharing/list_shared_links",e,"user","api","rpc")},i.sharingModifySharedLinkSettings=function(e){return this.request("sharing/modify_shared_link_settings",e,"user","api","rpc")},i.sharingMountFolder=function(e){return this.request("sharing/mount_folder",e,"user","api","rpc")},i.sharingRelinquishFileMembership=function(e){return this.request("sharing/relinquish_file_membership",e,"user","api","rpc")},i.sharingRelinquishFolderMembership=function(e){return this.request("sharing/relinquish_folder_membership",e,"user","api","rpc")},i.sharingRemoveFileMember=function(e){return this.request("sharing/remove_file_member",e,"user","api","rpc")},i.sharingRemoveFileMember2=function(e){return this.request("sharing/remove_file_member_2",e,"user","api","rpc")},i.sharingRemoveFolderMember=function(e){return this.request("sharing/remove_folder_member",e,"user","api","rpc")},i.sharingRevokeSharedLink=function(e){return this.request("sharing/revoke_shared_link",e,"user","api","rpc")},i.sharingSetAccessInheritance=function(e){return this.request("sharing/set_access_inheritance",e,"user","api","rpc")},i.sharingShareFolder=function(e){return this.request("sharing/share_folder",e,"user","api","rpc")},i.sharingTransferFolder=function(e){return this.request("sharing/transfer_folder",e,"user","api","rpc")},i.sharingUnmountFolder=function(e){return this.request("sharing/unmount_folder",e,"user","api","rpc")},i.sharingUnshareFile=function(e){return this.request("sharing/unshare_file",e,"user","api","rpc")},i.sharingUnshareFolder=function(e){return this.request("sharing/unshare_folder",e,"user","api","rpc")},i.sharingUpdateFileMember=function(e){return this.request("sharing/update_file_member",e,"user","api","rpc")},i.sharingUpdateFolderMember=function(e){return this.request("sharing/update_folder_member",e,"user","api","rpc")},i.sharingUpdateFolderPolicy=function(e){return this.request("sharing/update_folder_policy",e,"user","api","rpc")},i.teamLogGetEvents=function(e){return this.request("team_log/get_events",e,"team","api","rpc")},i.teamLogGetEventsContinue=function(e){return this.request("team_log/get_events/continue",e,"team","api","rpc")},i.usersGetAccount=function(e){return this.request("users/get_account",e,"user","api","rpc")},i.usersGetAccountBatch=function(e){return this.request("users/get_account_batch",e,"user","api","rpc")},i.usersGetCurrentAccount=function(e){return this.request("users/get_current_account",e,"user","api","rpc")},i.usersGetSpaceUsage=function(e){return this.request("users/get_space_usage",e,"user","api","rpc")};for(var s=function(e,t){if(!(e instanceof t))throw new TypeError("Cannot call a class as a function")},o=function(){function e(e,t){for(var r=0;t.length>r;r++){var n=t[r];n.enumerable=n.enumerable||!1,n.configurable=!0,"value"in n&&(n.writable=!0),Object.defineProperty(e,n.key,n)}}return function(t,r,n){return r&&e(t.prototype,r),n&&e(t,n),t}}(),u=function(e,t){if("function"!=typeof t&&null!==t)throw new TypeError("Super expression must either be null or a function, not "+typeof t);e.prototype=Object.create(t&&t.prototype,{constructor:{value:e,enumerable:!1,writable:!0,configurable:!0}}),t&&(Object.setPrototypeOf?Object.setPrototypeOf(e,t):e.__proto__=t)},a=function(e,t){if(!e)throw new ReferenceError("this hasn't been initialised - super() hasn't been called");return!t||"object"!=typeof t&&"function"!=typeof t?e:t},c=function(){return function(e,t){if(Array.isArray(e))return e;if(Symbol.iterator in Object(e))return function(e,t){var r=[],n=!0,i=!1,s=void 0;try{for(var o,u=e[Symbol.iterator]();!(n=(o=u.next()).done)&&(r.push(o.value),!t||r.length!==t);n=!0);}catch(e){i=!0,s=e}finally{try{!n&&u.return&&u.return()}finally{if(i)throw s}}return r}(e,t);throw new TypeError("Invalid attempt to destructure non-iterable instance")}}(),p=function(e){return 3*e.length/4-n(e)},f=function(e){var t,r,i,s,o,u=e.length;s=n(e),o=new d(3*u/4-s),r=s>0?u-4:u;var a=0;for(t=0;r>t;t+=4)i=m[e.charCodeAt(t)]<<18|m[e.charCodeAt(t+1)]<<12|m[e.charCodeAt(t+2)]<<6|m[e.charCodeAt(t+3)],o[a++]=i>>16&255,o[a++]=i>>8&255,o[a++]=255&i;return 2===s?(i=m[e.charCodeAt(t)]<<2|m[e.charCodeAt(t+1)]>>4,o[a++]=255&i):1===s&&(i=m[e.charCodeAt(t)]<<10|m[e.charCodeAt(t+1)]<<4|m[e.charCodeAt(t+2)]>>2,o[a++]=i>>8&255,o[a++]=255&i),o},h=function(e){for(var t,r=e.length,n=r%3,i="",s=[],o=0,u=r-n;u>o;o+=16383)s.push(function(e,t,r){for(var n=[],i=t;r>i;i+=3)n.push(function(e){return l[e>>18&63]+l[e>>12&63]+l[e>>6&63]+l[63&e]}((e[i]<<16)+(e[i+1]<<8)+e[i+2]));return n.join("")}(e,o,o+16383>u?u:o+16383));return 1===n?(i+=l[(t=e[r-1])>>2],i+=l[t<<4&63],i+="=="):2===n&&(i+=l[(t=(e[r-2]<<8)+e[r-1])>>10],i+=l[t>>4&63],i+=l[t<<2&63],i+="="),s.push(i),s.join("")},l=[],m=[],d="undefined"!=typeof Uint8Array?Uint8Array:Array,g="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",_=0;64>_;++_)l[_]=g[_],m[g.charCodeAt(_)]=_;m[45]=62,m[95]=63;var v={byteLength:p,toByteArray:f,fromByteArray:h},b={read:function(e,t,r,n,i){var s,o,u=8*i-n-1,a=(1<<u)-1,c=a>>1,p=-7,f=r?i-1:0,h=r?-1:1,l=e[t+f];for(f+=h,s=l&(1<<-p)-1,l>>=-p,p+=u;p>0;s=256*s+e[t+f],f+=h,p-=8);for(o=s&(1<<-p)-1,s>>=-p,p+=n;p>0;o=256*o+e[t+f],f+=h,p-=8);if(0===s)s=1-c;else{if(s===a)return o?NaN:1/0*(l?-1:1);o+=Math.pow(2,n),s-=c}return(l?-1:1)*o*Math.pow(2,s-n)},write:function(e,t,r,n,i,s){var o,u,a,c=8*s-i-1,p=(1<<c)-1,f=p>>1,h=23===i?5.960464477539062e-8:0,l=n?0:s-1,m=n?1:-1,d=0>t||0===t&&0>1/t?1:0;for(t=Math.abs(t),isNaN(t)||t===1/0?(u=isNaN(t)?1:0,o=p):(o=Math.floor(Math.log(t)/Math.LN2),1>t*(a=Math.pow(2,-o))&&(o--,a*=2),2>(t+=1>o+f?h*Math.pow(2,1-f):h/a)*a||(o++,a/=2),p>o+f?1>o+f?(u=t*Math.pow(2,f-1)*Math.pow(2,i),o=0):(u=(t*a-1)*Math.pow(2,i),o+=f):(u=0,o=p));i>=8;e[r+l]=255&u,l+=m,u/=256,i-=8);for(o=o<<i|u,c+=i;c>0;e[r+l]=255&o,l+=m,o/=256,c-=8);e[r+l-m]|=128*d}},y=function(e,t){return t={exports:{}},e(t,t.exports),t.exports}(function(e,t){function r(e){if(e>U)throw new RangeError("Invalid typed array length");var t=new Uint8Array(e);return t.__proto__=n.prototype,t}function n(e,t,r){if("number"==typeof e){if("string"==typeof t)throw Error("If encoding is specified then the first argument must be a string");return o(e)}return i(e,t,r)}function i(e,t,i){if("number"==typeof e)throw new TypeError('"value" argument must not be a number');return S(e)?function(e,t,r){if(0>t||t>e.byteLength)throw new RangeError("'offset' is out of bounds");if(t+(r||0)>e.byteLength)throw new RangeError("'length' is out of bounds");var i;i=void 0===t&&void 0===r?new Uint8Array(e):void 0===r?new Uint8Array(e,t):new Uint8Array(e,t,r);return i.__proto__=n.prototype,i}(e,t,i):"string"==typeof e?function(e,t){"string"==typeof t&&""!==t||(t="utf8");if(!n.isEncoding(t))throw new TypeError('"encoding" must be a valid string encoding');var i=0|c(e,t),s=r(i),o=s.write(e,t);o!==i&&(s=s.slice(0,o));return s}(e,t):function(e){if(n.isBuffer(e)){var t=0|a(e.length),i=r(t);return 0===i.length?i:(e.copy(i,0,0,t),i)}if(e){if(L(e)||"length"in e)return"number"!=typeof e.length||E(e.length)?r(0):u(e);if("Buffer"===e.type&&Array.isArray(e.data))return u(e.data)}throw new TypeError("First argument must be a string, Buffer, ArrayBuffer, Array, or array-like object.")}(e)}function s(e){if("number"!=typeof e)throw new TypeError('"size" argument must be a number');if(0>e)throw new RangeError('"size" argument must not be negative')}function o(e){return s(e),r(0>e?0:0|a(e))}function u(e){for(var t=0>e.length?0:0|a(e.length),n=r(t),i=0;t>i;i+=1)n[i]=255&e[i];return n}function a(e){if(e>=U)throw new RangeError("Attempt to allocate Buffer larger than maximum size: 0x"+U.toString(16)+" bytes");return 0|e}function c(e,t){if(n.isBuffer(e))return e.length;if(L(e)||S(e))return e.byteLength;"string"!=typeof e&&(e=""+e);var r=e.length;if(0===r)return 0;for(var i=!1;;)switch(t){case"ascii":case"latin1":case"binary":return r;case"utf8":case"utf-8":case void 0:return w(e).length;case"ucs2":case"ucs-2":case"utf16le":case"utf-16le":return 2*r;case"hex":return r>>>1;case"base64":return k(e).length;default:if(i)return w(e).length;t=(""+t).toLowerCase(),i=!0}}function p(e,t,r){var n=e[t];e[t]=e[r],e[r]=n}function f(e,t,r,i,s){if(0===e.length)return-1;if("string"==typeof r?(i=r,r=0):r>2147483647?r=2147483647:-2147483648>r&&(r=-2147483648),r=+r,E(r)&&(r=s?0:e.length-1),0>r&&(r=e.length+r),e.length>r){if(0>r){if(!s)return-1;r=0}}else{if(s)return-1;r=e.length-1}if("string"==typeof t&&(t=n.from(t,i)),n.isBuffer(t))return 0===t.length?-1:h(e,t,r,i,s);if("number"==typeof t)return t&=255,"function"==typeof Uint8Array.prototype.indexOf?s?Uint8Array.prototype.indexOf.call(e,t,r):Uint8Array.prototype.lastIndexOf.call(e,t,r):h(e,[t],r,i,s);throw new TypeError("val must be string, number or Buffer")}function h(e,t,r,n,i){function s(e,t){return 1===o?e[t]:e.readUInt16BE(t*o)}var o=1,u=e.length,a=t.length;if(void 0!==n&&("ucs2"===(n=(n+"").toLowerCase())||"ucs-2"===n||"utf16le"===n||"utf-16le"===n)){if(2>e.length||2>t.length)return-1;o=2,u/=2,a/=2,r/=2}var c;if(i){var p=-1;for(c=r;u>c;c++)if(s(e,c)===s(t,-1===p?0:c-p)){if(-1===p&&(p=c),c-p+1===a)return p*o}else-1!==p&&(c-=c-p),p=-1}else for(r+a>u&&(r=u-a),c=r;c>=0;c--){for(var f=!0,h=0;a>h;h++)if(s(e,c+h)!==s(t,h)){f=!1;break}if(f)return c}return-1}function l(e,t,r,n){return A(function(e){for(var t=[],r=0;e.length>r;++r)t.push(255&e.charCodeAt(r));return t}(t),e,r,n)}function m(e,t,r){r=Math.min(e.length,r);for(var n=[],i=t;r>i;){var s=e[i],o=null,u=s>239?4:s>223?3:s>191?2:1;if(r>=i+u){var a,c,p,f;switch(u){case 1:128>s&&(o=s);break;case 2:128==(192&(a=e[i+1]))&&(f=(31&s)<<6|63&a)>127&&(o=f);break;case 3:c=e[i+2],128==(192&(a=e[i+1]))&&128==(192&c)&&(f=(15&s)<<12|(63&a)<<6|63&c)>2047&&(55296>f||f>57343)&&(o=f);break;case 4:c=e[i+2],p=e[i+3],128==(192&(a=e[i+1]))&&128==(192&c)&&128==(192&p)&&(f=(15&s)<<18|(63&a)<<12|(63&c)<<6|63&p)>65535&&1114112>f&&(o=f)}}null===o?(o=65533,u=1):o>65535&&(n.push((o-=65536)>>>10&1023|55296),o=56320|1023&o),n.push(o),i+=u}return function(e){var t=e.length;if(C>=t)return String.fromCharCode.apply(String,e);var r="",n=0;for(;t>n;)r+=String.fromCharCode.apply(String,e.slice(n,n+=C));return r}(n)}function d(e,t,r){if(e%1!=0||0>e)throw new RangeError("offset is not uint");if(e+t>r)throw new RangeError("Trying to access beyond buffer length")}function g(e,t,r,i,s,o){if(!n.isBuffer(e))throw new TypeError('"buffer" argument must be a Buffer instance');if(t>s||o>t)throw new RangeError('"value" argument is out of bounds');if(r+i>e.length)throw new RangeError("Index out of range")}function _(e,t,r,n,i,s){if(r+n>e.length)throw new RangeError("Index out of range");if(0>r)throw new RangeError("Index out of range")}function y(e,t,r,n,i){return t=+t,r>>>=0,i||_(e,0,r,4),b.write(e,t,r,n,23,4),r+4}function q(e,t,r,n,i){return t=+t,r>>>=0,i||_(e,0,r,8),b.write(e,t,r,n,52,8),r+8}function w(e,t){t=t||1/0;for(var r,n=e.length,i=null,s=[],o=0;n>o;++o){if((r=e.charCodeAt(o))>55295&&57344>r){if(!i){if(r>56319){(t-=3)>-1&&s.push(239,191,189);continue}if(o+1===n){(t-=3)>-1&&s.push(239,191,189);continue}i=r;continue}if(56320>r){(t-=3)>-1&&s.push(239,191,189),i=r;continue}r=65536+(i-55296<<10|r-56320)}else i&&(t-=3)>-1&&s.push(239,191,189);if(i=null,128>r){if(0>(t-=1))break;s.push(r)}else if(2048>r){if(0>(t-=2))break;s.push(r>>6|192,63&r|128)}else if(65536>r){if(0>(t-=3))break;s.push(r>>12|224,r>>6&63|128,63&r|128)}else{if(r>=1114112)throw Error("Invalid code point");if(0>(t-=4))break;s.push(r>>18|240,r>>12&63|128,r>>6&63|128,63&r|128)}}return s}function k(e){return v.toByteArray(function(e){if(2>(e=e.trim().replace(T,"")).length)return"";for(;e.length%4!=0;)e+="=";return e}(e))}function A(e,t,r,n){for(var i=0;n>i&&(i+r<t.length&&i<e.length);++i)t[i+r]=e[i];return i}function S(e){return e instanceof ArrayBuffer||null!=e&&null!=e.constructor&&"ArrayBuffer"===e.constructor.name&&"number"==typeof e.byteLength}function L(e){return"function"==typeof ArrayBuffer.isView&&ArrayBuffer.isView(e)}function E(e){return e!=e}t.Buffer=n,t.SlowBuffer=function(e){return+e!=e&&(e=0),n.alloc(+e)},t.INSPECT_MAX_BYTES=50;var U=2147483647;t.kMaxLength=U,(n.TYPED_ARRAY_SUPPORT=function(){try{var e=new Uint8Array(1);return e.__proto__={__proto__:Uint8Array.prototype,foo:function(){return 42}},42===e.foo()}catch(e){return!1}}())||void 0===console||"function"!=typeof console.error||console.error("This browser lacks typed array (Uint8Array) support which is required by `buffer` v5.x. Use `buffer` v4.x if you require old browser support."),"undefined"!=typeof Symbol&&Symbol.species&&n[Symbol.species]===n&&Object.defineProperty(n,Symbol.species,{value:null,configurable:!0,enumerable:!1,writable:!1}),n.poolSize=8192,n.from=function(e,t,r){return i(e,t,r)},n.prototype.__proto__=Uint8Array.prototype,n.__proto__=Uint8Array,n.alloc=function(e,t,n){return function(e,t,n){return s(e),e>0&&void 0!==t?"string"==typeof n?r(e).fill(t,n):r(e).fill(t):r(e)}(e,t,n)},n.allocUnsafe=function(e){return o(e)},n.allocUnsafeSlow=function(e){return o(e)},n.isBuffer=function(e){return null!=e&&!0===e._isBuffer},n.compare=function(e,t){if(!n.isBuffer(e)||!n.isBuffer(t))throw new TypeError("Arguments must be Buffers");if(e===t)return 0;for(var r=e.length,i=t.length,s=0,o=Math.min(r,i);o>s;++s)if(e[s]!==t[s]){r=e[s],i=t[s];break}return i>r?-1:r>i?1:0},n.isEncoding=function(e){switch((e+"").toLowerCase()){case"hex":case"utf8":case"utf-8":case"ascii":case"latin1":case"binary":case"base64":case"ucs2":case"ucs-2":case"utf16le":case"utf-16le":return!0;default:return!1}},n.concat=function(e,t){if(!Array.isArray(e))throw new TypeError('"list" argument must be an Array of Buffers');if(0===e.length)return n.alloc(0);var r;if(void 0===t)for(t=0,r=0;e.length>r;++r)t+=e[r].length;var i=n.allocUnsafe(t),s=0;for(r=0;e.length>r;++r){var o=e[r];if(!n.isBuffer(o))throw new TypeError('"list" argument must be an Array of Buffers');o.copy(i,s),s+=o.length}return i},n.byteLength=c,n.prototype._isBuffer=!0,n.prototype.swap16=function(){var e=this.length;if(e%2!=0)throw new RangeError("Buffer size must be a multiple of 16-bits");for(var t=0;e>t;t+=2)p(this,t,t+1);return this},n.prototype.swap32=function(){var e=this.length;if(e%4!=0)throw new RangeError("Buffer size must be a multiple of 32-bits");for(var t=0;e>t;t+=4)p(this,t,t+3),p(this,t+1,t+2);return this},n.prototype.swap64=function(){var e=this.length;if(e%8!=0)throw new RangeError("Buffer size must be a multiple of 64-bits");for(var t=0;e>t;t+=8)p(this,t,t+7),p(this,t+1,t+6),p(this,t+2,t+5),p(this,t+3,t+4);return this},n.prototype.toString=function(){var e=this.length;return 0===e?"":0===arguments.length?m(this,0,e):function(e,t,r){var n=!1;if((void 0===t||0>t)&&(t=0),t>this.length)return"";if((void 0===r||r>this.length)&&(r=this.length),0>=r)return"";if(r>>>=0,(t>>>=0)>=r)return"";for(e||(e="utf8");;)switch(e){case"hex":return function(e,t,r){var n=e.length;t&&t>=0||(t=0),(!r||0>r||r>n)&&(r=n);for(var i="",s=t;r>s;++s)i+=function(e){return 16>e?"0"+e.toString(16):e.toString(16)}(e[s]);return i}(this,t,r);case"utf8":case"utf-8":return m(this,t,r);case"ascii":return function(e,t,r){var n="";r=Math.min(e.length,r);for(var i=t;r>i;++i)n+=String.fromCharCode(127&e[i]);return n}(this,t,r);case"latin1":case"binary":return function(e,t,r){var n="";r=Math.min(e.length,r);for(var i=t;r>i;++i)n+=String.fromCharCode(e[i]);return n}(this,t,r);case"base64":return function(e,t,r){return v.fromByteArray(0===t&&r===e.length?e:e.slice(t,r))}(this,t,r);case"ucs2":case"ucs-2":case"utf16le":case"utf-16le":return function(e,t,r){for(var n=e.slice(t,r),i="",s=0;n.length>s;s+=2)i+=String.fromCharCode(n[s]+256*n[s+1]);return i}(this,t,r);default:if(n)throw new TypeError("Unknown encoding: "+e);e=(e+"").toLowerCase(),n=!0}}.apply(this,arguments)},n.prototype.equals=function(e){if(!n.isBuffer(e))throw new TypeError("Argument must be a Buffer");return this===e||0===n.compare(this,e)},n.prototype.inspect=function(){var e="",r=t.INSPECT_MAX_BYTES;return this.length>0&&(e=this.toString("hex",0,r).match(/.{2}/g).join(" "),this.length>r&&(e+=" ... ")),"<Buffer "+e+">"},n.prototype.compare=function(e,t,r,i,s){if(!n.isBuffer(e))throw new TypeError("Argument must be a Buffer");if(void 0===t&&(t=0),void 0===r&&(r=e?e.length:0),void 0===i&&(i=0),void 0===s&&(s=this.length),0>t||r>e.length||0>i||s>this.length)throw new RangeError("out of range index");if(i>=s&&t>=r)return 0;if(i>=s)return-1;if(t>=r)return 1;if(t>>>=0,r>>>=0,i>>>=0,s>>>=0,this===e)return 0;for(var o=s-i,u=r-t,a=Math.min(o,u),c=this.slice(i,s),p=e.slice(t,r),f=0;a>f;++f)if(c[f]!==p[f]){o=c[f],u=p[f];break}return u>o?-1:o>u?1:0},n.prototype.includes=function(e,t,r){return-1!==this.indexOf(e,t,r)},n.prototype.indexOf=function(e,t,r){return f(this,e,t,r,!0)},n.prototype.lastIndexOf=function(e,t,r){return f(this,e,t,r,!1)},n.prototype.write=function(e,t,r,n){if(void 0===t)n="utf8",r=this.length,t=0;else if(void 0===r&&"string"==typeof t)n=t,r=this.length,t=0;else{if(!isFinite(t))throw Error("Buffer.write(string, encoding, offset[, length]) is no longer supported");t>>>=0,isFinite(r)?(r>>>=0,void 0===n&&(n="utf8")):(n=r,r=void 0)}var i=this.length-t;if((void 0===r||r>i)&&(r=i),e.length>0&&(0>r||0>t)||t>this.length)throw new RangeError("Attempt to write outside buffer bounds");n||(n="utf8");for(var s=!1;;)switch(n){case"hex":return function(e,t,r,n){var i=e.length-(r=+r||0);n?(n=+n)>i&&(n=i):n=i;var s=t.length;if(s%2!=0)throw new TypeError("Invalid hex string");n>s/2&&(n=s/2);for(var o=0;n>o;++o){var u=parseInt(t.substr(2*o,2),16);if(E(u))return o;e[r+o]=u}return o}(this,e,t,r);case"utf8":case"utf-8":return function(e,t,r,n){return A(w(t,e.length-r),e,r,n)}(this,e,t,r);case"ascii":return l(this,e,t,r);case"latin1":case"binary":return function(e,t,r,n){return l(e,t,r,n)}(this,e,t,r);case"base64":return function(e,t,r,n){return A(k(t),e,r,n)}(this,e,t,r);case"ucs2":case"ucs-2":case"utf16le":case"utf-16le":return function(e,t,r,n){return A(function(e,t){for(var r,n,i=[],s=0;e.length>s&&(t-=2)>=0;++s)r=e.charCodeAt(s),n=r>>8,i.push(r%256),i.push(n);return i}(t,e.length-r),e,r,n)}(this,e,t,r);default:if(s)throw new TypeError("Unknown encoding: "+n);n=(""+n).toLowerCase(),s=!0}},n.prototype.toJSON=function(){return{type:"Buffer",data:Array.prototype.slice.call(this._arr||this,0)}};var C=4096;n.prototype.slice=function(e,t){var r=this.length;e=~~e,t=void 0===t?r:~~t,0>e?0>(e+=r)&&(e=0):e>r&&(e=r),0>t?0>(t+=r)&&(t=0):t>r&&(t=r),e>t&&(t=e);var i=this.subarray(e,t);return i.__proto__=n.prototype,i},n.prototype.readUIntLE=function(e,t,r){e>>>=0,t>>>=0,r||d(e,t,this.length);for(var n=this[e],i=1,s=0;++s<t&&(i*=256);)n+=this[e+s]*i;return n},n.prototype.readUIntBE=function(e,t,r){e>>>=0,t>>>=0,r||d(e,t,this.length);for(var n=this[e+--t],i=1;t>0&&(i*=256);)n+=this[e+--t]*i;return n},n.prototype.readUInt8=function(e,t){return e>>>=0,t||d(e,1,this.length),this[e]},n.prototype.readUInt16LE=function(e,t){return e>>>=0,t||d(e,2,this.length),this[e]|this[e+1]<<8},n.prototype.readUInt16BE=function(e,t){return e>>>=0,t||d(e,2,this.length),this[e]<<8|this[e+1]},n.prototype.readUInt32LE=function(e,t){return e>>>=0,t||d(e,4,this.length),(this[e]|this[e+1]<<8|this[e+2]<<16)+16777216*this[e+3]},n.prototype.readUInt32BE=function(e,t){return e>>>=0,t||d(e,4,this.length),16777216*this[e]+(this[e+1]<<16|this[e+2]<<8|this[e+3])},n.prototype.readIntLE=function(e,t,r){e>>>=0,t>>>=0,r||d(e,t,this.length);for(var n=this[e],i=1,s=0;++s<t&&(i*=256);)n+=this[e+s]*i;return(i*=128)>n||(n-=Math.pow(2,8*t)),n},n.prototype.readIntBE=function(e,t,r){e>>>=0,t>>>=0,r||d(e,t,this.length);for(var n=t,i=1,s=this[e+--n];n>0&&(i*=256);)s+=this[e+--n]*i;return(i*=128)>s||(s-=Math.pow(2,8*t)),s},n.prototype.readInt8=function(e,t){return e>>>=0,t||d(e,1,this.length),128&this[e]?-1*(255-this[e]+1):this[e]},n.prototype.readInt16LE=function(e,t){e>>>=0,t||d(e,2,this.length);var r=this[e]|this[e+1]<<8;return 32768&r?4294901760|r:r},n.prototype.readInt16BE=function(e,t){e>>>=0,t||d(e,2,this.length);var r=this[e+1]|this[e]<<8;return 32768&r?4294901760|r:r},n.prototype.readInt32LE=function(e,t){return e>>>=0,t||d(e,4,this.length),this[e]|this[e+1]<<8|this[e+2]<<16|this[e+3]<<24},n.prototype.readInt32BE=function(e,t){return e>>>=0,t||d(e,4,this.length),this[e]<<24|this[e+1]<<16|this[e+2]<<8|this[e+3]},n.prototype.readFloatLE=function(e,t){return e>>>=0,t||d(e,4,this.length),b.read(this,e,!0,23,4)},n.prototype.readFloatBE=function(e,t){return e>>>=0,t||d(e,4,this.length),b.read(this,e,!1,23,4)},n.prototype.readDoubleLE=function(e,t){return e>>>=0,t||d(e,8,this.length),b.read(this,e,!0,52,8)},n.prototype.readDoubleBE=function(e,t){return e>>>=0,t||d(e,8,this.length),b.read(this,e,!1,52,8)},n.prototype.writeUIntLE=function(e,t,r,n){if(e=+e,t>>>=0,r>>>=0,!n){g(this,e,t,r,Math.pow(2,8*r)-1,0)}var i=1,s=0;for(this[t]=255&e;++s<r&&(i*=256);)this[t+s]=e/i&255;return t+r},n.prototype.writeUIntBE=function(e,t,r,n){if(e=+e,t>>>=0,r>>>=0,!n){g(this,e,t,r,Math.pow(2,8*r)-1,0)}var i=r-1,s=1;for(this[t+i]=255&e;--i>=0&&(s*=256);)this[t+i]=e/s&255;return t+r},n.prototype.writeUInt8=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,1,255,0),this[t]=255&e,t+1},n.prototype.writeUInt16LE=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,2,65535,0),this[t]=255&e,this[t+1]=e>>>8,t+2},n.prototype.writeUInt16BE=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,2,65535,0),this[t]=e>>>8,this[t+1]=255&e,t+2},n.prototype.writeUInt32LE=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,4,4294967295,0),this[t+3]=e>>>24,this[t+2]=e>>>16,this[t+1]=e>>>8,this[t]=255&e,t+4},n.prototype.writeUInt32BE=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,4,4294967295,0),this[t]=e>>>24,this[t+1]=e>>>16,this[t+2]=e>>>8,this[t+3]=255&e,t+4},n.prototype.writeIntLE=function(e,t,r,n){if(e=+e,t>>>=0,!n){var i=Math.pow(2,8*r-1);g(this,e,t,r,i-1,-i)}var s=0,o=1,u=0;for(this[t]=255&e;++s<r&&(o*=256);)0>e&&0===u&&0!==this[t+s-1]&&(u=1),this[t+s]=(e/o>>0)-u&255;return t+r},n.prototype.writeIntBE=function(e,t,r,n){if(e=+e,t>>>=0,!n){var i=Math.pow(2,8*r-1);g(this,e,t,r,i-1,-i)}var s=r-1,o=1,u=0;for(this[t+s]=255&e;--s>=0&&(o*=256);)0>e&&0===u&&0!==this[t+s+1]&&(u=1),this[t+s]=(e/o>>0)-u&255;return t+r},n.prototype.writeInt8=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,1,127,-128),0>e&&(e=255+e+1),this[t]=255&e,t+1},n.prototype.writeInt16LE=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,2,32767,-32768),this[t]=255&e,this[t+1]=e>>>8,t+2},n.prototype.writeInt16BE=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,2,32767,-32768),this[t]=e>>>8,this[t+1]=255&e,t+2},n.prototype.writeInt32LE=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,4,2147483647,-2147483648),this[t]=255&e,this[t+1]=e>>>8,this[t+2]=e>>>16,this[t+3]=e>>>24,t+4},n.prototype.writeInt32BE=function(e,t,r){return e=+e,t>>>=0,r||g(this,e,t,4,2147483647,-2147483648),0>e&&(e=4294967295+e+1),this[t]=e>>>24,this[t+1]=e>>>16,this[t+2]=e>>>8,this[t+3]=255&e,t+4},n.prototype.writeFloatLE=function(e,t,r){return y(this,e,t,!0,r)},n.prototype.writeFloatBE=function(e,t,r){return y(this,e,t,!1,r)},n.prototype.writeDoubleLE=function(e,t,r){return q(this,e,t,!0,r)},n.prototype.writeDoubleBE=function(e,t,r){return q(this,e,t,!1,r)},n.prototype.copy=function(e,t,r,n){if(r||(r=0),n||0===n||(n=this.length),e.length>t||(t=e.length),t||(t=0),n>0&&r>n&&(n=r),n===r)return 0;if(0===e.length||0===this.length)return 0;if(0>t)throw new RangeError("targetStart out of bounds");if(0>r||r>=this.length)throw new RangeError("sourceStart out of bounds");if(0>n)throw new RangeError("sourceEnd out of bounds");n>this.length&&(n=this.length),n-r>e.length-t&&(n=e.length-t+r);var i,s=n-r;if(this===e&&t>r&&n>t)for(i=s-1;i>=0;--i)e[i+t]=this[i+r];else if(1e3>s)for(i=0;s>i;++i)e[i+t]=this[i+r];else Uint8Array.prototype.set.call(e,this.subarray(r,r+s),t);return s},n.prototype.fill=function(e,t,r,i){if("string"==typeof e){if("string"==typeof t?(i=t,t=0,r=this.length):"string"==typeof r&&(i=r,r=this.length),1===e.length){var s=e.charCodeAt(0);256>s&&(e=s)}if(void 0!==i&&"string"!=typeof i)throw new TypeError("encoding must be a string");if("string"==typeof i&&!n.isEncoding(i))throw new TypeError("Unknown encoding: "+i)}else"number"==typeof e&&(e&=255);if(0>t||t>this.length||r>this.length)throw new RangeError("Out of range index");if(t>=r)return this;t>>>=0,r=void 0===r?this.length:r>>>0,e||(e=0);var o;if("number"==typeof e)for(o=t;r>o;++o)this[o]=e;else{var u=n.isBuffer(e)?e:new n(e,i),a=u.length;for(o=0;r-t>o;++o)this[o+t]=u[o%a]}return this};var T=/[^+/0-9A-Za-z-_]/g}).Buffer;"function"!=typeof Object.assign&&(Object.assign=function(e){var t,r,n,i;if(void 0===e||null===e)throw new TypeError("Cannot convert undefined or null to object");for(t=Object(e),r=1;arguments.length>r;r++)if(void 0!==(n=arguments[r])&&null!==n)for(i in n)n.hasOwnProperty(i)&&(t[i]=n[i]);return t}),Array.prototype.includes||Object.defineProperty(Array.prototype,"includes",{value:function(e,t){if(null==this)throw new TypeError('"this" is null or not defined');var r=Object(this),n=r.length>>>0;if(0===n)return!1;for(var i=0|t,s=Math.max(0>i?n-Math.abs(i):i,0);n>s;){if(function(e,t){return e===t||"number"==typeof e&&"number"==typeof t&&isNaN(e)&&isNaN(t)}(r[s],e))return!0;s++}return!1}});var q=function(){function n(e){s(this,n),this.accessToken=(e=e||{}).accessToken,this.clientId=e.clientId,this.clientSecret=e.clientSecret,this.selectUser=e.selectUser,this.selectAdmin=e.selectAdmin}return o(n,[{key:"setAccessToken",value:function(e){this.accessToken=e}},{key:"getAccessToken",value:function(){return this.accessToken}},{key:"setClientId",value:function(e){this.clientId=e}},{key:"getClientId",value:function(){return this.clientId}},{key:"setClientSecret",value:function(e){this.clientSecret=e}},{key:"getClientSecret",value:function(){return this.clientSecret}},{key:"getAuthenticationUrl",value:function(e,t){var r=arguments.length>2&&void 0!==arguments[2]?arguments[2]:"token",n=this.getClientId(),i="https://www.dropbox.com/oauth2/authorize";if(!n)throw Error("A client id is required. You can set the client id using .setClientId().");if("code"!==r&&!e)throw Error("A redirect uri is required.");if(!["code","token"].includes(r))throw Error("Authorization type must be code or token");var s=void 0;return s="code"===r?i+"?response_type=code&client_id="+n:i+"?response_type=token&client_id="+n,e&&(s+="&redirect_uri="+e),t&&(s+="&state="+t),s}},{key:"getAccessTokenFromCode",value:function(e,t){var r=this.getClientId(),n=this.getClientSecret();if(!r)throw Error("A client id is required. You can set the client id using .setClientId().");if(!n)throw Error("A client secret is required. You can set the client id using .setClientSecret().");var i="https://api.dropboxapi.com/oauth2/token?code="+t+"&grant_type=authorization_code&redirect_uri="+e+"&client_id="+r+"&client_secret="+n;return fetch(i,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"}}).then(function(e){return function(e){var t=e.clone();return new Promise(function(r){e.json().then(function(e){return r(e)}).catch(function(){return t.text().then(function(e){return r(e)})})}).then(function(t){return[e,t]})}(e)}).then(function(e){var t=c(e,2),r=t[0],n=t[1];if(!r.ok)throw{error:n,response:r,status:r.status};return n.access_token})}},{key:"authenticateWithCordova",value:function(e,t){function r(){window.setTimeout(function(){u.close()},10),t()}function n(r){if(r.url.indexOf("&error=")>-1)window.setTimeout(function(){u.close()},10),t();else{var n=r.url.indexOf("#access_token="),i=r.url.indexOf("&token_type=");if(n>-1){n+=14,window.setTimeout(function(){u.close()},10);var s=r.url.substring(n,i);e(s)}}}function i(){o||(u.removeEventListener("loaderror",r),u.removeEventListener("loadstop",n),u.removeEventListener("exit",i),o=!0)}var s=this.getAuthenticationUrl("https://www.dropbox.com/1/oauth2/redirect_receiver"),o=!1,u=window.open(s,"_blank");u.addEventListener("loaderror",r),u.addEventListener("loadstop",n),u.addEventListener("exit",i)}},{key:"request",value:function(e,t,r,n,i){var s=null;switch(i){case"rpc":s=this.getRpcRequest();break;case"download":s=this.getDownloadRequest();break;case"upload":s=this.getUploadRequest();break;default:throw Error("Invalid request style: "+i)}var o={selectUser:this.selectUser,selectAdmin:this.selectAdmin,clientId:this.getClientId(),clientSecret:this.getClientSecret()};return s(e,t,r,n,this.getAccessToken(),o)}},{key:"setRpcRequest",value:function(e){this.rpcRequest=e}},{key:"getRpcRequest",value:function(){return void 0===this.rpcRequest&&(this.rpcRequest=function(e,r,n,i,s,o){var u={method:"POST",body:r?JSON.stringify(r):null},a={};r&&(a["Content-Type"]="application/json");var p="";switch(n){case"app":if(!o.clientId||!o.clientSecret)throw Error("A client id and secret is required for this function");p=new y(o.clientId+":"+o.clientSecret).toString("base64"),a.Authorization="Basic "+p;break;case"team":case"user":a.Authorization="Bearer "+s;break;case"noauth":break;default:throw Error("Unhandled auth type: "+n)}return o&&(o.selectUser&&(a["Dropbox-API-Select-User"]=o.selectUser),o.selectAdmin&&(a["Dropbox-API-Select-Admin"]=o.selectAdmin)),u.headers=a,fetch(t(i)+e,u).then(function(e){return function(e){var t=e.clone();return new Promise(function(r){e.json().then(function(e){return r(e)}).catch(function(){return t.text().then(function(e){return r(e)})})}).then(function(t){return[e,t]})}(e)}).then(function(e){var t=c(e,2),r=t[0],n=t[1];if(!r.ok)throw{error:n,response:r,status:r.status};return n})}),this.rpcRequest}},{key:"setDownloadRequest",value:function(e){this.downloadRequest=e}},{key:"getDownloadRequest",value:function(){return void 0===this.downloadRequest&&(this.downloadRequest=function(n,i,s,o,u,a){if("user"!==s)throw Error("Unexpected auth type: "+s);var p={method:"POST",headers:{Authorization:"Bearer "+u,"Dropbox-API-Arg":r(i)}};return a&&(a.selectUser&&(p.headers["Dropbox-API-Select-User"]=a.selectUser),a.selectAdmin&&(p.headers["Dropbox-API-Select-Admin"]=a.selectAdmin)),fetch(t(o)+n,p).then(function(t){return function(t){return t.ok?e()?t.blob():t.buffer():t.text()}(t).then(function(e){return[t,e]})}).then(function(t){var r=c(t,2);return function(t,r){if(!t.ok)throw{error:r,response:t,status:t.status};var n=JSON.parse(t.headers.get("dropbox-api-result"));return e()?n.fileBlob=r:n.fileBinary=r,n}(r[0],r[1])})}),this.downloadRequest}},{key:"setUploadRequest",value:function(e){this.uploadRequest=e}},{key:"getUploadRequest",value:function(){return void 0===this.uploadRequest&&(this.uploadRequest=function(e,n,i,s,o,u){if("user"!==i)throw Error("Unexpected auth type: "+i);var a=n.contents;delete n.contents;var p={body:a,method:"POST",headers:{Authorization:"Bearer "+o,"Content-Type":"application/octet-stream","Dropbox-API-Arg":r(n)}};return u&&(u.selectUser&&(p.headers["Dropbox-API-Select-User"]=u.selectUser),u.selectAdmin&&(p.headers["Dropbox-API-Select-Admin"]=u.selectAdmin)),fetch(t(s)+e,p).then(function(e){return function(e){var t=e.clone();return new Promise(function(r){e.json().then(function(e){return r(e)}).catch(function(){return t.text().then(function(e){return r(e)})})}).then(function(t){return[e,t]})}(e)}).then(function(e){var t=c(e,2),r=t[0],n=t[1];if(!r.ok)throw{error:n,response:r,status:r.status};return n})}),this.uploadRequest}}]),n}(),w=function(e){function t(e){s(this,t);var r=a(this,(t.__proto__||Object.getPrototypeOf(t)).call(this,e));return Object.assign(r,i),r}return u(t,q),o(t,[{key:"filesGetSharedLinkFile",value:function(e){return this.request("sharing/get_shared_link_file",e,"api","download")}}]),t}(),k=Object.freeze({Dropbox:w}),A={};A.teamDevicesListMemberDevices=function(e){return this.request("team/devices/list_member_devices",e,"team","api","rpc")},A.teamDevicesListMembersDevices=function(e){return this.request("team/devices/list_members_devices",e,"team","api","rpc")},A.teamDevicesListTeamDevices=function(e){return this.request("team/devices/list_team_devices",e,"team","api","rpc")},A.teamDevicesRevokeDeviceSession=function(e){return this.request("team/devices/revoke_device_session",e,"team","api","rpc")},A.teamDevicesRevokeDeviceSessionBatch=function(e){return this.request("team/devices/revoke_device_session_batch",e,"team","api","rpc")},A.teamFeaturesGetValues=function(e){return this.request("team/features/get_values",e,"team","api","rpc")},A.teamGetInfo=function(e){return this.request("team/get_info",e,"team","api","rpc")},A.teamGroupsCreate=function(e){return this.request("team/groups/create",e,"team","api","rpc")},A.teamGroupsDelete=function(e){return this.request("team/groups/delete",e,"team","api","rpc")},A.teamGroupsGetInfo=function(e){return this.request("team/groups/get_info",e,"team","api","rpc")},A.teamGroupsJobStatusGet=function(e){return this.request("team/groups/job_status/get",e,"team","api","rpc")},A.teamGroupsList=function(e){return this.request("team/groups/list",e,"team","api","rpc")},A.teamGroupsListContinue=function(e){return this.request("team/groups/list/continue",e,"team","api","rpc")},A.teamGroupsMembersAdd=function(e){return this.request("team/groups/members/add",e,"team","api","rpc")},A.teamGroupsMembersList=function(e){return this.request("team/groups/members/list",e,"team","api","rpc")},A.teamGroupsMembersListContinue=function(e){return this.request("team/groups/members/list/continue",e,"team","api","rpc")},A.teamGroupsMembersRemove=function(e){return this.request("team/groups/members/remove",e,"team","api","rpc")},A.teamGroupsMembersSetAccessType=function(e){return this.request("team/groups/members/set_access_type",e,"team","api","rpc")},A.teamGroupsUpdate=function(e){return this.request("team/groups/update",e,"team","api","rpc")},A.teamLinkedAppsListMemberLinkedApps=function(e){return this.request("team/linked_apps/list_member_linked_apps",e,"team","api","rpc")},A.teamLinkedAppsListMembersLinkedApps=function(e){return this.request("team/linked_apps/list_members_linked_apps",e,"team","api","rpc")},A.teamLinkedAppsListTeamLinkedApps=function(e){return this.request("team/linked_apps/list_team_linked_apps",e,"team","api","rpc")},A.teamLinkedAppsRevokeLinkedApp=function(e){return this.request("team/linked_apps/revoke_linked_app",e,"team","api","rpc")},A.teamLinkedAppsRevokeLinkedAppBatch=function(e){return this.request("team/linked_apps/revoke_linked_app_batch",e,"team","api","rpc")},A.teamMemberSpaceLimitsExcludedUsersAdd=function(e){return this.request("team/member_space_limits/excluded_users/add",e,"team","api","rpc")},A.teamMemberSpaceLimitsExcludedUsersList=function(e){return this.request("team/member_space_limits/excluded_users/list",e,"team","api","rpc")},A.teamMemberSpaceLimitsExcludedUsersListContinue=function(e){return this.request("team/member_space_limits/excluded_users/list/continue",e,"team","api","rpc")},A.teamMemberSpaceLimitsExcludedUsersRemove=function(e){return this.request("team/member_space_limits/excluded_users/remove",e,"team","api","rpc")},A.teamMemberSpaceLimitsGetCustomQuota=function(e){return this.request("team/member_space_limits/get_custom_quota",e,"team","api","rpc")},A.teamMemberSpaceLimitsRemoveCustomQuota=function(e){return this.request("team/member_space_limits/remove_custom_quota",e,"team","api","rpc")},A.teamMemberSpaceLimitsSetCustomQuota=function(e){return this.request("team/member_space_limits/set_custom_quota",e,"team","api","rpc")},A.teamMembersAdd=function(e){return this.request("team/members/add",e,"team","api","rpc")},A.teamMembersAddJobStatusGet=function(e){return this.request("team/members/add/job_status/get",e,"team","api","rpc")},A.teamMembersGetInfo=function(e){return this.request("team/members/get_info",e,"team","api","rpc")},A.teamMembersList=function(e){return this.request("team/members/list",e,"team","api","rpc")},A.teamMembersListContinue=function(e){return this.request("team/members/list/continue",e,"team","api","rpc")},A.teamMembersRecover=function(e){return this.request("team/members/recover",e,"team","api","rpc")},A.teamMembersRemove=function(e){return this.request("team/members/remove",e,"team","api","rpc")},A.teamMembersRemoveJobStatusGet=function(e){return this.request("team/members/remove/job_status/get",e,"team","api","rpc")},A.teamMembersSendWelcomeEmail=function(e){return this.request("team/members/send_welcome_email",e,"team","api","rpc")},A.teamMembersSetAdminPermissions=function(e){return this.request("team/members/set_admin_permissions",e,"team","api","rpc")},A.teamMembersSetProfile=function(e){return this.request("team/members/set_profile",e,"team","api","rpc")},A.teamMembersSuspend=function(e){return this.request("team/members/suspend",e,"team","api","rpc")},A.teamMembersUnsuspend=function(e){return this.request("team/members/unsuspend",e,"team","api","rpc")},A.teamNamespacesList=function(e){return this.request("team/namespaces/list",e,"team","api","rpc")},A.teamNamespacesListContinue=function(e){return this.request("team/namespaces/list/continue",e,"team","api","rpc")},A.teamPropertiesTemplateAdd=function(e){return this.request("team/properties/template/add",e,"team","api","rpc")},A.teamPropertiesTemplateGet=function(e){return this.request("team/properties/template/get",e,"team","api","rpc")},A.teamPropertiesTemplateList=function(e){return this.request("team/properties/template/list",e,"team","api","rpc")},A.teamPropertiesTemplateUpdate=function(e){return this.request("team/properties/template/update",e,"team","api","rpc")},A.teamReportsGetActivity=function(e){return this.request("team/reports/get_activity",e,"team","api","rpc")},A.teamReportsGetDevices=function(e){return this.request("team/reports/get_devices",e,"team","api","rpc")},A.teamReportsGetMembership=function(e){return this.request("team/reports/get_membership",e,"team","api","rpc")},A.teamReportsGetStorage=function(e){return this.request("team/reports/get_storage",e,"team","api","rpc")},A.teamTeamFolderActivate=function(e){return this.request("team/team_folder/activate",e,"team","api","rpc")},A.teamTeamFolderArchive=function(e){return this.request("team/team_folder/archive",e,"team","api","rpc")},A.teamTeamFolderArchiveCheck=function(e){return this.request("team/team_folder/archive/check",e,"team","api","rpc")},A.teamTeamFolderCreate=function(e){return this.request("team/team_folder/create",e,"team","api","rpc")},A.teamTeamFolderGetInfo=function(e){return this.request("team/team_folder/get_info",e,"team","api","rpc")},A.teamTeamFolderList=function(e){return this.request("team/team_folder/list",e,"team","api","rpc")},A.teamTeamFolderListContinue=function(e){return this.request("team/team_folder/list/continue",e,"team","api","rpc")},A.teamTeamFolderPermanentlyDelete=function(e){return this.request("team/team_folder/permanently_delete",e,"team","api","rpc")},A.teamTeamFolderRename=function(e){return this.request("team/team_folder/rename",e,"team","api","rpc")},A.teamTeamFolderUpdateSyncSettings=function(e){return this.request("team/team_folder/update_sync_settings",e,"team","api","rpc")},A.teamTokenGetAuthenticatedAdmin=function(e){return this.request("team/token/get_authenticated_admin",e,"team","api","rpc")};var S=function(e){function t(e){s(this,t);var r=a(this,(t.__proto__||Object.getPrototypeOf(t)).call(this,e));return Object.assign(r,A),r}return u(t,q),o(t,[{key:"actAsUser",value:function(e){return new w({accessToken:this.accessToken,clientId:this.clientId,selectUser:e})}}]),t}(),L=Object.freeze({DropboxTeam:S});return{Dropbox:k.Dropbox,DropboxTeam:L.DropboxTeam}});
 
-(function (global, factory) {
-    typeof exports === 'object' && typeof module !== 'undefined' ? module.exports = factory() :
-    typeof define === 'function' && define.amd ? define(factory) :
-    (global.ES6Promise = factory());
-}(this, (function () { 'use strict';
-
-function objectOrFunction(x) {
-  return typeof x === 'function' || typeof x === 'object' && x !== null;
-}
-
-function isFunction(x) {
-  return typeof x === 'function';
-}
-
-var _isArray = undefined;
-if (!Array.isArray) {
-  _isArray = function (x) {
-    return Object.prototype.toString.call(x) === '[object Array]';
-  };
-} else {
-  _isArray = Array.isArray;
-}
-
-var isArray = _isArray;
-
-var len = 0;
-var vertxNext = undefined;
-var customSchedulerFn = undefined;
-
-var asap = function asap(callback, arg) {
-  queue[len] = callback;
-  queue[len + 1] = arg;
-  len += 2;
-  if (len === 2) {
-    // If len is 2, that means that we need to schedule an async flush.
-    // If additional callbacks are queued before the queue is flushed, they
-    // will be processed by this flush that we are scheduling.
-    if (customSchedulerFn) {
-      customSchedulerFn(flush);
-    } else {
-      scheduleFlush();
-    }
-  }
-};
-
-function setScheduler(scheduleFn) {
-  customSchedulerFn = scheduleFn;
-}
-
-function setAsap(asapFn) {
-  asap = asapFn;
-}
-
-var browserWindow = typeof window !== 'undefined' ? window : undefined;
-var browserGlobal = browserWindow || {};
-var BrowserMutationObserver = browserGlobal.MutationObserver || browserGlobal.WebKitMutationObserver;
-var isNode = typeof self === 'undefined' && typeof process !== 'undefined' && ({}).toString.call(process) === '[object process]';
-
-// test for web worker but not in IE10
-var isWorker = typeof Uint8ClampedArray !== 'undefined' && typeof importScripts !== 'undefined' && typeof MessageChannel !== 'undefined';
-
-// node
-function useNextTick() {
-  // node version 0.10.x displays a deprecation warning when nextTick is used recursively
-  // see https://github.com/cujojs/when/issues/410 for details
-  return function () {
-    return process.nextTick(flush);
-  };
-}
-
-// vertx
-function useVertxTimer() {
-  return function () {
-    vertxNext(flush);
-  };
-}
-
-function useMutationObserver() {
-  var iterations = 0;
-  var observer = new BrowserMutationObserver(flush);
-  var node = document.createTextNode('');
-  observer.observe(node, { characterData: true });
-
-  return function () {
-    node.data = iterations = ++iterations % 2;
-  };
-}
-
-// web worker
-function useMessageChannel() {
-  var channel = new MessageChannel();
-  channel.port1.onmessage = flush;
-  return function () {
-    return channel.port2.postMessage(0);
-  };
-}
-
-function useSetTimeout() {
-  // Store setTimeout reference so es6-promise will be unaffected by
-  // other code modifying setTimeout (like sinon.useFakeTimers())
-  var globalSetTimeout = setTimeout;
-  return function () {
-    return globalSetTimeout(flush, 1);
-  };
-}
-
-var queue = new Array(1000);
-function flush() {
-  for (var i = 0; i < len; i += 2) {
-    var callback = queue[i];
-    var arg = queue[i + 1];
-
-    callback(arg);
-
-    queue[i] = undefined;
-    queue[i + 1] = undefined;
-  }
-
-  len = 0;
-}
-
-function attemptVertx() {
-  try {
-    var r = require;
-    var vertx = r('vertx');
-    vertxNext = vertx.runOnLoop || vertx.runOnContext;
-    return useVertxTimer();
-  } catch (e) {
-    return useSetTimeout();
-  }
-}
-
-var scheduleFlush = undefined;
-// Decide what async method to use to triggering processing of queued callbacks:
-if (isNode) {
-  scheduleFlush = useNextTick();
-} else if (BrowserMutationObserver) {
-  scheduleFlush = useMutationObserver();
-} else if (isWorker) {
-  scheduleFlush = useMessageChannel();
-} else if (browserWindow === undefined && typeof require === 'function') {
-  scheduleFlush = attemptVertx();
-} else {
-  scheduleFlush = useSetTimeout();
-}
-
-function then(onFulfillment, onRejection) {
-  var _arguments = arguments;
-
-  var parent = this;
-
-  var child = new this.constructor(noop);
-
-  if (child[PROMISE_ID] === undefined) {
-    makePromise(child);
-  }
-
-  var _state = parent._state;
-
-  if (_state) {
-    (function () {
-      var callback = _arguments[_state - 1];
-      asap(function () {
-        return invokeCallback(_state, child, callback, parent._result);
-      });
-    })();
-  } else {
-    subscribe(parent, child, onFulfillment, onRejection);
-  }
-
-  return child;
-}
-
-/**
-  `Promise.resolve` returns a promise that will become resolved with the
-  passed `value`. It is shorthand for the following:
-
-  ```javascript
-  let promise = new Promise(function(resolve, reject){
-    resolve(1);
-  });
-
-  promise.then(function(value){
-    // value === 1
-  });
-  ```
-
-  Instead of writing the above, your code now simply becomes the following:
-
-  ```javascript
-  let promise = Promise.resolve(1);
-
-  promise.then(function(value){
-    // value === 1
-  });
-  ```
-
-  @method resolve
-  @static
-  @param {Any} value value that the returned promise will be resolved with
-  Useful for tooling.
-  @return {Promise} a promise that will become fulfilled with the given
-  `value`
-*/
-function resolve(object) {
-  /*jshint validthis:true */
-  var Constructor = this;
-
-  if (object && typeof object === 'object' && object.constructor === Constructor) {
-    return object;
-  }
-
-  var promise = new Constructor(noop);
-  _resolve(promise, object);
-  return promise;
-}
-
-var PROMISE_ID = Math.random().toString(36).substring(16);
-
-function noop() {}
-
-var PENDING = void 0;
-var FULFILLED = 1;
-var REJECTED = 2;
-
-var GET_THEN_ERROR = new ErrorObject();
-
-function selfFulfillment() {
-  return new TypeError("You cannot resolve a promise with itself");
-}
-
-function cannotReturnOwn() {
-  return new TypeError('A promises callback cannot return that same promise.');
-}
-
-function getThen(promise) {
-  try {
-    return promise.then;
-  } catch (error) {
-    GET_THEN_ERROR.error = error;
-    return GET_THEN_ERROR;
-  }
-}
-
-function tryThen(then, value, fulfillmentHandler, rejectionHandler) {
-  try {
-    then.call(value, fulfillmentHandler, rejectionHandler);
-  } catch (e) {
-    return e;
-  }
-}
-
-function handleForeignThenable(promise, thenable, then) {
-  asap(function (promise) {
-    var sealed = false;
-    var error = tryThen(then, thenable, function (value) {
-      if (sealed) {
-        return;
-      }
-      sealed = true;
-      if (thenable !== value) {
-        _resolve(promise, value);
-      } else {
-        fulfill(promise, value);
-      }
-    }, function (reason) {
-      if (sealed) {
-        return;
-      }
-      sealed = true;
-
-      _reject(promise, reason);
-    }, 'Settle: ' + (promise._label || ' unknown promise'));
-
-    if (!sealed && error) {
-      sealed = true;
-      _reject(promise, error);
-    }
-  }, promise);
-}
-
-function handleOwnThenable(promise, thenable) {
-  if (thenable._state === FULFILLED) {
-    fulfill(promise, thenable._result);
-  } else if (thenable._state === REJECTED) {
-    _reject(promise, thenable._result);
-  } else {
-    subscribe(thenable, undefined, function (value) {
-      return _resolve(promise, value);
-    }, function (reason) {
-      return _reject(promise, reason);
-    });
-  }
-}
-
-function handleMaybeThenable(promise, maybeThenable, then$$) {
-  if (maybeThenable.constructor === promise.constructor && then$$ === then && maybeThenable.constructor.resolve === resolve) {
-    handleOwnThenable(promise, maybeThenable);
-  } else {
-    if (then$$ === GET_THEN_ERROR) {
-      _reject(promise, GET_THEN_ERROR.error);
-    } else if (then$$ === undefined) {
-      fulfill(promise, maybeThenable);
-    } else if (isFunction(then$$)) {
-      handleForeignThenable(promise, maybeThenable, then$$);
-    } else {
-      fulfill(promise, maybeThenable);
-    }
-  }
-}
-
-function _resolve(promise, value) {
-  if (promise === value) {
-    _reject(promise, selfFulfillment());
-  } else if (objectOrFunction(value)) {
-    handleMaybeThenable(promise, value, getThen(value));
-  } else {
-    fulfill(promise, value);
-  }
-}
-
-function publishRejection(promise) {
-  if (promise._onerror) {
-    promise._onerror(promise._result);
-  }
-
-  publish(promise);
-}
-
-function fulfill(promise, value) {
-  if (promise._state !== PENDING) {
-    return;
-  }
-
-  promise._result = value;
-  promise._state = FULFILLED;
-
-  if (promise._subscribers.length !== 0) {
-    asap(publish, promise);
-  }
-}
-
-function _reject(promise, reason) {
-  if (promise._state !== PENDING) {
-    return;
-  }
-  promise._state = REJECTED;
-  promise._result = reason;
-
-  asap(publishRejection, promise);
-}
-
-function subscribe(parent, child, onFulfillment, onRejection) {
-  var _subscribers = parent._subscribers;
-  var length = _subscribers.length;
-
-  parent._onerror = null;
-
-  _subscribers[length] = child;
-  _subscribers[length + FULFILLED] = onFulfillment;
-  _subscribers[length + REJECTED] = onRejection;
-
-  if (length === 0 && parent._state) {
-    asap(publish, parent);
-  }
-}
-
-function publish(promise) {
-  var subscribers = promise._subscribers;
-  var settled = promise._state;
-
-  if (subscribers.length === 0) {
-    return;
-  }
-
-  var child = undefined,
-      callback = undefined,
-      detail = promise._result;
-
-  for (var i = 0; i < subscribers.length; i += 3) {
-    child = subscribers[i];
-    callback = subscribers[i + settled];
-
-    if (child) {
-      invokeCallback(settled, child, callback, detail);
-    } else {
-      callback(detail);
-    }
-  }
-
-  promise._subscribers.length = 0;
-}
-
-function ErrorObject() {
-  this.error = null;
-}
-
-var TRY_CATCH_ERROR = new ErrorObject();
-
-function tryCatch(callback, detail) {
-  try {
-    return callback(detail);
-  } catch (e) {
-    TRY_CATCH_ERROR.error = e;
-    return TRY_CATCH_ERROR;
-  }
-}
-
-function invokeCallback(settled, promise, callback, detail) {
-  var hasCallback = isFunction(callback),
-      value = undefined,
-      error = undefined,
-      succeeded = undefined,
-      failed = undefined;
-
-  if (hasCallback) {
-    value = tryCatch(callback, detail);
-
-    if (value === TRY_CATCH_ERROR) {
-      failed = true;
-      error = value.error;
-      value = null;
-    } else {
-      succeeded = true;
-    }
-
-    if (promise === value) {
-      _reject(promise, cannotReturnOwn());
-      return;
-    }
-  } else {
-    value = detail;
-    succeeded = true;
-  }
-
-  if (promise._state !== PENDING) {
-    // noop
-  } else if (hasCallback && succeeded) {
-      _resolve(promise, value);
-    } else if (failed) {
-      _reject(promise, error);
-    } else if (settled === FULFILLED) {
-      fulfill(promise, value);
-    } else if (settled === REJECTED) {
-      _reject(promise, value);
-    }
-}
-
-function initializePromise(promise, resolver) {
-  try {
-    resolver(function resolvePromise(value) {
-      _resolve(promise, value);
-    }, function rejectPromise(reason) {
-      _reject(promise, reason);
-    });
-  } catch (e) {
-    _reject(promise, e);
-  }
-}
-
-var id = 0;
-function nextId() {
-  return id++;
-}
-
-function makePromise(promise) {
-  promise[PROMISE_ID] = id++;
-  promise._state = undefined;
-  promise._result = undefined;
-  promise._subscribers = [];
-}
-
-function Enumerator(Constructor, input) {
-  this._instanceConstructor = Constructor;
-  this.promise = new Constructor(noop);
-
-  if (!this.promise[PROMISE_ID]) {
-    makePromise(this.promise);
-  }
-
-  if (isArray(input)) {
-    this._input = input;
-    this.length = input.length;
-    this._remaining = input.length;
-
-    this._result = new Array(this.length);
-
-    if (this.length === 0) {
-      fulfill(this.promise, this._result);
-    } else {
-      this.length = this.length || 0;
-      this._enumerate();
-      if (this._remaining === 0) {
-        fulfill(this.promise, this._result);
-      }
-    }
-  } else {
-    _reject(this.promise, validationError());
-  }
-}
-
-function validationError() {
-  return new Error('Array Methods must be provided an Array');
-};
-
-Enumerator.prototype._enumerate = function () {
-  var length = this.length;
-  var _input = this._input;
-
-  for (var i = 0; this._state === PENDING && i < length; i++) {
-    this._eachEntry(_input[i], i);
-  }
-};
-
-Enumerator.prototype._eachEntry = function (entry, i) {
-  var c = this._instanceConstructor;
-  var resolve$$ = c.resolve;
-
-  if (resolve$$ === resolve) {
-    var _then = getThen(entry);
-
-    if (_then === then && entry._state !== PENDING) {
-      this._settledAt(entry._state, i, entry._result);
-    } else if (typeof _then !== 'function') {
-      this._remaining--;
-      this._result[i] = entry;
-    } else if (c === Promise) {
-      var promise = new c(noop);
-      handleMaybeThenable(promise, entry, _then);
-      this._willSettleAt(promise, i);
-    } else {
-      this._willSettleAt(new c(function (resolve$$) {
-        return resolve$$(entry);
-      }), i);
-    }
-  } else {
-    this._willSettleAt(resolve$$(entry), i);
-  }
-};
-
-Enumerator.prototype._settledAt = function (state, i, value) {
-  var promise = this.promise;
-
-  if (promise._state === PENDING) {
-    this._remaining--;
-
-    if (state === REJECTED) {
-      _reject(promise, value);
-    } else {
-      this._result[i] = value;
-    }
-  }
-
-  if (this._remaining === 0) {
-    fulfill(promise, this._result);
-  }
-};
-
-Enumerator.prototype._willSettleAt = function (promise, i) {
-  var enumerator = this;
-
-  subscribe(promise, undefined, function (value) {
-    return enumerator._settledAt(FULFILLED, i, value);
-  }, function (reason) {
-    return enumerator._settledAt(REJECTED, i, reason);
-  });
-};
-
-/**
-  `Promise.all` accepts an array of promises, and returns a new promise which
-  is fulfilled with an array of fulfillment values for the passed promises, or
-  rejected with the reason of the first passed promise to be rejected. It casts all
-  elements of the passed iterable to promises as it runs this algorithm.
-
-  Example:
-
-  ```javascript
-  let promise1 = resolve(1);
-  let promise2 = resolve(2);
-  let promise3 = resolve(3);
-  let promises = [ promise1, promise2, promise3 ];
-
-  Promise.all(promises).then(function(array){
-    // The array here would be [ 1, 2, 3 ];
-  });
-  ```
-
-  If any of the `promises` given to `all` are rejected, the first promise
-  that is rejected will be given as an argument to the returned promises's
-  rejection handler. For example:
-
-  Example:
-
-  ```javascript
-  let promise1 = resolve(1);
-  let promise2 = reject(new Error("2"));
-  let promise3 = reject(new Error("3"));
-  let promises = [ promise1, promise2, promise3 ];
-
-  Promise.all(promises).then(function(array){
-    // Code here never runs because there are rejected promises!
-  }, function(error) {
-    // error.message === "2"
-  });
-  ```
-
-  @method all
-  @static
-  @param {Array} entries array of promises
-  @param {String} label optional string for labeling the promise.
-  Useful for tooling.
-  @return {Promise} promise that is fulfilled when all `promises` have been
-  fulfilled, or rejected if any of them become rejected.
-  @static
-*/
-function all(entries) {
-  return new Enumerator(this, entries).promise;
-}
-
-/**
-  `Promise.race` returns a new promise which is settled in the same way as the
-  first passed promise to settle.
-
-  Example:
-
-  ```javascript
-  let promise1 = new Promise(function(resolve, reject){
-    setTimeout(function(){
-      resolve('promise 1');
-    }, 200);
-  });
-
-  let promise2 = new Promise(function(resolve, reject){
-    setTimeout(function(){
-      resolve('promise 2');
-    }, 100);
-  });
-
-  Promise.race([promise1, promise2]).then(function(result){
-    // result === 'promise 2' because it was resolved before promise1
-    // was resolved.
-  });
-  ```
-
-  `Promise.race` is deterministic in that only the state of the first
-  settled promise matters. For example, even if other promises given to the
-  `promises` array argument are resolved, but the first settled promise has
-  become rejected before the other promises became fulfilled, the returned
-  promise will become rejected:
-
-  ```javascript
-  let promise1 = new Promise(function(resolve, reject){
-    setTimeout(function(){
-      resolve('promise 1');
-    }, 200);
-  });
-
-  let promise2 = new Promise(function(resolve, reject){
-    setTimeout(function(){
-      reject(new Error('promise 2'));
-    }, 100);
-  });
-
-  Promise.race([promise1, promise2]).then(function(result){
-    // Code here never runs
-  }, function(reason){
-    // reason.message === 'promise 2' because promise 2 became rejected before
-    // promise 1 became fulfilled
-  });
-  ```
-
-  An example real-world use case is implementing timeouts:
-
-  ```javascript
-  Promise.race([ajax('foo.json'), timeout(5000)])
-  ```
-
-  @method race
-  @static
-  @param {Array} promises array of promises to observe
-  Useful for tooling.
-  @return {Promise} a promise which settles in the same way as the first passed
-  promise to settle.
-*/
-function race(entries) {
-  /*jshint validthis:true */
-  var Constructor = this;
-
-  if (!isArray(entries)) {
-    return new Constructor(function (_, reject) {
-      return reject(new TypeError('You must pass an array to race.'));
-    });
-  } else {
-    return new Constructor(function (resolve, reject) {
-      var length = entries.length;
-      for (var i = 0; i < length; i++) {
-        Constructor.resolve(entries[i]).then(resolve, reject);
-      }
-    });
-  }
-}
-
-/**
-  `Promise.reject` returns a promise rejected with the passed `reason`.
-  It is shorthand for the following:
-
-  ```javascript
-  let promise = new Promise(function(resolve, reject){
-    reject(new Error('WHOOPS'));
-  });
-
-  promise.then(function(value){
-    // Code here doesn't run because the promise is rejected!
-  }, function(reason){
-    // reason.message === 'WHOOPS'
-  });
-  ```
-
-  Instead of writing the above, your code now simply becomes the following:
-
-  ```javascript
-  let promise = Promise.reject(new Error('WHOOPS'));
-
-  promise.then(function(value){
-    // Code here doesn't run because the promise is rejected!
-  }, function(reason){
-    // reason.message === 'WHOOPS'
-  });
-  ```
-
-  @method reject
-  @static
-  @param {Any} reason value that the returned promise will be rejected with.
-  Useful for tooling.
-  @return {Promise} a promise rejected with the given `reason`.
-*/
-function reject(reason) {
-  /*jshint validthis:true */
-  var Constructor = this;
-  var promise = new Constructor(noop);
-  _reject(promise, reason);
-  return promise;
-}
-
-function needsResolver() {
-  throw new TypeError('You must pass a resolver function as the first argument to the promise constructor');
-}
-
-function needsNew() {
-  throw new TypeError("Failed to construct 'Promise': Please use the 'new' operator, this object constructor cannot be called as a function.");
-}
-
-/**
-  Promise objects represent the eventual result of an asynchronous operation. The
-  primary way of interacting with a promise is through its `then` method, which
-  registers callbacks to receive either a promise's eventual value or the reason
-  why the promise cannot be fulfilled.
-
-  Terminology
-  -----------
-
-  - `promise` is an object or function with a `then` method whose behavior conforms to this specification.
-  - `thenable` is an object or function that defines a `then` method.
-  - `value` is any legal JavaScript value (including undefined, a thenable, or a promise).
-  - `exception` is a value that is thrown using the throw statement.
-  - `reason` is a value that indicates why a promise was rejected.
-  - `settled` the final resting state of a promise, fulfilled or rejected.
-
-  A promise can be in one of three states: pending, fulfilled, or rejected.
-
-  Promises that are fulfilled have a fulfillment value and are in the fulfilled
-  state.  Promises that are rejected have a rejection reason and are in the
-  rejected state.  A fulfillment value is never a thenable.
-
-  Promises can also be said to *resolve* a value.  If this value is also a
-  promise, then the original promise's settled state will match the value's
-  settled state.  So a promise that *resolves* a promise that rejects will
-  itself reject, and a promise that *resolves* a promise that fulfills will
-  itself fulfill.
-
-
-  Basic Usage:
-  ------------
-
-  ```js
-  let promise = new Promise(function(resolve, reject) {
-    // on success
-    resolve(value);
-
-    // on failure
-    reject(reason);
-  });
-
-  promise.then(function(value) {
-    // on fulfillment
-  }, function(reason) {
-    // on rejection
-  });
-  ```
-
-  Advanced Usage:
-  ---------------
-
-  Promises shine when abstracting away asynchronous interactions such as
-  `XMLHttpRequest`s.
-
-  ```js
-  function getJSON(url) {
-    return new Promise(function(resolve, reject){
-      let xhr = new XMLHttpRequest();
-
-      xhr.open('GET', url);
-      xhr.onreadystatechange = handler;
-      xhr.responseType = 'json';
-      xhr.setRequestHeader('Accept', 'application/json');
-      xhr.send();
-
-      function handler() {
-        if (this.readyState === this.DONE) {
-          if (this.status === 200) {
-            resolve(this.response);
-          } else {
-            reject(new Error('getJSON: `' + url + '` failed with status: [' + this.status + ']'));
-          }
-        }
-      };
-    });
-  }
-
-  getJSON('/posts.json').then(function(json) {
-    // on fulfillment
-  }, function(reason) {
-    // on rejection
-  });
-  ```
-
-  Unlike callbacks, promises are great composable primitives.
-
-  ```js
-  Promise.all([
-    getJSON('/posts'),
-    getJSON('/comments')
-  ]).then(function(values){
-    values[0] // => postsJSON
-    values[1] // => commentsJSON
-
-    return values;
-  });
-  ```
-
-  @class Promise
-  @param {function} resolver
-  Useful for tooling.
-  @constructor
-*/
-function Promise(resolver) {
-  this[PROMISE_ID] = nextId();
-  this._result = this._state = undefined;
-  this._subscribers = [];
-
-  if (noop !== resolver) {
-    typeof resolver !== 'function' && needsResolver();
-    this instanceof Promise ? initializePromise(this, resolver) : needsNew();
-  }
-}
-
-Promise.all = all;
-Promise.race = race;
-Promise.resolve = resolve;
-Promise.reject = reject;
-Promise._setScheduler = setScheduler;
-Promise._setAsap = setAsap;
-Promise._asap = asap;
-
-Promise.prototype = {
-  constructor: Promise,
-
-  /**
-    The primary way of interacting with a promise is through its `then` method,
-    which registers callbacks to receive either a promise's eventual value or the
-    reason why the promise cannot be fulfilled.
-  
-    ```js
-    findUser().then(function(user){
-      // user is available
-    }, function(reason){
-      // user is unavailable, and you are given the reason why
-    });
-    ```
-  
-    Chaining
-    --------
-  
-    The return value of `then` is itself a promise.  This second, 'downstream'
-    promise is resolved with the return value of the first promise's fulfillment
-    or rejection handler, or rejected if the handler throws an exception.
-  
-    ```js
-    findUser().then(function (user) {
-      return user.name;
-    }, function (reason) {
-      return 'default name';
-    }).then(function (userName) {
-      // If `findUser` fulfilled, `userName` will be the user's name, otherwise it
-      // will be `'default name'`
-    });
-  
-    findUser().then(function (user) {
-      throw new Error('Found user, but still unhappy');
-    }, function (reason) {
-      throw new Error('`findUser` rejected and we're unhappy');
-    }).then(function (value) {
-      // never reached
-    }, function (reason) {
-      // if `findUser` fulfilled, `reason` will be 'Found user, but still unhappy'.
-      // If `findUser` rejected, `reason` will be '`findUser` rejected and we're unhappy'.
-    });
-    ```
-    If the downstream promise does not specify a rejection handler, rejection reasons will be propagated further downstream.
-  
-    ```js
-    findUser().then(function (user) {
-      throw new PedagogicalException('Upstream error');
-    }).then(function (value) {
-      // never reached
-    }).then(function (value) {
-      // never reached
-    }, function (reason) {
-      // The `PedgagocialException` is propagated all the way down to here
-    });
-    ```
-  
-    Assimilation
-    ------------
-  
-    Sometimes the value you want to propagate to a downstream promise can only be
-    retrieved asynchronously. This can be achieved by returning a promise in the
-    fulfillment or rejection handler. The downstream promise will then be pending
-    until the returned promise is settled. This is called *assimilation*.
-  
-    ```js
-    findUser().then(function (user) {
-      return findCommentsByAuthor(user);
-    }).then(function (comments) {
-      // The user's comments are now available
-    });
-    ```
-  
-    If the assimliated promise rejects, then the downstream promise will also reject.
-  
-    ```js
-    findUser().then(function (user) {
-      return findCommentsByAuthor(user);
-    }).then(function (comments) {
-      // If `findCommentsByAuthor` fulfills, we'll have the value here
-    }, function (reason) {
-      // If `findCommentsByAuthor` rejects, we'll have the reason here
-    });
-    ```
-  
-    Simple Example
-    --------------
-  
-    Synchronous Example
-  
-    ```javascript
-    let result;
-  
-    try {
-      result = findResult();
-      // success
-    } catch(reason) {
-      // failure
-    }
-    ```
-  
-    Errback Example
-  
-    ```js
-    findResult(function(result, err){
-      if (err) {
-        // failure
-      } else {
-        // success
-      }
-    });
-    ```
-  
-    Promise Example;
-  
-    ```javascript
-    findResult().then(function(result){
-      // success
-    }, function(reason){
-      // failure
-    });
-    ```
-  
-    Advanced Example
-    --------------
-  
-    Synchronous Example
-  
-    ```javascript
-    let author, books;
-  
-    try {
-      author = findAuthor();
-      books  = findBooksByAuthor(author);
-      // success
-    } catch(reason) {
-      // failure
-    }
-    ```
-  
-    Errback Example
-  
-    ```js
-  
-    function foundBooks(books) {
-  
-    }
-  
-    function failure(reason) {
-  
-    }
-  
-    findAuthor(function(author, err){
-      if (err) {
-        failure(err);
-        // failure
-      } else {
-        try {
-          findBoooksByAuthor(author, function(books, err) {
-            if (err) {
-              failure(err);
-            } else {
-              try {
-                foundBooks(books);
-              } catch(reason) {
-                failure(reason);
-              }
-            }
-          });
-        } catch(error) {
-          failure(err);
-        }
-        // success
-      }
-    });
-    ```
-  
-    Promise Example;
-  
-    ```javascript
-    findAuthor().
-      then(findBooksByAuthor).
-      then(function(books){
-        // found books
-    }).catch(function(reason){
-      // something went wrong
-    });
-    ```
-  
-    @method then
-    @param {Function} onFulfilled
-    @param {Function} onRejected
-    Useful for tooling.
-    @return {Promise}
-  */
-  then: then,
-
-  /**
-    `catch` is simply sugar for `then(undefined, onRejection)` which makes it the same
-    as the catch block of a try/catch statement.
-  
-    ```js
-    function findAuthor(){
-      throw new Error('couldn't find that author');
-    }
-  
-    // synchronous
-    try {
-      findAuthor();
-    } catch(reason) {
-      // something went wrong
-    }
-  
-    // async with promises
-    findAuthor().catch(function(reason){
-      // something went wrong
-    });
-    ```
-  
-    @method catch
-    @param {Function} onRejection
-    Useful for tooling.
-    @return {Promise}
-  */
-  'catch': function _catch(onRejection) {
-    return this.then(null, onRejection);
-  }
-};
-
-function polyfill() {
-    var local = undefined;
-
-    if (typeof global !== 'undefined') {
-        local = global;
-    } else if (typeof self !== 'undefined') {
-        local = self;
-    } else {
-        try {
-            local = Function('return this')();
-        } catch (e) {
-            throw new Error('polyfill failed because global object is unavailable in this environment');
-        }
-    }
-
-    var P = local.Promise;
-
-    if (P) {
-        var promiseToString = null;
-        try {
-            promiseToString = Object.prototype.toString.call(P.resolve());
-        } catch (e) {
-            // silently ignored
-        }
-
-        if (promiseToString === '[object Promise]' && !P.cast) {
-            return;
-        }
-    }
-
-    local.Promise = Promise;
-}
-
-polyfill();
-// Strange compat..
-Promise.polyfill = polyfill;
-Promise.Promise = Promise;
-
-return Promise;
-
-})));
-
-}).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"_process":103}],3:[function(require,module,exports){
-var request = require('superagent');
-var Promise = require('es6-promise').Promise;
-var getBaseURL = require('./get-base-url');
-var httpHeaderSafeJson = require('./http-header-safe-json');
-
-var buildCustomError;
-var downloadRequest;
-var nodeBinaryParser;
-
-// Register a handler that will instruct superagent how to parse the response
-request.parse['application/octect-stream'] = function (obj) {
-  return obj;
-};
-
-// This doesn't match what was spec'd in paper doc yet
-buildCustomError = function (error, response) {
-  return {
-    status: error.status,
-    error: (response ? response.text : null) || error.toString(),
-    response: response
-  };
-};
-
-nodeBinaryParser = function (res, done) {
-  res.text = '';
-  res.setEncoding('binary');
-  res.on('data', function (chunk) { res.text += chunk; });
-  res.on('end', function () {
-    done();
-  });
-};
-
-downloadRequest = function (path, args, auth, host, accessToken, selectUser) {
-  if (auth !== 'user') {
-    throw new Error('Unexpected auth type: ' + auth);
-  }
-
-  var promiseFunction = function (resolve, reject) {
-    var apiRequest;
-
-    function success(data) {
-      if (resolve) {
-        resolve(data);
-      }
-    }
-
-    function failure(error) {
-      if (reject) {
-        reject(error);
-      }
-    }
-
-    function responseHandler(error, response) {
-      var data;
-      if (error) {
-        failure(buildCustomError(error, response));
-      } else {
-        // In the browser, the file is passed as a blob and in node the file is
-        // passed as a string of binary data.
-        data = JSON.parse(response.headers['dropbox-api-result']);
-        if (response.xhr) {
-          data.fileBlob = response.xhr.response;
-        } else {
-          data.fileBinary = response.res.text;
-        }
-        success(data);
-      }
-    }
-
-    apiRequest = request.post(getBaseURL(host) + path)
-      .set('Authorization', 'Bearer ' + accessToken)
-      .set('Dropbox-API-Arg', httpHeaderSafeJson(args))
-      .on('request', function () {
-        if (this.xhr) {
-          this.xhr.responseType = 'blob';
-        }
-      });
-
-    if (selectUser) {
-      apiRequest = apiRequest.set('Dropbox-API-Select-User', selectUser);
-    }
-
-    // Apply the node binary parser to the response if executing in node
-    if (typeof window === 'undefined') {
-      apiRequest
-        .buffer(true)
-        .parse(nodeBinaryParser)
-        .end(responseHandler);
-    } else {
-      apiRequest.end(responseHandler);
-    }
-  };
-
-  return new Promise(promiseFunction);
-};
-
-module.exports = downloadRequest;
-
-},{"./get-base-url":6,"./http-header-safe-json":7,"es6-promise":2,"superagent":108}],4:[function(require,module,exports){
-var REQUEST_CONSTANTS = require('./request-constants');
-var DropboxBase;
-
-// Polyfill Object.assign() for older browsers
-require('./object-assign-polyfill');
-
-/**
- * @private
- * @class DropboxBase
- * @classdesc The main Dropbox SDK class. This contains the methods that are
- * shared between Dropbox and DropboxTeam classes. It is marked as private so
- * that it doesn't show up in the docs because it is never used directly.
- * @arg {Object} options
- * @arg {String} [options.accessToken] - An access token for making authenticated
- * requests.
- * @arg {String} [options.clientId] - The client id fo ryour app. Used to create
- * authentication URL.
- * @arg {Number} [options.selectUser] - User is the team access token would like
- * to act as.
- */
-DropboxBase = function (options) {
-  options = options || {};
-  this.accessToken = options.accessToken;
-  this.clientId = options.clientId;
-  this.selectUser = options.selectUser;
-};
-
-/**
- * Set the access token used to authenticate requests to the API.
- * @arg {String} accessToken - An access token
- * @returns {undefined}
- */
-DropboxBase.prototype.setAccessToken = function (accessToken) {
-  this.accessToken = accessToken;
-};
-
-/**
- * Get the access token
- * @returns {String} Access token
- */
-DropboxBase.prototype.getAccessToken = function () {
-  return this.accessToken;
-};
-
-/**
- * Set the client id, which is used to help gain an access token.
- * @arg {String} clientId - Your apps client id
- * @returns {undefined}
- */
-DropboxBase.prototype.setClientId = function (clientId) {
-  this.clientId = clientId;
-};
-
-/**
- * Get the client id
- * @returns {String} Client id
- */
-DropboxBase.prototype.getClientId = function () {
-  return this.clientId;
-};
-
-/**
- * Get a URL that can be used to authenticate users for the Dropbox API.
- * @arg {String} redirectUri - A URL to redirect the user to after
- * authenticating. This must be added to your app through the admin interface.
- * @arg {String} [state] - State that will be returned in the redirect URL to help
- * prevent cross site scripting attacks.
- * @returns {String} Url to send user to for Dropbox API authentication
- */
-DropboxBase.prototype.getAuthenticationUrl = function (redirectUri, state) {
-  var AUTH_BASE_URL = 'https://www.dropbox.com/oauth2/authorize';
-  var clientId = this.getClientId();
-  var authUrl;
-  if (!clientId) {
-    throw new Error('A client id is required. You can set the client id using .setClientId().');
-  }
-  if (!redirectUri) {
-    throw new Error('A redirect uri is required.');
-  }
-
-  authUrl = AUTH_BASE_URL + '?response_type=token&client_id=' + clientId;
-  if (redirectUri) {
-    authUrl = authUrl + '&redirect_uri=' + redirectUri;
-  }
-  if (state) {
-    authUrl = authUrl + '&state=' + state;
-  }
-  return authUrl;
-};
-
-/**
- * Called when the authentication succeed
- * @callback successCallback
- * @param {string} access_token The application's access token
- */
-
-/**
- * Called when the authentication failed.
- * @callback errorCallback
- */
-
-/**
- * An authentication process that works with cordova applications.
- * @param {successCallback} successCallback
- * @param {errorCallback} errorCallback 
- */
-DropboxBase.prototype.authenticateWithCordova = function (successCallback, errorCallback)
-{
-  var redirect_url = 'https://www.dropbox.com/1/oauth2/redirect_receiver';
-  var url = this.getAuthenticationUrl(redirect_url);
-  var browser = window.open(url, '_blank');
-  var removed = false;
-
-  var onLoadError = function(event) {
-    // Try to avoid a browser crash on browser.close().
-    window.setTimeout(function() { browser.close() }, 10);
-    errorCallback();
-  }
-
-  var onLoadStop = function(event) {
-    var error_label = '&error=';
-    var error_index = event.url.indexOf(error_label);
-
-    if (error_index > -1) {
-      // Try to avoid a browser crash on browser.close().
-      window.setTimeout(function() { browser.close() }, 10);
-      errorCallback();
-    } else { 
-      var access_token_label = '#access_token=';
-      var access_token_index = event.url.indexOf(access_token_label);
-      var token_type_index = event.url.indexOf('&token_type=');
-      if (access_token_index > -1) {
-        access_token_index += access_token_label.length;
-        // Try to avoid a browser crash on browser.close().
-        window.setTimeout(function() { browser.close() }, 10);
-
-        var access_token = event.url.substring(access_token_index, token_type_index);
-        successCallback(access_token);
-      }
-    }
-  };
-
-  var onExit = function(event) {
-    if(removed) {
-      return 
-    }
-    browser.removeEventListener('loaderror', onLoadError);
-    browser.removeEventListener('loadstop', onLoadStop);
-    browser.removeEventListener('exit', onExit);
-    removed = true
-  };
-  
-  browser.addEventListener('loaderror', onLoadError);
-  browser.addEventListener('loadstop', onLoadStop);
-  browser.addEventListener('exit', onExit)
-}
-
-DropboxBase.prototype.request = function (path, args, auth, host, style) {
-  var request = null;
-  switch (style) {
-    case REQUEST_CONSTANTS.RPC:
-      request = this.getRpcRequest();
-      break;
-    case REQUEST_CONSTANTS.DOWNLOAD:
-      request = this.getDownloadRequest();
-      break;
-    case REQUEST_CONSTANTS.UPLOAD:
-      request = this.getUploadRequest();
-      break;
-    default:
-      throw new Error('Invalid request style: ' + style);
-  }
-
-  return request(path, args, auth, host, this.getAccessToken(), this.selectUser);
-};
-
-DropboxBase.prototype.setRpcRequest = function (newRpcRequest) {
-  DropboxBase.prototype.rpcRequest = newRpcRequest;
-};
-
-DropboxBase.prototype.getRpcRequest = function () {
-  if (DropboxBase.prototype.rpcRequest === undefined) {
-    DropboxBase.prototype.rpcRequest = require('./rpc-request');
-  }
-
-  return DropboxBase.prototype.rpcRequest;
-};
-
-DropboxBase.prototype.setDownloadRequest = function (newDownloadRequest) {
-  DropboxBase.prototype.downloadRequest = newDownloadRequest;
-};
-
-DropboxBase.prototype.getDownloadRequest = function () {
-  if (DropboxBase.prototype.downloadRequest === undefined) {
-    DropboxBase.prototype.downloadRequest = require('./download-request');
-  }
-
-  return DropboxBase.prototype.downloadRequest;
-};
-
-DropboxBase.prototype.setUploadRequest = function (newUploadRequest) {
-  DropboxBase.prototype.uploadRequest = newUploadRequest;
-};
-
-DropboxBase.prototype.getUploadRequest = function () {
-  if (DropboxBase.prototype.uploadRequest === undefined) {
-    DropboxBase.prototype.uploadRequest = require('./upload-request');
-  }
-
-  return DropboxBase.prototype.uploadRequest;
-};
-
-module.exports = DropboxBase;
-
-},{"./download-request":3,"./object-assign-polyfill":9,"./request-constants":10,"./rpc-request":12,"./upload-request":13}],5:[function(require,module,exports){
-var DropboxBase = require('./dropbox-base');
-var routes = require('./routes');
-var Dropbox;
-
-/**
- * @class Dropbox
- * @extends DropboxBase
- * @classdesc The Dropbox SDK class that provides methods to read, write and
- * create files or folders in a user's Dropbox.
- * @arg {Object} options
- * @arg {String} [options.accessToken] - An access token for making authenticated
- * requests.
- * @arg {String} [options.clientId] - The client id for your app. Used to create
- * authentication URL.
- * @arg {String} [options.selectUser] - Select user is only used by DropboxTeam.
- * It specifies which user the team access token should be acting as.
- */
-Dropbox = function (options) {
-  DropboxBase.call(this, options);
-};
-
-Dropbox.prototype = Object.create(DropboxBase.prototype);
-
-Dropbox.prototype.constructor = Dropbox;
-
-// Add the user endpoint methods to the prototype
-Dropbox.prototype = Object.assign(Dropbox.prototype, routes);
-
-Dropbox.prototype.filesGetSharedLinkFile = function (arg) {
-  return this.request('sharing/get_shared_link_file', arg, 'api', 'download');
-};
-
-module.exports = Dropbox;
-
-},{"./dropbox-base":4,"./routes":11}],6:[function(require,module,exports){
-function getBaseURL(host) {
-  return 'https://' + host + '.dropboxapi.com/2/';
-}
-
-module.exports = getBaseURL;
-
-},{}],7:[function(require,module,exports){
-// source https://www.dropboxforum.com/t5/API-support/HTTP-header-quot-Dropbox-API-Arg-quot-could-not-decode-input-as/m-p/173823/highlight/true#M6786
-var charsToEncode = /[\u007f-\uffff]/g;
-
-function httpHeaderSafeJson(args) {
-  return JSON.stringify(args).replace(charsToEncode, function (c) {
-    return '\\u' + ('000' + c.charCodeAt(0).toString(16)).slice(-4);
-  });
-}
-
-module.exports = httpHeaderSafeJson;
-
-},{}],8:[function(require,module,exports){
-var Dropbox = require('./dropbox');
-
-module.exports = Dropbox;
-
-},{"./dropbox":5}],9:[function(require,module,exports){
-// Polyfill object.assign for legacy browsers
-// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/assign
-if (typeof Object.assign !== 'function') {
-  (function () {
-    Object.assign = function (target) {
-      'use strict';
-      var output;
-      var index;
-      var source;
-      var nextKey;
-      if (target === undefined || target === null) {
-        throw new TypeError('Cannot convert undefined or null to object');
-      }
-
-      output = Object(target);
-      for (index = 1; index < arguments.length; index++) {
-        source = arguments[index];
-        if (source !== undefined && source !== null) {
-          for (nextKey in source) {
-            if (source.hasOwnProperty(nextKey)) {
-              output[nextKey] = source[nextKey];
-            }
-          }
-        }
-      }
-      return output;
-    };
-  }());
-}
-
-},{}],10:[function(require,module,exports){
-var REQUEST_CONSTANTS = {
-  RPC: 'rpc',
-  DOWNLOAD: 'download',
-  UPLOAD: 'upload'
-};
-
-module.exports = REQUEST_CONSTANTS;
-
-},{}],11:[function(require,module,exports){
-// Auto-generated by Stone, do not modify.
-var routes = {};
-
-/**
- * Creates an OAuth 2.0 access token from the supplied OAuth 1.0 access token.
- * @function Dropbox#authTokenFromOauth1
- * @arg {AuthTokenFromOAuth1Arg} arg - The request parameters.
- * @returns {Promise.<AuthTokenFromOAuth1Result, Error.<AuthTokenFromOAuth1Error>>}
- */
-routes.authTokenFromOauth1 = function (arg) {
-  return this.request('auth/token/from_oauth1', arg, 'app', 'api', 'rpc');
-};
-
-/**
- * Disables the access token used to authenticate the call.
- * @function Dropbox#authTokenRevoke
- * @arg {void} arg - The request parameters.
- * @returns {Promise.<void, Error.<void>>}
- */
-routes.authTokenRevoke = function (arg) {
-  return this.request('auth/token/revoke', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns the metadata for a file or folder. This is an alpha endpoint
- * compatible with the properties API. Note: Metadata for the root folder is
- * unsupported.
- * @function Dropbox#filesAlphaGetMetadata
- * @arg {FilesAlphaGetMetadataArg} arg - The request parameters.
- * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesAlphaGetMetadataError>>}
- */
-routes.filesAlphaGetMetadata = function (arg) {
-  return this.request('files/alpha/get_metadata', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Create a new file with the contents provided in the request. Note that this
- * endpoint is part of the properties API alpha and is slightly different from
- * upload. Do not use this to upload a file larger than 150 MB. Instead, create
- * an upload session with upload_session/start.
- * @function Dropbox#filesAlphaUpload
- * @arg {FilesCommitInfoWithProperties} arg - The request parameters.
- * @returns {Promise.<FilesFileMetadata, Error.<FilesUploadErrorWithProperties>>}
- */
-routes.filesAlphaUpload = function (arg) {
-  return this.request('files/alpha/upload', arg, 'user', 'content', 'upload');
-};
-
-/**
- * Copy a file or folder to a different location in the user's Dropbox. If the
- * source path is a folder all its contents will be copied.
- * @function Dropbox#filesCopy
- * @arg {FilesRelocationArg} arg - The request parameters.
- * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesRelocationError>>}
- */
-routes.filesCopy = function (arg) {
-  return this.request('files/copy', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Copy multiple files or folders to different locations at once in the user's
- * Dropbox. If RelocationBatchArg.allow_shared_folder is false, this route is
- * atomic. If on entry failes, the whole transaction will abort. If
- * RelocationBatchArg.allow_shared_folder is true, not atomicity is guaranteed,
- * but you will be able to copy the contents of shared folders to new locations.
- * This route will return job ID immediately and do the async copy job in
- * background. Please use copy_batch/check to check the job status.
- * @function Dropbox#filesCopyBatch
- * @arg {FilesRelocationBatchArg} arg - The request parameters.
- * @returns {Promise.<FilesRelocationBatchLaunch, Error.<void>>}
- */
-routes.filesCopyBatch = function (arg) {
-  return this.request('files/copy_batch', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns the status of an asynchronous job for copy_batch. If success, it
- * returns list of results for each entry.
- * @function Dropbox#filesCopyBatchCheck
- * @arg {AsyncPollArg} arg - The request parameters.
- * @returns {Promise.<FilesRelocationBatchJobStatus, Error.<AsyncPollError>>}
- */
-routes.filesCopyBatchCheck = function (arg) {
-  return this.request('files/copy_batch/check', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get a copy reference to a file or folder. This reference string can be used
- * to save that file or folder to another user's Dropbox by passing it to
- * copy_reference/save.
- * @function Dropbox#filesCopyReferenceGet
- * @arg {FilesGetCopyReferenceArg} arg - The request parameters.
- * @returns {Promise.<FilesGetCopyReferenceResult, Error.<FilesGetCopyReferenceError>>}
- */
-routes.filesCopyReferenceGet = function (arg) {
-  return this.request('files/copy_reference/get', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Save a copy reference returned by copy_reference/get to the user's Dropbox.
- * @function Dropbox#filesCopyReferenceSave
- * @arg {FilesSaveCopyReferenceArg} arg - The request parameters.
- * @returns {Promise.<FilesSaveCopyReferenceResult, Error.<FilesSaveCopyReferenceError>>}
- */
-routes.filesCopyReferenceSave = function (arg) {
-  return this.request('files/copy_reference/save', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Create a folder at a given path.
- * @function Dropbox#filesCreateFolder
- * @arg {FilesCreateFolderArg} arg - The request parameters.
- * @returns {Promise.<FilesFolderMetadata, Error.<FilesCreateFolderError>>}
- */
-routes.filesCreateFolder = function (arg) {
-  return this.request('files/create_folder', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Delete the file or folder at a given path. If the path is a folder, all its
- * contents will be deleted too. A successful response indicates that the file
- * or folder was deleted. The returned metadata will be the corresponding
- * FileMetadata or FolderMetadata for the item at time of deletion, and not a
- * DeletedMetadata object.
- * @function Dropbox#filesDelete
- * @arg {FilesDeleteArg} arg - The request parameters.
- * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesDeleteError>>}
- */
-routes.filesDelete = function (arg) {
-  return this.request('files/delete', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Delete multiple files/folders at once. This route is asynchronous, which
- * returns a job ID immediately and runs the delete batch asynchronously. Use
- * delete_batch/check to check the job status.
- * @function Dropbox#filesDeleteBatch
- * @arg {FilesDeleteBatchArg} arg - The request parameters.
- * @returns {Promise.<FilesDeleteBatchLaunch, Error.<void>>}
- */
-routes.filesDeleteBatch = function (arg) {
-  return this.request('files/delete_batch', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns the status of an asynchronous job for delete_batch. If success, it
- * returns list of result for each entry.
- * @function Dropbox#filesDeleteBatchCheck
- * @arg {AsyncPollArg} arg - The request parameters.
- * @returns {Promise.<FilesDeleteBatchJobStatus, Error.<AsyncPollError>>}
- */
-routes.filesDeleteBatchCheck = function (arg) {
-  return this.request('files/delete_batch/check', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Download a file from a user's Dropbox.
- * @function Dropbox#filesDownload
- * @arg {FilesDownloadArg} arg - The request parameters.
- * @returns {Promise.<FilesFileMetadata, Error.<FilesDownloadError>>}
- */
-routes.filesDownload = function (arg) {
-  return this.request('files/download', arg, 'user', 'content', 'download');
-};
-
-/**
- * Returns the metadata for a file or folder. Note: Metadata for the root folder
- * is unsupported.
- * @function Dropbox#filesGetMetadata
- * @arg {FilesGetMetadataArg} arg - The request parameters.
- * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesGetMetadataError>>}
- */
-routes.filesGetMetadata = function (arg) {
-  return this.request('files/get_metadata', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get a preview for a file. Currently, PDF previews are generated for files
- * with the following extensions: .ai, .doc, .docm, .docx, .eps, .odp, .odt,
- * .pps, .ppsm, .ppsx, .ppt, .pptm, .pptx, .rtf. HTML previews are generated for
- * files with the following extensions: .csv, .ods, .xls, .xlsm, .xlsx. Other
- * formats will return an unsupported extension error.
- * @function Dropbox#filesGetPreview
- * @arg {FilesPreviewArg} arg - The request parameters.
- * @returns {Promise.<FilesFileMetadata, Error.<FilesPreviewError>>}
- */
-routes.filesGetPreview = function (arg) {
-  return this.request('files/get_preview', arg, 'user', 'content', 'download');
-};
-
-/**
- * Get a temporary link to stream content of a file. This link will expire in
- * four hours and afterwards you will get 410 Gone. Content-Type of the link is
- * determined automatically by the file's mime type.
- * @function Dropbox#filesGetTemporaryLink
- * @arg {FilesGetTemporaryLinkArg} arg - The request parameters.
- * @returns {Promise.<FilesGetTemporaryLinkResult, Error.<FilesGetTemporaryLinkError>>}
- */
-routes.filesGetTemporaryLink = function (arg) {
-  return this.request('files/get_temporary_link', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get a thumbnail for an image. This method currently supports files with the
- * following file extensions: jpg, jpeg, png, tiff, tif, gif and bmp. Photos
- * that are larger than 20MB in size won't be converted to a thumbnail.
- * @function Dropbox#filesGetThumbnail
- * @arg {FilesThumbnailArg} arg - The request parameters.
- * @returns {Promise.<FilesFileMetadata, Error.<FilesThumbnailError>>}
- */
-routes.filesGetThumbnail = function (arg) {
-  return this.request('files/get_thumbnail', arg, 'user', 'content', 'download');
-};
-
-/**
- * Starts returning the contents of a folder. If the result's
- * ListFolderResult.has_more field is true, call list_folder/continue with the
- * returned ListFolderResult.cursor to retrieve more entries. If you're using
- * ListFolderArg.recursive set to true to keep a local cache of the contents of
- * a Dropbox account, iterate through each entry in order and process them as
- * follows to keep your local state in sync: For each FileMetadata, store the
- * new entry at the given path in your local state. If the required parent
- * folders don't exist yet, create them. If there's already something else at
- * the given path, replace it and remove all its children. For each
- * FolderMetadata, store the new entry at the given path in your local state. If
- * the required parent folders don't exist yet, create them. If there's already
- * something else at the given path, replace it but leave the children as they
- * are. Check the new entry's FolderSharingInfo.read_only and set all its
- * children's read-only statuses to match. For each DeletedMetadata, if your
- * local state has something at the given path, remove it and all its children.
- * If there's nothing at the given path, ignore this entry. Note:
- * auth.RateLimitError may be returned if multiple list_folder or
- * list_folder/continue calls with same parameters are made simultaneously by
- * same API app for same user. If your app implements retry logic, please hold
- * off the retry until the previous request finishes.
- * @function Dropbox#filesListFolder
- * @arg {FilesListFolderArg} arg - The request parameters.
- * @returns {Promise.<FilesListFolderResult, Error.<FilesListFolderError>>}
- */
-routes.filesListFolder = function (arg) {
-  return this.request('files/list_folder', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Once a cursor has been retrieved from list_folder, use this to paginate
- * through all files and retrieve updates to the folder, following the same
- * rules as documented for list_folder.
- * @function Dropbox#filesListFolderContinue
- * @arg {FilesListFolderContinueArg} arg - The request parameters.
- * @returns {Promise.<FilesListFolderResult, Error.<FilesListFolderContinueError>>}
- */
-routes.filesListFolderContinue = function (arg) {
-  return this.request('files/list_folder/continue', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * A way to quickly get a cursor for the folder's state. Unlike list_folder,
- * list_folder/get_latest_cursor doesn't return any entries. This endpoint is
- * for app which only needs to know about new files and modifications and
- * doesn't need to know about files that already exist in Dropbox.
- * @function Dropbox#filesListFolderGetLatestCursor
- * @arg {FilesListFolderArg} arg - The request parameters.
- * @returns {Promise.<FilesListFolderGetLatestCursorResult, Error.<FilesListFolderError>>}
- */
-routes.filesListFolderGetLatestCursor = function (arg) {
-  return this.request('files/list_folder/get_latest_cursor', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * A longpoll endpoint to wait for changes on an account. In conjunction with
- * list_folder/continue, this call gives you a low-latency way to monitor an
- * account for file changes. The connection will block until there are changes
- * available or a timeout occurs. This endpoint is useful mostly for client-side
- * apps. If you're looking for server-side notifications, check out our webhooks
- * documentation https://www.dropbox.com/developers/reference/webhooks.
- * @function Dropbox#filesListFolderLongpoll
- * @arg {FilesListFolderLongpollArg} arg - The request parameters.
- * @returns {Promise.<FilesListFolderLongpollResult, Error.<FilesListFolderLongpollError>>}
- */
-routes.filesListFolderLongpoll = function (arg) {
-  return this.request('files/list_folder/longpoll', arg, 'noauth', 'notify', 'rpc');
-};
-
-/**
- * Return revisions of a file.
- * @function Dropbox#filesListRevisions
- * @arg {FilesListRevisionsArg} arg - The request parameters.
- * @returns {Promise.<FilesListRevisionsResult, Error.<FilesListRevisionsError>>}
- */
-routes.filesListRevisions = function (arg) {
-  return this.request('files/list_revisions', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Move a file or folder to a different location in the user's Dropbox. If the
- * source path is a folder all its contents will be moved.
- * @function Dropbox#filesMove
- * @arg {FilesRelocationArg} arg - The request parameters.
- * @returns {Promise.<(FilesFileMetadata|FilesFolderMetadata|FilesDeletedMetadata), Error.<FilesRelocationError>>}
- */
-routes.filesMove = function (arg) {
-  return this.request('files/move', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Move multiple files or folders to different locations at once in the user's
- * Dropbox. This route is 'all or nothing', which means if one entry fails, the
- * whole transaction will abort. This route will return job ID immediately and
- * do the async moving job in background. Please use move_batch/check to check
- * the job status.
- * @function Dropbox#filesMoveBatch
- * @arg {FilesRelocationBatchArg} arg - The request parameters.
- * @returns {Promise.<FilesRelocationBatchLaunch, Error.<void>>}
- */
-routes.filesMoveBatch = function (arg) {
-  return this.request('files/move_batch', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns the status of an asynchronous job for move_batch. If success, it
- * returns list of results for each entry.
- * @function Dropbox#filesMoveBatchCheck
- * @arg {AsyncPollArg} arg - The request parameters.
- * @returns {Promise.<FilesRelocationBatchJobStatus, Error.<AsyncPollError>>}
- */
-routes.filesMoveBatchCheck = function (arg) {
-  return this.request('files/move_batch/check', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Permanently delete the file or folder at a given path (see
- * https://www.dropbox.com/en/help/40). Note: This endpoint is only available
- * for Dropbox Business apps.
- * @function Dropbox#filesPermanentlyDelete
- * @arg {FilesDeleteArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<FilesDeleteError>>}
- */
-routes.filesPermanentlyDelete = function (arg) {
-  return this.request('files/permanently_delete', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Add custom properties to a file using a filled property template. See
- * properties/template/add to create new property templates.
- * @function Dropbox#filesPropertiesAdd
- * @arg {FilesPropertyGroupWithPath} arg - The request parameters.
- * @returns {Promise.<void, Error.<FilesAddPropertiesError>>}
- */
-routes.filesPropertiesAdd = function (arg) {
-  return this.request('files/properties/add', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Overwrite custom properties from a specified template associated with a file.
- * @function Dropbox#filesPropertiesOverwrite
- * @arg {FilesPropertyGroupWithPath} arg - The request parameters.
- * @returns {Promise.<void, Error.<FilesInvalidPropertyGroupError>>}
- */
-routes.filesPropertiesOverwrite = function (arg) {
-  return this.request('files/properties/overwrite', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Remove all custom properties from a specified template associated with a
- * file. To remove specific property key value pairs, see properties/update. To
- * update a property template, see properties/template/update. Property
- * templates can't be removed once created.
- * @function Dropbox#filesPropertiesRemove
- * @arg {FilesRemovePropertiesArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<FilesRemovePropertiesError>>}
- */
-routes.filesPropertiesRemove = function (arg) {
-  return this.request('files/properties/remove', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get the schema for a specified template.
- * @function Dropbox#filesPropertiesTemplateGet
- * @arg {PropertiesGetPropertyTemplateArg} arg - The request parameters.
- * @returns {Promise.<PropertiesGetPropertyTemplateResult, Error.<PropertiesPropertyTemplateError>>}
- */
-routes.filesPropertiesTemplateGet = function (arg) {
-  return this.request('files/properties/template/get', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get the property template identifiers for a user. To get the schema of each
- * template use properties/template/get.
- * @function Dropbox#filesPropertiesTemplateList
- * @arg {void} arg - The request parameters.
- * @returns {Promise.<PropertiesListPropertyTemplateIds, Error.<PropertiesPropertyTemplateError>>}
- */
-routes.filesPropertiesTemplateList = function (arg) {
-  return this.request('files/properties/template/list', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Add, update or remove custom properties from a specified template associated
- * with a file. Fields that already exist and not described in the request will
- * not be modified.
- * @function Dropbox#filesPropertiesUpdate
- * @arg {FilesUpdatePropertyGroupArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<FilesUpdatePropertiesError>>}
- */
-routes.filesPropertiesUpdate = function (arg) {
-  return this.request('files/properties/update', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Restore a file to a specific revision.
- * @function Dropbox#filesRestore
- * @arg {FilesRestoreArg} arg - The request parameters.
- * @returns {Promise.<FilesFileMetadata, Error.<FilesRestoreError>>}
- */
-routes.filesRestore = function (arg) {
-  return this.request('files/restore', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Save a specified URL into a file in user's Dropbox. If the given path already
- * exists, the file will be renamed to avoid the conflict (e.g. myfile (1).txt).
- * @function Dropbox#filesSaveUrl
- * @arg {FilesSaveUrlArg} arg - The request parameters.
- * @returns {Promise.<FilesSaveUrlResult, Error.<FilesSaveUrlError>>}
- */
-routes.filesSaveUrl = function (arg) {
-  return this.request('files/save_url', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Check the status of a save_url job.
- * @function Dropbox#filesSaveUrlCheckJobStatus
- * @arg {AsyncPollArg} arg - The request parameters.
- * @returns {Promise.<FilesSaveUrlJobStatus, Error.<AsyncPollError>>}
- */
-routes.filesSaveUrlCheckJobStatus = function (arg) {
-  return this.request('files/save_url/check_job_status', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Searches for files and folders. Note: Recent changes may not immediately be
- * reflected in search results due to a short delay in indexing.
- * @function Dropbox#filesSearch
- * @arg {FilesSearchArg} arg - The request parameters.
- * @returns {Promise.<FilesSearchResult, Error.<FilesSearchError>>}
- */
-routes.filesSearch = function (arg) {
-  return this.request('files/search', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Create a new file with the contents provided in the request. Do not use this
- * to upload a file larger than 150 MB. Instead, create an upload session with
- * upload_session/start.
- * @function Dropbox#filesUpload
- * @arg {FilesCommitInfo} arg - The request parameters.
- * @returns {Promise.<FilesFileMetadata, Error.<FilesUploadError>>}
- */
-routes.filesUpload = function (arg) {
-  return this.request('files/upload', arg, 'user', 'content', 'upload');
-};
-
-/**
- * Append more data to an upload session. A single request should not upload
- * more than 150 MB.
- * @function Dropbox#filesUploadSessionAppend
- * @deprecated
- * @arg {FilesUploadSessionCursor} arg - The request parameters.
- * @returns {Promise.<void, Error.<FilesUploadSessionLookupError>>}
- */
-routes.filesUploadSessionAppend = function (arg) {
-  return this.request('files/upload_session/append', arg, 'user', 'content', 'upload');
-};
-
-/**
- * Append more data to an upload session. When the parameter close is set, this
- * call will close the session. A single request should not upload more than 150
- * MB.
- * @function Dropbox#filesUploadSessionAppendV2
- * @arg {FilesUploadSessionAppendArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<FilesUploadSessionLookupError>>}
- */
-routes.filesUploadSessionAppendV2 = function (arg) {
-  return this.request('files/upload_session/append_v2', arg, 'user', 'content', 'upload');
-};
-
-/**
- * Finish an upload session and save the uploaded data to the given file path. A
- * single request should not upload more than 150 MB.
- * @function Dropbox#filesUploadSessionFinish
- * @arg {FilesUploadSessionFinishArg} arg - The request parameters.
- * @returns {Promise.<FilesFileMetadata, Error.<FilesUploadSessionFinishError>>}
- */
-routes.filesUploadSessionFinish = function (arg) {
-  return this.request('files/upload_session/finish', arg, 'user', 'content', 'upload');
-};
-
-/**
- * This route helps you commit many files at once into a user's Dropbox. Use
- * upload_session/start and upload_session/append_v2 to upload file contents. We
- * recommend uploading many files in parallel to increase throughput. Once the
- * file contents have been uploaded, rather than calling upload_session/finish,
- * use this route to finish all your upload sessions in a single request.
- * UploadSessionStartArg.close or UploadSessionAppendArg.close needs to be true
- * for the last upload_session/start or upload_session/append_v2 call. This
- * route will return a job_id immediately and do the async commit job in
- * background. Use upload_session/finish_batch/check to check the job status.
- * For the same account, this route should be executed serially. That means you
- * should not start the next job before current job finishes. We allow up to
- * 1000 entries in a single request.
- * @function Dropbox#filesUploadSessionFinishBatch
- * @arg {FilesUploadSessionFinishBatchArg} arg - The request parameters.
- * @returns {Promise.<FilesUploadSessionFinishBatchLaunch, Error.<void>>}
- */
-routes.filesUploadSessionFinishBatch = function (arg) {
-  return this.request('files/upload_session/finish_batch', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns the status of an asynchronous job for upload_session/finish_batch. If
- * success, it returns list of result for each entry.
- * @function Dropbox#filesUploadSessionFinishBatchCheck
- * @arg {AsyncPollArg} arg - The request parameters.
- * @returns {Promise.<FilesUploadSessionFinishBatchJobStatus, Error.<AsyncPollError>>}
- */
-routes.filesUploadSessionFinishBatchCheck = function (arg) {
-  return this.request('files/upload_session/finish_batch/check', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Upload sessions allow you to upload a single file in one or more requests,
- * for example where the size of the file is greater than 150 MB.  This call
- * starts a new upload session with the given data. You can then use
- * upload_session/append_v2 to add more data and upload_session/finish to save
- * all the data to a file in Dropbox. A single request should not upload more
- * than 150 MB. An upload session can be used for a maximum of 48 hours.
- * Attempting to use an UploadSessionStartResult.session_id with
- * upload_session/append_v2 or upload_session/finish more than 48 hours after
- * its creation will return a UploadSessionLookupError.not_found.
- * @function Dropbox#filesUploadSessionStart
- * @arg {FilesUploadSessionStartArg} arg - The request parameters.
- * @returns {Promise.<FilesUploadSessionStartResult, Error.<void>>}
- */
-routes.filesUploadSessionStart = function (arg) {
-  return this.request('files/upload_session/start', arg, 'user', 'content', 'upload');
-};
-
-/**
- * Marks the given Paper doc as archived. Note: This action can be performed or
- * undone by anyone with edit permissions to the doc.
- * @function Dropbox#paperDocsArchive
- * @arg {PaperRefPaperDoc} arg - The request parameters.
- * @returns {Promise.<void, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsArchive = function (arg) {
-  return this.request('paper/docs/archive', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Exports and downloads Paper doc either as HTML or markdown.
- * @function Dropbox#paperDocsDownload
- * @arg {PaperPaperDocExport} arg - The request parameters.
- * @returns {Promise.<PaperPaperDocExportResult, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsDownload = function (arg) {
-  return this.request('paper/docs/download', arg, 'user', 'api', 'download');
-};
-
-/**
- * Lists the users who are explicitly invited to the Paper folder in which the
- * Paper doc is contained. For private folders all users (including owner)
- * shared on the folder are listed and for team folders all non-team users
- * shared on the folder are returned.
- * @function Dropbox#paperDocsFolderUsersList
- * @arg {PaperListUsersOnFolderArgs} arg - The request parameters.
- * @returns {Promise.<PaperListUsersOnFolderResponse, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsFolderUsersList = function (arg) {
-  return this.request('paper/docs/folder_users/list', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Once a cursor has been retrieved from docs/folder_users/list, use this to
- * paginate through all users on the Paper folder.
- * @function Dropbox#paperDocsFolderUsersListContinue
- * @arg {PaperListUsersOnFolderContinueArgs} arg - The request parameters.
- * @returns {Promise.<PaperListUsersOnFolderResponse, Error.<PaperListUsersCursorError>>}
- */
-routes.paperDocsFolderUsersListContinue = function (arg) {
-  return this.request('paper/docs/folder_users/list/continue', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Retrieves folder information for the given Paper doc. This includes:   -
- * folder sharing policy; permissions for subfolders are set by the top-level
- * folder.   - full 'filepath', i.e. the list of folders (both folderId and
- * folderName) from the root folder to the folder directly containing the Paper
- * doc.  Note: If the Paper doc is not in any folder (aka unfiled) the response
- * will be empty.
- * @function Dropbox#paperDocsGetFolderInfo
- * @arg {PaperRefPaperDoc} arg - The request parameters.
- * @returns {Promise.<PaperFoldersContainingPaperDoc, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsGetFolderInfo = function (arg) {
-  return this.request('paper/docs/get_folder_info', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Return the list of all Paper docs according to the argument specifications.
- * To iterate over through the full pagination, pass the cursor to
- * docs/list/continue.
- * @function Dropbox#paperDocsList
- * @arg {PaperListPaperDocsArgs} arg - The request parameters.
- * @returns {Promise.<PaperListPaperDocsResponse, Error.<void>>}
- */
-routes.paperDocsList = function (arg) {
-  return this.request('paper/docs/list', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Once a cursor has been retrieved from docs/list, use this to paginate through
- * all Paper doc.
- * @function Dropbox#paperDocsListContinue
- * @arg {PaperListPaperDocsContinueArgs} arg - The request parameters.
- * @returns {Promise.<PaperListPaperDocsResponse, Error.<PaperListDocsCursorError>>}
- */
-routes.paperDocsListContinue = function (arg) {
-  return this.request('paper/docs/list/continue', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Permanently deletes the given Paper doc. This operation is final as the doc
- * cannot be recovered.  Note: This action can be performed only by the doc
- * owner.
- * @function Dropbox#paperDocsPermanentlyDelete
- * @arg {PaperRefPaperDoc} arg - The request parameters.
- * @returns {Promise.<void, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsPermanentlyDelete = function (arg) {
-  return this.request('paper/docs/permanently_delete', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Gets the default sharing policy for the given Paper doc.
- * @function Dropbox#paperDocsSharingPolicyGet
- * @arg {PaperRefPaperDoc} arg - The request parameters.
- * @returns {Promise.<PaperSharingPolicy, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsSharingPolicyGet = function (arg) {
-  return this.request('paper/docs/sharing_policy/get', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Sets the default sharing policy for the given Paper doc. The default
- * 'team_sharing_policy' can be changed only by teams, omit this field for
- * personal accounts.  Note: 'public_sharing_policy' cannot be set to the value
- * 'disabled' because this setting can be changed only via the team admin
- * console.
- * @function Dropbox#paperDocsSharingPolicySet
- * @arg {PaperPaperDocSharingPolicy} arg - The request parameters.
- * @returns {Promise.<void, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsSharingPolicySet = function (arg) {
-  return this.request('paper/docs/sharing_policy/set', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Allows an owner or editor to add users to a Paper doc or change their
- * permissions using their email address or Dropbox account ID.  Note: The Doc
- * owner's permissions cannot be changed.
- * @function Dropbox#paperDocsUsersAdd
- * @arg {PaperAddPaperDocUser} arg - The request parameters.
- * @returns {Promise.<Array.<PaperAddPaperDocUserMemberResult>, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsUsersAdd = function (arg) {
-  return this.request('paper/docs/users/add', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Lists all users who visited the Paper doc or users with explicit access. This
- * call excludes users who have been removed. The list is sorted by the date of
- * the visit or the share date. The list will include both users, the explicitly
- * shared ones as well as those who came in using the Paper url link.
- * @function Dropbox#paperDocsUsersList
- * @arg {PaperListUsersOnPaperDocArgs} arg - The request parameters.
- * @returns {Promise.<PaperListUsersOnPaperDocResponse, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsUsersList = function (arg) {
-  return this.request('paper/docs/users/list', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Once a cursor has been retrieved from docs/users/list, use this to paginate
- * through all users on the Paper doc.
- * @function Dropbox#paperDocsUsersListContinue
- * @arg {PaperListUsersOnPaperDocContinueArgs} arg - The request parameters.
- * @returns {Promise.<PaperListUsersOnPaperDocResponse, Error.<PaperListUsersCursorError>>}
- */
-routes.paperDocsUsersListContinue = function (arg) {
-  return this.request('paper/docs/users/list/continue', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Allows an owner or editor to remove users from a Paper doc using their email
- * address or Dropbox account ID.  Note: Doc owner cannot be removed.
- * @function Dropbox#paperDocsUsersRemove
- * @arg {PaperRemovePaperDocUser} arg - The request parameters.
- * @returns {Promise.<void, Error.<PaperDocLookupError>>}
- */
-routes.paperDocsUsersRemove = function (arg) {
-  return this.request('paper/docs/users/remove', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Adds specified members to a file.
- * @function Dropbox#sharingAddFileMember
- * @arg {SharingAddFileMemberArgs} arg - The request parameters.
- * @returns {Promise.<Array.<SharingFileMemberActionResult>, Error.<SharingAddFileMemberError>>}
- */
-routes.sharingAddFileMember = function (arg) {
-  return this.request('sharing/add_file_member', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Allows an owner or editor (if the ACL update policy allows) of a shared
- * folder to add another member. For the new member to get access to all the
- * functionality for this folder, you will need to call mount_folder on their
- * behalf. Apps must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingAddFolderMember
- * @arg {SharingAddFolderMemberArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<SharingAddFolderMemberError>>}
- */
-routes.sharingAddFolderMember = function (arg) {
-  return this.request('sharing/add_folder_member', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Identical to update_file_member but with less information returned.
- * @function Dropbox#sharingChangeFileMemberAccess
- * @deprecated
- * @arg {SharingChangeFileMemberAccessArgs} arg - The request parameters.
- * @returns {Promise.<SharingFileMemberActionResult, Error.<SharingFileMemberActionError>>}
- */
-routes.sharingChangeFileMemberAccess = function (arg) {
-  return this.request('sharing/change_file_member_access', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns the status of an asynchronous job. Apps must have full Dropbox access
- * to use this endpoint.
- * @function Dropbox#sharingCheckJobStatus
- * @arg {AsyncPollArg} arg - The request parameters.
- * @returns {Promise.<SharingJobStatus, Error.<AsyncPollError>>}
- */
-routes.sharingCheckJobStatus = function (arg) {
-  return this.request('sharing/check_job_status', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns the status of an asynchronous job for sharing a folder. Apps must
- * have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingCheckRemoveMemberJobStatus
- * @arg {AsyncPollArg} arg - The request parameters.
- * @returns {Promise.<SharingRemoveMemberJobStatus, Error.<AsyncPollError>>}
- */
-routes.sharingCheckRemoveMemberJobStatus = function (arg) {
-  return this.request('sharing/check_remove_member_job_status', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns the status of an asynchronous job for sharing a folder. Apps must
- * have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingCheckShareJobStatus
- * @arg {AsyncPollArg} arg - The request parameters.
- * @returns {Promise.<SharingShareFolderJobStatus, Error.<AsyncPollError>>}
- */
-routes.sharingCheckShareJobStatus = function (arg) {
-  return this.request('sharing/check_share_job_status', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Create a shared link. If a shared link already exists for the given path,
- * that link is returned. Note that in the returned PathLinkMetadata, the
- * PathLinkMetadata.url field is the shortened URL if
- * CreateSharedLinkArg.short_url argument is set to true. Previously, it was
- * technically possible to break a shared link by moving or renaming the
- * corresponding file or folder. In the future, this will no longer be the case,
- * so your app shouldn't rely on this behavior. Instead, if your app needs to
- * revoke a shared link, use revoke_shared_link.
- * @function Dropbox#sharingCreateSharedLink
- * @deprecated
- * @arg {SharingCreateSharedLinkArg} arg - The request parameters.
- * @returns {Promise.<SharingPathLinkMetadata, Error.<SharingCreateSharedLinkError>>}
- */
-routes.sharingCreateSharedLink = function (arg) {
-  return this.request('sharing/create_shared_link', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Create a shared link with custom settings. If no settings are given then the
- * default visibility is RequestedVisibility.public (The resolved visibility,
- * though, may depend on other aspects such as team and shared folder settings).
- * @function Dropbox#sharingCreateSharedLinkWithSettings
- * @arg {SharingCreateSharedLinkWithSettingsArg} arg - The request parameters.
- * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingCreateSharedLinkWithSettingsError>>}
- */
-routes.sharingCreateSharedLinkWithSettings = function (arg) {
-  return this.request('sharing/create_shared_link_with_settings', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns shared file metadata.
- * @function Dropbox#sharingGetFileMetadata
- * @arg {SharingGetFileMetadataArg} arg - The request parameters.
- * @returns {Promise.<SharingSharedFileMetadata, Error.<SharingGetFileMetadataError>>}
- */
-routes.sharingGetFileMetadata = function (arg) {
-  return this.request('sharing/get_file_metadata', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns shared file metadata.
- * @function Dropbox#sharingGetFileMetadataBatch
- * @arg {SharingGetFileMetadataBatchArg} arg - The request parameters.
- * @returns {Promise.<Array.<SharingGetFileMetadataBatchResult>, Error.<SharingSharingUserError>>}
- */
-routes.sharingGetFileMetadataBatch = function (arg) {
-  return this.request('sharing/get_file_metadata/batch', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns shared folder metadata by its folder ID. Apps must have full Dropbox
- * access to use this endpoint.
- * @function Dropbox#sharingGetFolderMetadata
- * @arg {SharingGetMetadataArgs} arg - The request parameters.
- * @returns {Promise.<SharingSharedFolderMetadata, Error.<SharingSharedFolderAccessError>>}
- */
-routes.sharingGetFolderMetadata = function (arg) {
-  return this.request('sharing/get_folder_metadata', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Download the shared link's file from a user's Dropbox.
- * @function Dropbox#sharingGetSharedLinkFile
- * @arg {Object} arg - The request parameters.
- * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingGetSharedLinkFileError>>}
- */
-routes.sharingGetSharedLinkFile = function (arg) {
-  return this.request('sharing/get_shared_link_file', arg, 'user', 'content', 'download');
-};
-
-/**
- * Get the shared link's metadata.
- * @function Dropbox#sharingGetSharedLinkMetadata
- * @arg {SharingGetSharedLinkMetadataArg} arg - The request parameters.
- * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingSharedLinkError>>}
- */
-routes.sharingGetSharedLinkMetadata = function (arg) {
-  return this.request('sharing/get_shared_link_metadata', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns a list of LinkMetadata objects for this user, including collection
- * links. If no path is given, returns a list of all shared links for the
- * current user, including collection links. If a non-empty path is given,
- * returns a list of all shared links that allow access to the given path.
- * Collection links are never returned in this case. Note that the url field in
- * the response is never the shortened URL.
- * @function Dropbox#sharingGetSharedLinks
- * @deprecated
- * @arg {SharingGetSharedLinksArg} arg - The request parameters.
- * @returns {Promise.<SharingGetSharedLinksResult, Error.<SharingGetSharedLinksError>>}
- */
-routes.sharingGetSharedLinks = function (arg) {
-  return this.request('sharing/get_shared_links', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Use to obtain the members who have been invited to a file, both inherited and
- * uninherited members.
- * @function Dropbox#sharingListFileMembers
- * @arg {SharingListFileMembersArg} arg - The request parameters.
- * @returns {Promise.<SharingSharedFileMembers, Error.<SharingListFileMembersError>>}
- */
-routes.sharingListFileMembers = function (arg) {
-  return this.request('sharing/list_file_members', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get members of multiple files at once. The arguments to this route are more
- * limited, and the limit on query result size per file is more strict. To
- * customize the results more, use the individual file endpoint. Inherited users
- * and groups are not included in the result, and permissions are not returned
- * for this endpoint.
- * @function Dropbox#sharingListFileMembersBatch
- * @arg {SharingListFileMembersBatchArg} arg - The request parameters.
- * @returns {Promise.<Array.<SharingListFileMembersBatchResult>, Error.<SharingSharingUserError>>}
- */
-routes.sharingListFileMembersBatch = function (arg) {
-  return this.request('sharing/list_file_members/batch', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Once a cursor has been retrieved from list_file_members or
- * list_file_members/batch, use this to paginate through all shared file
- * members.
- * @function Dropbox#sharingListFileMembersContinue
- * @arg {SharingListFileMembersContinueArg} arg - The request parameters.
- * @returns {Promise.<SharingSharedFileMembers, Error.<SharingListFileMembersContinueError>>}
- */
-routes.sharingListFileMembersContinue = function (arg) {
-  return this.request('sharing/list_file_members/continue', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns shared folder membership by its folder ID. Apps must have full
- * Dropbox access to use this endpoint.
- * @function Dropbox#sharingListFolderMembers
- * @arg {SharingListFolderMembersArgs} arg - The request parameters.
- * @returns {Promise.<SharingSharedFolderMembers, Error.<SharingSharedFolderAccessError>>}
- */
-routes.sharingListFolderMembers = function (arg) {
-  return this.request('sharing/list_folder_members', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Once a cursor has been retrieved from list_folder_members, use this to
- * paginate through all shared folder members. Apps must have full Dropbox
- * access to use this endpoint.
- * @function Dropbox#sharingListFolderMembersContinue
- * @arg {SharingListFolderMembersContinueArg} arg - The request parameters.
- * @returns {Promise.<SharingSharedFolderMembers, Error.<SharingListFolderMembersContinueError>>}
- */
-routes.sharingListFolderMembersContinue = function (arg) {
-  return this.request('sharing/list_folder_members/continue', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Return the list of all shared folders the current user has access to. Apps
- * must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingListFolders
- * @arg {SharingListFoldersArgs} arg - The request parameters.
- * @returns {Promise.<SharingListFoldersResult, Error.<void>>}
- */
-routes.sharingListFolders = function (arg) {
-  return this.request('sharing/list_folders', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Once a cursor has been retrieved from list_folders, use this to paginate
- * through all shared folders. The cursor must come from a previous call to
- * list_folders or list_folders/continue. Apps must have full Dropbox access to
- * use this endpoint.
- * @function Dropbox#sharingListFoldersContinue
- * @arg {SharingListFoldersContinueArg} arg - The request parameters.
- * @returns {Promise.<SharingListFoldersResult, Error.<SharingListFoldersContinueError>>}
- */
-routes.sharingListFoldersContinue = function (arg) {
-  return this.request('sharing/list_folders/continue', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Return the list of all shared folders the current user can mount or unmount.
- * Apps must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingListMountableFolders
- * @arg {SharingListFoldersArgs} arg - The request parameters.
- * @returns {Promise.<SharingListFoldersResult, Error.<void>>}
- */
-routes.sharingListMountableFolders = function (arg) {
-  return this.request('sharing/list_mountable_folders', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Once a cursor has been retrieved from list_mountable_folders, use this to
- * paginate through all mountable shared folders. The cursor must come from a
- * previous call to list_mountable_folders or list_mountable_folders/continue.
- * Apps must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingListMountableFoldersContinue
- * @arg {SharingListFoldersContinueArg} arg - The request parameters.
- * @returns {Promise.<SharingListFoldersResult, Error.<SharingListFoldersContinueError>>}
- */
-routes.sharingListMountableFoldersContinue = function (arg) {
-  return this.request('sharing/list_mountable_folders/continue', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Returns a list of all files shared with current user.  Does not include files
- * the user has received via shared folders, and does  not include unclaimed
- * invitations.
- * @function Dropbox#sharingListReceivedFiles
- * @arg {SharingListFilesArg} arg - The request parameters.
- * @returns {Promise.<SharingListFilesResult, Error.<SharingSharingUserError>>}
- */
-routes.sharingListReceivedFiles = function (arg) {
-  return this.request('sharing/list_received_files', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get more results with a cursor from list_received_files.
- * @function Dropbox#sharingListReceivedFilesContinue
- * @arg {SharingListFilesContinueArg} arg - The request parameters.
- * @returns {Promise.<SharingListFilesResult, Error.<SharingListFilesContinueError>>}
- */
-routes.sharingListReceivedFilesContinue = function (arg) {
-  return this.request('sharing/list_received_files/continue', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * List shared links of this user. If no path is given, returns a list of all
- * shared links for the current user. If a non-empty path is given, returns a
- * list of all shared links that allow access to the given path - direct links
- * to the given path and links to parent folders of the given path. Links to
- * parent folders can be suppressed by setting direct_only to true.
- * @function Dropbox#sharingListSharedLinks
- * @arg {SharingListSharedLinksArg} arg - The request parameters.
- * @returns {Promise.<SharingListSharedLinksResult, Error.<SharingListSharedLinksError>>}
- */
-routes.sharingListSharedLinks = function (arg) {
-  return this.request('sharing/list_shared_links', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Modify the shared link's settings. If the requested visibility conflict with
- * the shared links policy of the team or the shared folder (in case the linked
- * file is part of a shared folder) then the LinkPermissions.resolved_visibility
- * of the returned SharedLinkMetadata will reflect the actual visibility of the
- * shared link and the LinkPermissions.requested_visibility will reflect the
- * requested visibility.
- * @function Dropbox#sharingModifySharedLinkSettings
- * @arg {SharingModifySharedLinkSettingsArgs} arg - The request parameters.
- * @returns {Promise.<(SharingFileLinkMetadata|SharingFolderLinkMetadata|SharingSharedLinkMetadata), Error.<SharingModifySharedLinkSettingsError>>}
- */
-routes.sharingModifySharedLinkSettings = function (arg) {
-  return this.request('sharing/modify_shared_link_settings', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * The current user mounts the designated folder. Mount a shared folder for a
- * user after they have been added as a member. Once mounted, the shared folder
- * will appear in their Dropbox. Apps must have full Dropbox access to use this
- * endpoint.
- * @function Dropbox#sharingMountFolder
- * @arg {SharingMountFolderArg} arg - The request parameters.
- * @returns {Promise.<SharingSharedFolderMetadata, Error.<SharingMountFolderError>>}
- */
-routes.sharingMountFolder = function (arg) {
-  return this.request('sharing/mount_folder', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * The current user relinquishes their membership in the designated file. Note
- * that the current user may still have inherited access to this file through
- * the parent folder. Apps must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingRelinquishFileMembership
- * @arg {SharingRelinquishFileMembershipArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<SharingRelinquishFileMembershipError>>}
- */
-routes.sharingRelinquishFileMembership = function (arg) {
-  return this.request('sharing/relinquish_file_membership', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * The current user relinquishes their membership in the designated shared
- * folder and will no longer have access to the folder.  A folder owner cannot
- * relinquish membership in their own folder. This will run synchronously if
- * leave_a_copy is false, and asynchronously if leave_a_copy is true. Apps must
- * have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingRelinquishFolderMembership
- * @arg {SharingRelinquishFolderMembershipArg} arg - The request parameters.
- * @returns {Promise.<AsyncLaunchEmptyResult, Error.<SharingRelinquishFolderMembershipError>>}
- */
-routes.sharingRelinquishFolderMembership = function (arg) {
-  return this.request('sharing/relinquish_folder_membership', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Identical to remove_file_member_2 but with less information returned.
- * @function Dropbox#sharingRemoveFileMember
- * @deprecated
- * @arg {SharingRemoveFileMemberArg} arg - The request parameters.
- * @returns {Promise.<SharingFileMemberActionIndividualResult, Error.<SharingRemoveFileMemberError>>}
- */
-routes.sharingRemoveFileMember = function (arg) {
-  return this.request('sharing/remove_file_member', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Removes a specified member from the file.
- * @function Dropbox#sharingRemoveFileMember2
- * @arg {SharingRemoveFileMemberArg} arg - The request parameters.
- * @returns {Promise.<SharingFileMemberRemoveActionResult, Error.<SharingRemoveFileMemberError>>}
- */
-routes.sharingRemoveFileMember2 = function (arg) {
-  return this.request('sharing/remove_file_member_2', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Allows an owner or editor (if the ACL update policy allows) of a shared
- * folder to remove another member. Apps must have full Dropbox access to use
- * this endpoint.
- * @function Dropbox#sharingRemoveFolderMember
- * @arg {SharingRemoveFolderMemberArg} arg - The request parameters.
- * @returns {Promise.<AsyncLaunchResultBase, Error.<SharingRemoveFolderMemberError>>}
- */
-routes.sharingRemoveFolderMember = function (arg) {
-  return this.request('sharing/remove_folder_member', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Revoke a shared link. Note that even after revoking a shared link to a file,
- * the file may be accessible if there are shared links leading to any of the
- * file parent folders. To list all shared links that enable access to a
- * specific file, you can use the list_shared_links with the file as the
- * ListSharedLinksArg.path argument.
- * @function Dropbox#sharingRevokeSharedLink
- * @arg {SharingRevokeSharedLinkArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<SharingRevokeSharedLinkError>>}
- */
-routes.sharingRevokeSharedLink = function (arg) {
-  return this.request('sharing/revoke_shared_link', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Share a folder with collaborators. Most sharing will be completed
- * synchronously. Large folders will be completed asynchronously. To make
- * testing the async case repeatable, set `ShareFolderArg.force_async`. If a
- * ShareFolderLaunch.async_job_id is returned, you'll need to call
- * check_share_job_status until the action completes to get the metadata for the
- * folder. Apps must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingShareFolder
- * @arg {SharingShareFolderArg} arg - The request parameters.
- * @returns {Promise.<SharingShareFolderLaunch, Error.<SharingShareFolderError>>}
- */
-routes.sharingShareFolder = function (arg) {
-  return this.request('sharing/share_folder', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Transfer ownership of a shared folder to a member of the shared folder. User
- * must have AccessLevel.owner access to the shared folder to perform a
- * transfer. Apps must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingTransferFolder
- * @arg {SharingTransferFolderArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<SharingTransferFolderError>>}
- */
-routes.sharingTransferFolder = function (arg) {
-  return this.request('sharing/transfer_folder', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * The current user unmounts the designated folder. They can re-mount the folder
- * at a later time using mount_folder. Apps must have full Dropbox access to use
- * this endpoint.
- * @function Dropbox#sharingUnmountFolder
- * @arg {SharingUnmountFolderArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<SharingUnmountFolderError>>}
- */
-routes.sharingUnmountFolder = function (arg) {
-  return this.request('sharing/unmount_folder', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Remove all members from this file. Does not remove inherited members.
- * @function Dropbox#sharingUnshareFile
- * @arg {SharingUnshareFileArg} arg - The request parameters.
- * @returns {Promise.<void, Error.<SharingUnshareFileError>>}
- */
-routes.sharingUnshareFile = function (arg) {
-  return this.request('sharing/unshare_file', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Allows a shared folder owner to unshare the folder. You'll need to call
- * check_job_status to determine if the action has completed successfully. Apps
- * must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingUnshareFolder
- * @arg {SharingUnshareFolderArg} arg - The request parameters.
- * @returns {Promise.<AsyncLaunchEmptyResult, Error.<SharingUnshareFolderError>>}
- */
-routes.sharingUnshareFolder = function (arg) {
-  return this.request('sharing/unshare_folder', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Changes a member's access on a shared file.
- * @function Dropbox#sharingUpdateFileMember
- * @arg {SharingUpdateFileMemberArgs} arg - The request parameters.
- * @returns {Promise.<SharingMemberAccessLevelResult, Error.<SharingFileMemberActionError>>}
- */
-routes.sharingUpdateFileMember = function (arg) {
-  return this.request('sharing/update_file_member', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Allows an owner or editor of a shared folder to update another member's
- * permissions. Apps must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingUpdateFolderMember
- * @arg {SharingUpdateFolderMemberArg} arg - The request parameters.
- * @returns {Promise.<SharingMemberAccessLevelResult, Error.<SharingUpdateFolderMemberError>>}
- */
-routes.sharingUpdateFolderMember = function (arg) {
-  return this.request('sharing/update_folder_member', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Update the sharing policies for a shared folder. User must have
- * AccessLevel.owner access to the shared folder to update its policies. Apps
- * must have full Dropbox access to use this endpoint.
- * @function Dropbox#sharingUpdateFolderPolicy
- * @arg {SharingUpdateFolderPolicyArg} arg - The request parameters.
- * @returns {Promise.<SharingSharedFolderMetadata, Error.<SharingUpdateFolderPolicyError>>}
- */
-routes.sharingUpdateFolderPolicy = function (arg) {
-  return this.request('sharing/update_folder_policy', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Retrieves team events. Permission : Team Auditing.
- * @function Dropbox#teamLogGetEvents
- * @arg {TeamLogGetTeamEventsArg} arg - The request parameters.
- * @returns {Promise.<TeamLogGetTeamEventsResult, Error.<TeamLogGetTeamEventsError>>}
- */
-routes.teamLogGetEvents = function (arg) {
-  return this.request('team_log/get_events', arg, 'team', 'api', 'rpc');
-};
-
-/**
- * Once a cursor has been retrieved from get_events, use this to paginate
- * through all events. Permission : Team Auditing.
- * @function Dropbox#teamLogGetEventsContinue
- * @arg {TeamLogGetTeamEventsContinueArg} arg - The request parameters.
- * @returns {Promise.<TeamLogGetTeamEventsResult, Error.<TeamLogGetTeamEventsContinueError>>}
- */
-routes.teamLogGetEventsContinue = function (arg) {
-  return this.request('team_log/get_events/continue', arg, 'team', 'api', 'rpc');
-};
-
-/**
- * Get information about a user's account.
- * @function Dropbox#usersGetAccount
- * @arg {UsersGetAccountArg} arg - The request parameters.
- * @returns {Promise.<UsersBasicAccount, Error.<UsersGetAccountError>>}
- */
-routes.usersGetAccount = function (arg) {
-  return this.request('users/get_account', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get information about multiple user accounts.  At most 300 accounts may be
- * queried per request.
- * @function Dropbox#usersGetAccountBatch
- * @arg {UsersGetAccountBatchArg} arg - The request parameters.
- * @returns {Promise.<Object, Error.<UsersGetAccountBatchError>>}
- */
-routes.usersGetAccountBatch = function (arg) {
-  return this.request('users/get_account_batch', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get information about the current user's account.
- * @function Dropbox#usersGetCurrentAccount
- * @arg {void} arg - The request parameters.
- * @returns {Promise.<UsersFullAccount, Error.<void>>}
- */
-routes.usersGetCurrentAccount = function (arg) {
-  return this.request('users/get_current_account', arg, 'user', 'api', 'rpc');
-};
-
-/**
- * Get the space usage information for the current user's account.
- * @function Dropbox#usersGetSpaceUsage
- * @arg {void} arg - The request parameters.
- * @returns {Promise.<UsersSpaceUsage, Error.<void>>}
- */
-routes.usersGetSpaceUsage = function (arg) {
-  return this.request('users/get_space_usage', arg, 'user', 'api', 'rpc');
-};
-
-module.exports = routes;
-
-},{}],12:[function(require,module,exports){
-var request = require('superagent');
-var Promise = require('es6-promise').Promise;
-var getBaseURL = require('./get-base-url');
-
-// This doesn't match what was spec'd in paper doc yet
-var buildCustomError = function (error, response) {
-  var err;
-  if (response) {
-    try {
-      err = JSON.parse(response.text);
-    } catch (e) {
-      err = response.text;
-    }
-  }
-  return {
-    status: error.status,
-    error: err || error,
-    response: response
-  };
-};
-
-var rpcRequest = function (path, body, auth, host, accessToken, selectUser) {
-  var promiseFunction = function (resolve, reject) {
-    var apiRequest;
-
-    function success(data) {
-      if (resolve) {
-        resolve(data);
-      }
-    }
-
-    function failure(error) {
-      if (reject) {
-        reject(error);
-      }
-    }
-
-    function responseHandler(error, response) {
-      if (error) {
-        failure(buildCustomError(error, response));
-      } else {
-        success(response.body);
-      }
-    }
-
-    // The API expects null to be passed for endpoints that dont accept any
-    // parameters
-    if (!body) {
-      body = null;
-    }
-
-    apiRequest = request.post(getBaseURL(host) + path)
-      .type('application/json');
-
-    switch (auth) {
-      case 'team':
-      case 'user':
-        apiRequest.set('Authorization', 'Bearer ' + accessToken);
-        break;
-      case 'noauth':
-        break;
-      default:
-        throw new Error('Unhandled auth type: ' + auth);
-    }
-
-    if (selectUser) {
-      apiRequest = apiRequest.set('Dropbox-API-Select-User', selectUser);
-    }
-
-    apiRequest.send(body)
-      .end(responseHandler);
-  };
-
-  return new Promise(promiseFunction);
-};
-
-module.exports = rpcRequest;
-
-},{"./get-base-url":6,"es6-promise":2,"superagent":108}],13:[function(require,module,exports){
-var request = require('superagent');
-var Promise = require('es6-promise').Promise;
-var getBaseURL = require('./get-base-url');
-var httpHeaderSafeJson = require('./http-header-safe-json');
-
-// This doesn't match what was spec'd in paper doc yet
-var buildCustomError = function (error, response) {
-  return {
-    status: error.status,
-    error: (response ? response.text : null) || error.toString(),
-    response: response
-  };
-};
-
-var uploadRequest = function (path, args, auth, host, accessToken, selectUser) {
-  if (auth !== 'user') {
-    throw new Error('Unexpected auth type: ' + auth);
-  }
-
-  var promiseFunction = function (resolve, reject) {
-    var apiRequest;
-
-    // Since args.contents is sent as the body of the request and not added to
-    // the url, it needs to be remove it from args.
-    var contents = args.contents;
-    delete args.contents;
-
-    function success(data) {
-      if (resolve) {
-        resolve(data);
-      }
-    }
-
-    function failure(error) {
-      if (reject) {
-        reject(error);
-      }
-    }
-
-    function responseHandler(error, response) {
-      if (error) {
-        failure(buildCustomError(error, response));
-      } else {
-        success(response.body);
-      }
-    }
-
-    apiRequest = request.post(getBaseURL(host) + path)
-      .type('application/octet-stream')
-      .set('Authorization', 'Bearer ' + accessToken)
-      .set('Dropbox-API-Arg', httpHeaderSafeJson(args));
-
-    if (selectUser) {
-      apiRequest = apiRequest.set('Dropbox-API-Select-User', selectUser);
-    }
-
-    apiRequest
-      .send(contents)
-      .end(responseHandler);
-  };
-
-  return new Promise(promiseFunction);
-};
-
-module.exports = uploadRequest;
-
-},{"./get-base-url":6,"./http-header-safe-json":7,"es6-promise":2,"superagent":108}],14:[function(require,module,exports){
+},{}],3:[function(require,module,exports){
 module.exports={"Aacute":"\u00C1","aacute":"\u00E1","Abreve":"\u0102","abreve":"\u0103","ac":"\u223E","acd":"\u223F","acE":"\u223E\u0333","Acirc":"\u00C2","acirc":"\u00E2","acute":"\u00B4","Acy":"\u0410","acy":"\u0430","AElig":"\u00C6","aelig":"\u00E6","af":"\u2061","Afr":"\uD835\uDD04","afr":"\uD835\uDD1E","Agrave":"\u00C0","agrave":"\u00E0","alefsym":"\u2135","aleph":"\u2135","Alpha":"\u0391","alpha":"\u03B1","Amacr":"\u0100","amacr":"\u0101","amalg":"\u2A3F","amp":"&","AMP":"&","andand":"\u2A55","And":"\u2A53","and":"\u2227","andd":"\u2A5C","andslope":"\u2A58","andv":"\u2A5A","ang":"\u2220","ange":"\u29A4","angle":"\u2220","angmsdaa":"\u29A8","angmsdab":"\u29A9","angmsdac":"\u29AA","angmsdad":"\u29AB","angmsdae":"\u29AC","angmsdaf":"\u29AD","angmsdag":"\u29AE","angmsdah":"\u29AF","angmsd":"\u2221","angrt":"\u221F","angrtvb":"\u22BE","angrtvbd":"\u299D","angsph":"\u2222","angst":"\u00C5","angzarr":"\u237C","Aogon":"\u0104","aogon":"\u0105","Aopf":"\uD835\uDD38","aopf":"\uD835\uDD52","apacir":"\u2A6F","ap":"\u2248","apE":"\u2A70","ape":"\u224A","apid":"\u224B","apos":"'","ApplyFunction":"\u2061","approx":"\u2248","approxeq":"\u224A","Aring":"\u00C5","aring":"\u00E5","Ascr":"\uD835\uDC9C","ascr":"\uD835\uDCB6","Assign":"\u2254","ast":"*","asymp":"\u2248","asympeq":"\u224D","Atilde":"\u00C3","atilde":"\u00E3","Auml":"\u00C4","auml":"\u00E4","awconint":"\u2233","awint":"\u2A11","backcong":"\u224C","backepsilon":"\u03F6","backprime":"\u2035","backsim":"\u223D","backsimeq":"\u22CD","Backslash":"\u2216","Barv":"\u2AE7","barvee":"\u22BD","barwed":"\u2305","Barwed":"\u2306","barwedge":"\u2305","bbrk":"\u23B5","bbrktbrk":"\u23B6","bcong":"\u224C","Bcy":"\u0411","bcy":"\u0431","bdquo":"\u201E","becaus":"\u2235","because":"\u2235","Because":"\u2235","bemptyv":"\u29B0","bepsi":"\u03F6","bernou":"\u212C","Bernoullis":"\u212C","Beta":"\u0392","beta":"\u03B2","beth":"\u2136","between":"\u226C","Bfr":"\uD835\uDD05","bfr":"\uD835\uDD1F","bigcap":"\u22C2","bigcirc":"\u25EF","bigcup":"\u22C3","bigodot":"\u2A00","bigoplus":"\u2A01","bigotimes":"\u2A02","bigsqcup":"\u2A06","bigstar":"\u2605","bigtriangledown":"\u25BD","bigtriangleup":"\u25B3","biguplus":"\u2A04","bigvee":"\u22C1","bigwedge":"\u22C0","bkarow":"\u290D","blacklozenge":"\u29EB","blacksquare":"\u25AA","blacktriangle":"\u25B4","blacktriangledown":"\u25BE","blacktriangleleft":"\u25C2","blacktriangleright":"\u25B8","blank":"\u2423","blk12":"\u2592","blk14":"\u2591","blk34":"\u2593","block":"\u2588","bne":"=\u20E5","bnequiv":"\u2261\u20E5","bNot":"\u2AED","bnot":"\u2310","Bopf":"\uD835\uDD39","bopf":"\uD835\uDD53","bot":"\u22A5","bottom":"\u22A5","bowtie":"\u22C8","boxbox":"\u29C9","boxdl":"\u2510","boxdL":"\u2555","boxDl":"\u2556","boxDL":"\u2557","boxdr":"\u250C","boxdR":"\u2552","boxDr":"\u2553","boxDR":"\u2554","boxh":"\u2500","boxH":"\u2550","boxhd":"\u252C","boxHd":"\u2564","boxhD":"\u2565","boxHD":"\u2566","boxhu":"\u2534","boxHu":"\u2567","boxhU":"\u2568","boxHU":"\u2569","boxminus":"\u229F","boxplus":"\u229E","boxtimes":"\u22A0","boxul":"\u2518","boxuL":"\u255B","boxUl":"\u255C","boxUL":"\u255D","boxur":"\u2514","boxuR":"\u2558","boxUr":"\u2559","boxUR":"\u255A","boxv":"\u2502","boxV":"\u2551","boxvh":"\u253C","boxvH":"\u256A","boxVh":"\u256B","boxVH":"\u256C","boxvl":"\u2524","boxvL":"\u2561","boxVl":"\u2562","boxVL":"\u2563","boxvr":"\u251C","boxvR":"\u255E","boxVr":"\u255F","boxVR":"\u2560","bprime":"\u2035","breve":"\u02D8","Breve":"\u02D8","brvbar":"\u00A6","bscr":"\uD835\uDCB7","Bscr":"\u212C","bsemi":"\u204F","bsim":"\u223D","bsime":"\u22CD","bsolb":"\u29C5","bsol":"\\","bsolhsub":"\u27C8","bull":"\u2022","bullet":"\u2022","bump":"\u224E","bumpE":"\u2AAE","bumpe":"\u224F","Bumpeq":"\u224E","bumpeq":"\u224F","Cacute":"\u0106","cacute":"\u0107","capand":"\u2A44","capbrcup":"\u2A49","capcap":"\u2A4B","cap":"\u2229","Cap":"\u22D2","capcup":"\u2A47","capdot":"\u2A40","CapitalDifferentialD":"\u2145","caps":"\u2229\uFE00","caret":"\u2041","caron":"\u02C7","Cayleys":"\u212D","ccaps":"\u2A4D","Ccaron":"\u010C","ccaron":"\u010D","Ccedil":"\u00C7","ccedil":"\u00E7","Ccirc":"\u0108","ccirc":"\u0109","Cconint":"\u2230","ccups":"\u2A4C","ccupssm":"\u2A50","Cdot":"\u010A","cdot":"\u010B","cedil":"\u00B8","Cedilla":"\u00B8","cemptyv":"\u29B2","cent":"\u00A2","centerdot":"\u00B7","CenterDot":"\u00B7","cfr":"\uD835\uDD20","Cfr":"\u212D","CHcy":"\u0427","chcy":"\u0447","check":"\u2713","checkmark":"\u2713","Chi":"\u03A7","chi":"\u03C7","circ":"\u02C6","circeq":"\u2257","circlearrowleft":"\u21BA","circlearrowright":"\u21BB","circledast":"\u229B","circledcirc":"\u229A","circleddash":"\u229D","CircleDot":"\u2299","circledR":"\u00AE","circledS":"\u24C8","CircleMinus":"\u2296","CirclePlus":"\u2295","CircleTimes":"\u2297","cir":"\u25CB","cirE":"\u29C3","cire":"\u2257","cirfnint":"\u2A10","cirmid":"\u2AEF","cirscir":"\u29C2","ClockwiseContourIntegral":"\u2232","CloseCurlyDoubleQuote":"\u201D","CloseCurlyQuote":"\u2019","clubs":"\u2663","clubsuit":"\u2663","colon":":","Colon":"\u2237","Colone":"\u2A74","colone":"\u2254","coloneq":"\u2254","comma":",","commat":"@","comp":"\u2201","compfn":"\u2218","complement":"\u2201","complexes":"\u2102","cong":"\u2245","congdot":"\u2A6D","Congruent":"\u2261","conint":"\u222E","Conint":"\u222F","ContourIntegral":"\u222E","copf":"\uD835\uDD54","Copf":"\u2102","coprod":"\u2210","Coproduct":"\u2210","copy":"\u00A9","COPY":"\u00A9","copysr":"\u2117","CounterClockwiseContourIntegral":"\u2233","crarr":"\u21B5","cross":"\u2717","Cross":"\u2A2F","Cscr":"\uD835\uDC9E","cscr":"\uD835\uDCB8","csub":"\u2ACF","csube":"\u2AD1","csup":"\u2AD0","csupe":"\u2AD2","ctdot":"\u22EF","cudarrl":"\u2938","cudarrr":"\u2935","cuepr":"\u22DE","cuesc":"\u22DF","cularr":"\u21B6","cularrp":"\u293D","cupbrcap":"\u2A48","cupcap":"\u2A46","CupCap":"\u224D","cup":"\u222A","Cup":"\u22D3","cupcup":"\u2A4A","cupdot":"\u228D","cupor":"\u2A45","cups":"\u222A\uFE00","curarr":"\u21B7","curarrm":"\u293C","curlyeqprec":"\u22DE","curlyeqsucc":"\u22DF","curlyvee":"\u22CE","curlywedge":"\u22CF","curren":"\u00A4","curvearrowleft":"\u21B6","curvearrowright":"\u21B7","cuvee":"\u22CE","cuwed":"\u22CF","cwconint":"\u2232","cwint":"\u2231","cylcty":"\u232D","dagger":"\u2020","Dagger":"\u2021","daleth":"\u2138","darr":"\u2193","Darr":"\u21A1","dArr":"\u21D3","dash":"\u2010","Dashv":"\u2AE4","dashv":"\u22A3","dbkarow":"\u290F","dblac":"\u02DD","Dcaron":"\u010E","dcaron":"\u010F","Dcy":"\u0414","dcy":"\u0434","ddagger":"\u2021","ddarr":"\u21CA","DD":"\u2145","dd":"\u2146","DDotrahd":"\u2911","ddotseq":"\u2A77","deg":"\u00B0","Del":"\u2207","Delta":"\u0394","delta":"\u03B4","demptyv":"\u29B1","dfisht":"\u297F","Dfr":"\uD835\uDD07","dfr":"\uD835\uDD21","dHar":"\u2965","dharl":"\u21C3","dharr":"\u21C2","DiacriticalAcute":"\u00B4","DiacriticalDot":"\u02D9","DiacriticalDoubleAcute":"\u02DD","DiacriticalGrave":"`","DiacriticalTilde":"\u02DC","diam":"\u22C4","diamond":"\u22C4","Diamond":"\u22C4","diamondsuit":"\u2666","diams":"\u2666","die":"\u00A8","DifferentialD":"\u2146","digamma":"\u03DD","disin":"\u22F2","div":"\u00F7","divide":"\u00F7","divideontimes":"\u22C7","divonx":"\u22C7","DJcy":"\u0402","djcy":"\u0452","dlcorn":"\u231E","dlcrop":"\u230D","dollar":"$","Dopf":"\uD835\uDD3B","dopf":"\uD835\uDD55","Dot":"\u00A8","dot":"\u02D9","DotDot":"\u20DC","doteq":"\u2250","doteqdot":"\u2251","DotEqual":"\u2250","dotminus":"\u2238","dotplus":"\u2214","dotsquare":"\u22A1","doublebarwedge":"\u2306","DoubleContourIntegral":"\u222F","DoubleDot":"\u00A8","DoubleDownArrow":"\u21D3","DoubleLeftArrow":"\u21D0","DoubleLeftRightArrow":"\u21D4","DoubleLeftTee":"\u2AE4","DoubleLongLeftArrow":"\u27F8","DoubleLongLeftRightArrow":"\u27FA","DoubleLongRightArrow":"\u27F9","DoubleRightArrow":"\u21D2","DoubleRightTee":"\u22A8","DoubleUpArrow":"\u21D1","DoubleUpDownArrow":"\u21D5","DoubleVerticalBar":"\u2225","DownArrowBar":"\u2913","downarrow":"\u2193","DownArrow":"\u2193","Downarrow":"\u21D3","DownArrowUpArrow":"\u21F5","DownBreve":"\u0311","downdownarrows":"\u21CA","downharpoonleft":"\u21C3","downharpoonright":"\u21C2","DownLeftRightVector":"\u2950","DownLeftTeeVector":"\u295E","DownLeftVectorBar":"\u2956","DownLeftVector":"\u21BD","DownRightTeeVector":"\u295F","DownRightVectorBar":"\u2957","DownRightVector":"\u21C1","DownTeeArrow":"\u21A7","DownTee":"\u22A4","drbkarow":"\u2910","drcorn":"\u231F","drcrop":"\u230C","Dscr":"\uD835\uDC9F","dscr":"\uD835\uDCB9","DScy":"\u0405","dscy":"\u0455","dsol":"\u29F6","Dstrok":"\u0110","dstrok":"\u0111","dtdot":"\u22F1","dtri":"\u25BF","dtrif":"\u25BE","duarr":"\u21F5","duhar":"\u296F","dwangle":"\u29A6","DZcy":"\u040F","dzcy":"\u045F","dzigrarr":"\u27FF","Eacute":"\u00C9","eacute":"\u00E9","easter":"\u2A6E","Ecaron":"\u011A","ecaron":"\u011B","Ecirc":"\u00CA","ecirc":"\u00EA","ecir":"\u2256","ecolon":"\u2255","Ecy":"\u042D","ecy":"\u044D","eDDot":"\u2A77","Edot":"\u0116","edot":"\u0117","eDot":"\u2251","ee":"\u2147","efDot":"\u2252","Efr":"\uD835\uDD08","efr":"\uD835\uDD22","eg":"\u2A9A","Egrave":"\u00C8","egrave":"\u00E8","egs":"\u2A96","egsdot":"\u2A98","el":"\u2A99","Element":"\u2208","elinters":"\u23E7","ell":"\u2113","els":"\u2A95","elsdot":"\u2A97","Emacr":"\u0112","emacr":"\u0113","empty":"\u2205","emptyset":"\u2205","EmptySmallSquare":"\u25FB","emptyv":"\u2205","EmptyVerySmallSquare":"\u25AB","emsp13":"\u2004","emsp14":"\u2005","emsp":"\u2003","ENG":"\u014A","eng":"\u014B","ensp":"\u2002","Eogon":"\u0118","eogon":"\u0119","Eopf":"\uD835\uDD3C","eopf":"\uD835\uDD56","epar":"\u22D5","eparsl":"\u29E3","eplus":"\u2A71","epsi":"\u03B5","Epsilon":"\u0395","epsilon":"\u03B5","epsiv":"\u03F5","eqcirc":"\u2256","eqcolon":"\u2255","eqsim":"\u2242","eqslantgtr":"\u2A96","eqslantless":"\u2A95","Equal":"\u2A75","equals":"=","EqualTilde":"\u2242","equest":"\u225F","Equilibrium":"\u21CC","equiv":"\u2261","equivDD":"\u2A78","eqvparsl":"\u29E5","erarr":"\u2971","erDot":"\u2253","escr":"\u212F","Escr":"\u2130","esdot":"\u2250","Esim":"\u2A73","esim":"\u2242","Eta":"\u0397","eta":"\u03B7","ETH":"\u00D0","eth":"\u00F0","Euml":"\u00CB","euml":"\u00EB","euro":"\u20AC","excl":"!","exist":"\u2203","Exists":"\u2203","expectation":"\u2130","exponentiale":"\u2147","ExponentialE":"\u2147","fallingdotseq":"\u2252","Fcy":"\u0424","fcy":"\u0444","female":"\u2640","ffilig":"\uFB03","fflig":"\uFB00","ffllig":"\uFB04","Ffr":"\uD835\uDD09","ffr":"\uD835\uDD23","filig":"\uFB01","FilledSmallSquare":"\u25FC","FilledVerySmallSquare":"\u25AA","fjlig":"fj","flat":"\u266D","fllig":"\uFB02","fltns":"\u25B1","fnof":"\u0192","Fopf":"\uD835\uDD3D","fopf":"\uD835\uDD57","forall":"\u2200","ForAll":"\u2200","fork":"\u22D4","forkv":"\u2AD9","Fouriertrf":"\u2131","fpartint":"\u2A0D","frac12":"\u00BD","frac13":"\u2153","frac14":"\u00BC","frac15":"\u2155","frac16":"\u2159","frac18":"\u215B","frac23":"\u2154","frac25":"\u2156","frac34":"\u00BE","frac35":"\u2157","frac38":"\u215C","frac45":"\u2158","frac56":"\u215A","frac58":"\u215D","frac78":"\u215E","frasl":"\u2044","frown":"\u2322","fscr":"\uD835\uDCBB","Fscr":"\u2131","gacute":"\u01F5","Gamma":"\u0393","gamma":"\u03B3","Gammad":"\u03DC","gammad":"\u03DD","gap":"\u2A86","Gbreve":"\u011E","gbreve":"\u011F","Gcedil":"\u0122","Gcirc":"\u011C","gcirc":"\u011D","Gcy":"\u0413","gcy":"\u0433","Gdot":"\u0120","gdot":"\u0121","ge":"\u2265","gE":"\u2267","gEl":"\u2A8C","gel":"\u22DB","geq":"\u2265","geqq":"\u2267","geqslant":"\u2A7E","gescc":"\u2AA9","ges":"\u2A7E","gesdot":"\u2A80","gesdoto":"\u2A82","gesdotol":"\u2A84","gesl":"\u22DB\uFE00","gesles":"\u2A94","Gfr":"\uD835\uDD0A","gfr":"\uD835\uDD24","gg":"\u226B","Gg":"\u22D9","ggg":"\u22D9","gimel":"\u2137","GJcy":"\u0403","gjcy":"\u0453","gla":"\u2AA5","gl":"\u2277","glE":"\u2A92","glj":"\u2AA4","gnap":"\u2A8A","gnapprox":"\u2A8A","gne":"\u2A88","gnE":"\u2269","gneq":"\u2A88","gneqq":"\u2269","gnsim":"\u22E7","Gopf":"\uD835\uDD3E","gopf":"\uD835\uDD58","grave":"`","GreaterEqual":"\u2265","GreaterEqualLess":"\u22DB","GreaterFullEqual":"\u2267","GreaterGreater":"\u2AA2","GreaterLess":"\u2277","GreaterSlantEqual":"\u2A7E","GreaterTilde":"\u2273","Gscr":"\uD835\uDCA2","gscr":"\u210A","gsim":"\u2273","gsime":"\u2A8E","gsiml":"\u2A90","gtcc":"\u2AA7","gtcir":"\u2A7A","gt":">","GT":">","Gt":"\u226B","gtdot":"\u22D7","gtlPar":"\u2995","gtquest":"\u2A7C","gtrapprox":"\u2A86","gtrarr":"\u2978","gtrdot":"\u22D7","gtreqless":"\u22DB","gtreqqless":"\u2A8C","gtrless":"\u2277","gtrsim":"\u2273","gvertneqq":"\u2269\uFE00","gvnE":"\u2269\uFE00","Hacek":"\u02C7","hairsp":"\u200A","half":"\u00BD","hamilt":"\u210B","HARDcy":"\u042A","hardcy":"\u044A","harrcir":"\u2948","harr":"\u2194","hArr":"\u21D4","harrw":"\u21AD","Hat":"^","hbar":"\u210F","Hcirc":"\u0124","hcirc":"\u0125","hearts":"\u2665","heartsuit":"\u2665","hellip":"\u2026","hercon":"\u22B9","hfr":"\uD835\uDD25","Hfr":"\u210C","HilbertSpace":"\u210B","hksearow":"\u2925","hkswarow":"\u2926","hoarr":"\u21FF","homtht":"\u223B","hookleftarrow":"\u21A9","hookrightarrow":"\u21AA","hopf":"\uD835\uDD59","Hopf":"\u210D","horbar":"\u2015","HorizontalLine":"\u2500","hscr":"\uD835\uDCBD","Hscr":"\u210B","hslash":"\u210F","Hstrok":"\u0126","hstrok":"\u0127","HumpDownHump":"\u224E","HumpEqual":"\u224F","hybull":"\u2043","hyphen":"\u2010","Iacute":"\u00CD","iacute":"\u00ED","ic":"\u2063","Icirc":"\u00CE","icirc":"\u00EE","Icy":"\u0418","icy":"\u0438","Idot":"\u0130","IEcy":"\u0415","iecy":"\u0435","iexcl":"\u00A1","iff":"\u21D4","ifr":"\uD835\uDD26","Ifr":"\u2111","Igrave":"\u00CC","igrave":"\u00EC","ii":"\u2148","iiiint":"\u2A0C","iiint":"\u222D","iinfin":"\u29DC","iiota":"\u2129","IJlig":"\u0132","ijlig":"\u0133","Imacr":"\u012A","imacr":"\u012B","image":"\u2111","ImaginaryI":"\u2148","imagline":"\u2110","imagpart":"\u2111","imath":"\u0131","Im":"\u2111","imof":"\u22B7","imped":"\u01B5","Implies":"\u21D2","incare":"\u2105","in":"\u2208","infin":"\u221E","infintie":"\u29DD","inodot":"\u0131","intcal":"\u22BA","int":"\u222B","Int":"\u222C","integers":"\u2124","Integral":"\u222B","intercal":"\u22BA","Intersection":"\u22C2","intlarhk":"\u2A17","intprod":"\u2A3C","InvisibleComma":"\u2063","InvisibleTimes":"\u2062","IOcy":"\u0401","iocy":"\u0451","Iogon":"\u012E","iogon":"\u012F","Iopf":"\uD835\uDD40","iopf":"\uD835\uDD5A","Iota":"\u0399","iota":"\u03B9","iprod":"\u2A3C","iquest":"\u00BF","iscr":"\uD835\uDCBE","Iscr":"\u2110","isin":"\u2208","isindot":"\u22F5","isinE":"\u22F9","isins":"\u22F4","isinsv":"\u22F3","isinv":"\u2208","it":"\u2062","Itilde":"\u0128","itilde":"\u0129","Iukcy":"\u0406","iukcy":"\u0456","Iuml":"\u00CF","iuml":"\u00EF","Jcirc":"\u0134","jcirc":"\u0135","Jcy":"\u0419","jcy":"\u0439","Jfr":"\uD835\uDD0D","jfr":"\uD835\uDD27","jmath":"\u0237","Jopf":"\uD835\uDD41","jopf":"\uD835\uDD5B","Jscr":"\uD835\uDCA5","jscr":"\uD835\uDCBF","Jsercy":"\u0408","jsercy":"\u0458","Jukcy":"\u0404","jukcy":"\u0454","Kappa":"\u039A","kappa":"\u03BA","kappav":"\u03F0","Kcedil":"\u0136","kcedil":"\u0137","Kcy":"\u041A","kcy":"\u043A","Kfr":"\uD835\uDD0E","kfr":"\uD835\uDD28","kgreen":"\u0138","KHcy":"\u0425","khcy":"\u0445","KJcy":"\u040C","kjcy":"\u045C","Kopf":"\uD835\uDD42","kopf":"\uD835\uDD5C","Kscr":"\uD835\uDCA6","kscr":"\uD835\uDCC0","lAarr":"\u21DA","Lacute":"\u0139","lacute":"\u013A","laemptyv":"\u29B4","lagran":"\u2112","Lambda":"\u039B","lambda":"\u03BB","lang":"\u27E8","Lang":"\u27EA","langd":"\u2991","langle":"\u27E8","lap":"\u2A85","Laplacetrf":"\u2112","laquo":"\u00AB","larrb":"\u21E4","larrbfs":"\u291F","larr":"\u2190","Larr":"\u219E","lArr":"\u21D0","larrfs":"\u291D","larrhk":"\u21A9","larrlp":"\u21AB","larrpl":"\u2939","larrsim":"\u2973","larrtl":"\u21A2","latail":"\u2919","lAtail":"\u291B","lat":"\u2AAB","late":"\u2AAD","lates":"\u2AAD\uFE00","lbarr":"\u290C","lBarr":"\u290E","lbbrk":"\u2772","lbrace":"{","lbrack":"[","lbrke":"\u298B","lbrksld":"\u298F","lbrkslu":"\u298D","Lcaron":"\u013D","lcaron":"\u013E","Lcedil":"\u013B","lcedil":"\u013C","lceil":"\u2308","lcub":"{","Lcy":"\u041B","lcy":"\u043B","ldca":"\u2936","ldquo":"\u201C","ldquor":"\u201E","ldrdhar":"\u2967","ldrushar":"\u294B","ldsh":"\u21B2","le":"\u2264","lE":"\u2266","LeftAngleBracket":"\u27E8","LeftArrowBar":"\u21E4","leftarrow":"\u2190","LeftArrow":"\u2190","Leftarrow":"\u21D0","LeftArrowRightArrow":"\u21C6","leftarrowtail":"\u21A2","LeftCeiling":"\u2308","LeftDoubleBracket":"\u27E6","LeftDownTeeVector":"\u2961","LeftDownVectorBar":"\u2959","LeftDownVector":"\u21C3","LeftFloor":"\u230A","leftharpoondown":"\u21BD","leftharpoonup":"\u21BC","leftleftarrows":"\u21C7","leftrightarrow":"\u2194","LeftRightArrow":"\u2194","Leftrightarrow":"\u21D4","leftrightarrows":"\u21C6","leftrightharpoons":"\u21CB","leftrightsquigarrow":"\u21AD","LeftRightVector":"\u294E","LeftTeeArrow":"\u21A4","LeftTee":"\u22A3","LeftTeeVector":"\u295A","leftthreetimes":"\u22CB","LeftTriangleBar":"\u29CF","LeftTriangle":"\u22B2","LeftTriangleEqual":"\u22B4","LeftUpDownVector":"\u2951","LeftUpTeeVector":"\u2960","LeftUpVectorBar":"\u2958","LeftUpVector":"\u21BF","LeftVectorBar":"\u2952","LeftVector":"\u21BC","lEg":"\u2A8B","leg":"\u22DA","leq":"\u2264","leqq":"\u2266","leqslant":"\u2A7D","lescc":"\u2AA8","les":"\u2A7D","lesdot":"\u2A7F","lesdoto":"\u2A81","lesdotor":"\u2A83","lesg":"\u22DA\uFE00","lesges":"\u2A93","lessapprox":"\u2A85","lessdot":"\u22D6","lesseqgtr":"\u22DA","lesseqqgtr":"\u2A8B","LessEqualGreater":"\u22DA","LessFullEqual":"\u2266","LessGreater":"\u2276","lessgtr":"\u2276","LessLess":"\u2AA1","lesssim":"\u2272","LessSlantEqual":"\u2A7D","LessTilde":"\u2272","lfisht":"\u297C","lfloor":"\u230A","Lfr":"\uD835\uDD0F","lfr":"\uD835\uDD29","lg":"\u2276","lgE":"\u2A91","lHar":"\u2962","lhard":"\u21BD","lharu":"\u21BC","lharul":"\u296A","lhblk":"\u2584","LJcy":"\u0409","ljcy":"\u0459","llarr":"\u21C7","ll":"\u226A","Ll":"\u22D8","llcorner":"\u231E","Lleftarrow":"\u21DA","llhard":"\u296B","lltri":"\u25FA","Lmidot":"\u013F","lmidot":"\u0140","lmoustache":"\u23B0","lmoust":"\u23B0","lnap":"\u2A89","lnapprox":"\u2A89","lne":"\u2A87","lnE":"\u2268","lneq":"\u2A87","lneqq":"\u2268","lnsim":"\u22E6","loang":"\u27EC","loarr":"\u21FD","lobrk":"\u27E6","longleftarrow":"\u27F5","LongLeftArrow":"\u27F5","Longleftarrow":"\u27F8","longleftrightarrow":"\u27F7","LongLeftRightArrow":"\u27F7","Longleftrightarrow":"\u27FA","longmapsto":"\u27FC","longrightarrow":"\u27F6","LongRightArrow":"\u27F6","Longrightarrow":"\u27F9","looparrowleft":"\u21AB","looparrowright":"\u21AC","lopar":"\u2985","Lopf":"\uD835\uDD43","lopf":"\uD835\uDD5D","loplus":"\u2A2D","lotimes":"\u2A34","lowast":"\u2217","lowbar":"_","LowerLeftArrow":"\u2199","LowerRightArrow":"\u2198","loz":"\u25CA","lozenge":"\u25CA","lozf":"\u29EB","lpar":"(","lparlt":"\u2993","lrarr":"\u21C6","lrcorner":"\u231F","lrhar":"\u21CB","lrhard":"\u296D","lrm":"\u200E","lrtri":"\u22BF","lsaquo":"\u2039","lscr":"\uD835\uDCC1","Lscr":"\u2112","lsh":"\u21B0","Lsh":"\u21B0","lsim":"\u2272","lsime":"\u2A8D","lsimg":"\u2A8F","lsqb":"[","lsquo":"\u2018","lsquor":"\u201A","Lstrok":"\u0141","lstrok":"\u0142","ltcc":"\u2AA6","ltcir":"\u2A79","lt":"<","LT":"<","Lt":"\u226A","ltdot":"\u22D6","lthree":"\u22CB","ltimes":"\u22C9","ltlarr":"\u2976","ltquest":"\u2A7B","ltri":"\u25C3","ltrie":"\u22B4","ltrif":"\u25C2","ltrPar":"\u2996","lurdshar":"\u294A","luruhar":"\u2966","lvertneqq":"\u2268\uFE00","lvnE":"\u2268\uFE00","macr":"\u00AF","male":"\u2642","malt":"\u2720","maltese":"\u2720","Map":"\u2905","map":"\u21A6","mapsto":"\u21A6","mapstodown":"\u21A7","mapstoleft":"\u21A4","mapstoup":"\u21A5","marker":"\u25AE","mcomma":"\u2A29","Mcy":"\u041C","mcy":"\u043C","mdash":"\u2014","mDDot":"\u223A","measuredangle":"\u2221","MediumSpace":"\u205F","Mellintrf":"\u2133","Mfr":"\uD835\uDD10","mfr":"\uD835\uDD2A","mho":"\u2127","micro":"\u00B5","midast":"*","midcir":"\u2AF0","mid":"\u2223","middot":"\u00B7","minusb":"\u229F","minus":"\u2212","minusd":"\u2238","minusdu":"\u2A2A","MinusPlus":"\u2213","mlcp":"\u2ADB","mldr":"\u2026","mnplus":"\u2213","models":"\u22A7","Mopf":"\uD835\uDD44","mopf":"\uD835\uDD5E","mp":"\u2213","mscr":"\uD835\uDCC2","Mscr":"\u2133","mstpos":"\u223E","Mu":"\u039C","mu":"\u03BC","multimap":"\u22B8","mumap":"\u22B8","nabla":"\u2207","Nacute":"\u0143","nacute":"\u0144","nang":"\u2220\u20D2","nap":"\u2249","napE":"\u2A70\u0338","napid":"\u224B\u0338","napos":"\u0149","napprox":"\u2249","natural":"\u266E","naturals":"\u2115","natur":"\u266E","nbsp":"\u00A0","nbump":"\u224E\u0338","nbumpe":"\u224F\u0338","ncap":"\u2A43","Ncaron":"\u0147","ncaron":"\u0148","Ncedil":"\u0145","ncedil":"\u0146","ncong":"\u2247","ncongdot":"\u2A6D\u0338","ncup":"\u2A42","Ncy":"\u041D","ncy":"\u043D","ndash":"\u2013","nearhk":"\u2924","nearr":"\u2197","neArr":"\u21D7","nearrow":"\u2197","ne":"\u2260","nedot":"\u2250\u0338","NegativeMediumSpace":"\u200B","NegativeThickSpace":"\u200B","NegativeThinSpace":"\u200B","NegativeVeryThinSpace":"\u200B","nequiv":"\u2262","nesear":"\u2928","nesim":"\u2242\u0338","NestedGreaterGreater":"\u226B","NestedLessLess":"\u226A","NewLine":"\n","nexist":"\u2204","nexists":"\u2204","Nfr":"\uD835\uDD11","nfr":"\uD835\uDD2B","ngE":"\u2267\u0338","nge":"\u2271","ngeq":"\u2271","ngeqq":"\u2267\u0338","ngeqslant":"\u2A7E\u0338","nges":"\u2A7E\u0338","nGg":"\u22D9\u0338","ngsim":"\u2275","nGt":"\u226B\u20D2","ngt":"\u226F","ngtr":"\u226F","nGtv":"\u226B\u0338","nharr":"\u21AE","nhArr":"\u21CE","nhpar":"\u2AF2","ni":"\u220B","nis":"\u22FC","nisd":"\u22FA","niv":"\u220B","NJcy":"\u040A","njcy":"\u045A","nlarr":"\u219A","nlArr":"\u21CD","nldr":"\u2025","nlE":"\u2266\u0338","nle":"\u2270","nleftarrow":"\u219A","nLeftarrow":"\u21CD","nleftrightarrow":"\u21AE","nLeftrightarrow":"\u21CE","nleq":"\u2270","nleqq":"\u2266\u0338","nleqslant":"\u2A7D\u0338","nles":"\u2A7D\u0338","nless":"\u226E","nLl":"\u22D8\u0338","nlsim":"\u2274","nLt":"\u226A\u20D2","nlt":"\u226E","nltri":"\u22EA","nltrie":"\u22EC","nLtv":"\u226A\u0338","nmid":"\u2224","NoBreak":"\u2060","NonBreakingSpace":"\u00A0","nopf":"\uD835\uDD5F","Nopf":"\u2115","Not":"\u2AEC","not":"\u00AC","NotCongruent":"\u2262","NotCupCap":"\u226D","NotDoubleVerticalBar":"\u2226","NotElement":"\u2209","NotEqual":"\u2260","NotEqualTilde":"\u2242\u0338","NotExists":"\u2204","NotGreater":"\u226F","NotGreaterEqual":"\u2271","NotGreaterFullEqual":"\u2267\u0338","NotGreaterGreater":"\u226B\u0338","NotGreaterLess":"\u2279","NotGreaterSlantEqual":"\u2A7E\u0338","NotGreaterTilde":"\u2275","NotHumpDownHump":"\u224E\u0338","NotHumpEqual":"\u224F\u0338","notin":"\u2209","notindot":"\u22F5\u0338","notinE":"\u22F9\u0338","notinva":"\u2209","notinvb":"\u22F7","notinvc":"\u22F6","NotLeftTriangleBar":"\u29CF\u0338","NotLeftTriangle":"\u22EA","NotLeftTriangleEqual":"\u22EC","NotLess":"\u226E","NotLessEqual":"\u2270","NotLessGreater":"\u2278","NotLessLess":"\u226A\u0338","NotLessSlantEqual":"\u2A7D\u0338","NotLessTilde":"\u2274","NotNestedGreaterGreater":"\u2AA2\u0338","NotNestedLessLess":"\u2AA1\u0338","notni":"\u220C","notniva":"\u220C","notnivb":"\u22FE","notnivc":"\u22FD","NotPrecedes":"\u2280","NotPrecedesEqual":"\u2AAF\u0338","NotPrecedesSlantEqual":"\u22E0","NotReverseElement":"\u220C","NotRightTriangleBar":"\u29D0\u0338","NotRightTriangle":"\u22EB","NotRightTriangleEqual":"\u22ED","NotSquareSubset":"\u228F\u0338","NotSquareSubsetEqual":"\u22E2","NotSquareSuperset":"\u2290\u0338","NotSquareSupersetEqual":"\u22E3","NotSubset":"\u2282\u20D2","NotSubsetEqual":"\u2288","NotSucceeds":"\u2281","NotSucceedsEqual":"\u2AB0\u0338","NotSucceedsSlantEqual":"\u22E1","NotSucceedsTilde":"\u227F\u0338","NotSuperset":"\u2283\u20D2","NotSupersetEqual":"\u2289","NotTilde":"\u2241","NotTildeEqual":"\u2244","NotTildeFullEqual":"\u2247","NotTildeTilde":"\u2249","NotVerticalBar":"\u2224","nparallel":"\u2226","npar":"\u2226","nparsl":"\u2AFD\u20E5","npart":"\u2202\u0338","npolint":"\u2A14","npr":"\u2280","nprcue":"\u22E0","nprec":"\u2280","npreceq":"\u2AAF\u0338","npre":"\u2AAF\u0338","nrarrc":"\u2933\u0338","nrarr":"\u219B","nrArr":"\u21CF","nrarrw":"\u219D\u0338","nrightarrow":"\u219B","nRightarrow":"\u21CF","nrtri":"\u22EB","nrtrie":"\u22ED","nsc":"\u2281","nsccue":"\u22E1","nsce":"\u2AB0\u0338","Nscr":"\uD835\uDCA9","nscr":"\uD835\uDCC3","nshortmid":"\u2224","nshortparallel":"\u2226","nsim":"\u2241","nsime":"\u2244","nsimeq":"\u2244","nsmid":"\u2224","nspar":"\u2226","nsqsube":"\u22E2","nsqsupe":"\u22E3","nsub":"\u2284","nsubE":"\u2AC5\u0338","nsube":"\u2288","nsubset":"\u2282\u20D2","nsubseteq":"\u2288","nsubseteqq":"\u2AC5\u0338","nsucc":"\u2281","nsucceq":"\u2AB0\u0338","nsup":"\u2285","nsupE":"\u2AC6\u0338","nsupe":"\u2289","nsupset":"\u2283\u20D2","nsupseteq":"\u2289","nsupseteqq":"\u2AC6\u0338","ntgl":"\u2279","Ntilde":"\u00D1","ntilde":"\u00F1","ntlg":"\u2278","ntriangleleft":"\u22EA","ntrianglelefteq":"\u22EC","ntriangleright":"\u22EB","ntrianglerighteq":"\u22ED","Nu":"\u039D","nu":"\u03BD","num":"#","numero":"\u2116","numsp":"\u2007","nvap":"\u224D\u20D2","nvdash":"\u22AC","nvDash":"\u22AD","nVdash":"\u22AE","nVDash":"\u22AF","nvge":"\u2265\u20D2","nvgt":">\u20D2","nvHarr":"\u2904","nvinfin":"\u29DE","nvlArr":"\u2902","nvle":"\u2264\u20D2","nvlt":"<\u20D2","nvltrie":"\u22B4\u20D2","nvrArr":"\u2903","nvrtrie":"\u22B5\u20D2","nvsim":"\u223C\u20D2","nwarhk":"\u2923","nwarr":"\u2196","nwArr":"\u21D6","nwarrow":"\u2196","nwnear":"\u2927","Oacute":"\u00D3","oacute":"\u00F3","oast":"\u229B","Ocirc":"\u00D4","ocirc":"\u00F4","ocir":"\u229A","Ocy":"\u041E","ocy":"\u043E","odash":"\u229D","Odblac":"\u0150","odblac":"\u0151","odiv":"\u2A38","odot":"\u2299","odsold":"\u29BC","OElig":"\u0152","oelig":"\u0153","ofcir":"\u29BF","Ofr":"\uD835\uDD12","ofr":"\uD835\uDD2C","ogon":"\u02DB","Ograve":"\u00D2","ograve":"\u00F2","ogt":"\u29C1","ohbar":"\u29B5","ohm":"\u03A9","oint":"\u222E","olarr":"\u21BA","olcir":"\u29BE","olcross":"\u29BB","oline":"\u203E","olt":"\u29C0","Omacr":"\u014C","omacr":"\u014D","Omega":"\u03A9","omega":"\u03C9","Omicron":"\u039F","omicron":"\u03BF","omid":"\u29B6","ominus":"\u2296","Oopf":"\uD835\uDD46","oopf":"\uD835\uDD60","opar":"\u29B7","OpenCurlyDoubleQuote":"\u201C","OpenCurlyQuote":"\u2018","operp":"\u29B9","oplus":"\u2295","orarr":"\u21BB","Or":"\u2A54","or":"\u2228","ord":"\u2A5D","order":"\u2134","orderof":"\u2134","ordf":"\u00AA","ordm":"\u00BA","origof":"\u22B6","oror":"\u2A56","orslope":"\u2A57","orv":"\u2A5B","oS":"\u24C8","Oscr":"\uD835\uDCAA","oscr":"\u2134","Oslash":"\u00D8","oslash":"\u00F8","osol":"\u2298","Otilde":"\u00D5","otilde":"\u00F5","otimesas":"\u2A36","Otimes":"\u2A37","otimes":"\u2297","Ouml":"\u00D6","ouml":"\u00F6","ovbar":"\u233D","OverBar":"\u203E","OverBrace":"\u23DE","OverBracket":"\u23B4","OverParenthesis":"\u23DC","para":"\u00B6","parallel":"\u2225","par":"\u2225","parsim":"\u2AF3","parsl":"\u2AFD","part":"\u2202","PartialD":"\u2202","Pcy":"\u041F","pcy":"\u043F","percnt":"%","period":".","permil":"\u2030","perp":"\u22A5","pertenk":"\u2031","Pfr":"\uD835\uDD13","pfr":"\uD835\uDD2D","Phi":"\u03A6","phi":"\u03C6","phiv":"\u03D5","phmmat":"\u2133","phone":"\u260E","Pi":"\u03A0","pi":"\u03C0","pitchfork":"\u22D4","piv":"\u03D6","planck":"\u210F","planckh":"\u210E","plankv":"\u210F","plusacir":"\u2A23","plusb":"\u229E","pluscir":"\u2A22","plus":"+","plusdo":"\u2214","plusdu":"\u2A25","pluse":"\u2A72","PlusMinus":"\u00B1","plusmn":"\u00B1","plussim":"\u2A26","plustwo":"\u2A27","pm":"\u00B1","Poincareplane":"\u210C","pointint":"\u2A15","popf":"\uD835\uDD61","Popf":"\u2119","pound":"\u00A3","prap":"\u2AB7","Pr":"\u2ABB","pr":"\u227A","prcue":"\u227C","precapprox":"\u2AB7","prec":"\u227A","preccurlyeq":"\u227C","Precedes":"\u227A","PrecedesEqual":"\u2AAF","PrecedesSlantEqual":"\u227C","PrecedesTilde":"\u227E","preceq":"\u2AAF","precnapprox":"\u2AB9","precneqq":"\u2AB5","precnsim":"\u22E8","pre":"\u2AAF","prE":"\u2AB3","precsim":"\u227E","prime":"\u2032","Prime":"\u2033","primes":"\u2119","prnap":"\u2AB9","prnE":"\u2AB5","prnsim":"\u22E8","prod":"\u220F","Product":"\u220F","profalar":"\u232E","profline":"\u2312","profsurf":"\u2313","prop":"\u221D","Proportional":"\u221D","Proportion":"\u2237","propto":"\u221D","prsim":"\u227E","prurel":"\u22B0","Pscr":"\uD835\uDCAB","pscr":"\uD835\uDCC5","Psi":"\u03A8","psi":"\u03C8","puncsp":"\u2008","Qfr":"\uD835\uDD14","qfr":"\uD835\uDD2E","qint":"\u2A0C","qopf":"\uD835\uDD62","Qopf":"\u211A","qprime":"\u2057","Qscr":"\uD835\uDCAC","qscr":"\uD835\uDCC6","quaternions":"\u210D","quatint":"\u2A16","quest":"?","questeq":"\u225F","quot":"\"","QUOT":"\"","rAarr":"\u21DB","race":"\u223D\u0331","Racute":"\u0154","racute":"\u0155","radic":"\u221A","raemptyv":"\u29B3","rang":"\u27E9","Rang":"\u27EB","rangd":"\u2992","range":"\u29A5","rangle":"\u27E9","raquo":"\u00BB","rarrap":"\u2975","rarrb":"\u21E5","rarrbfs":"\u2920","rarrc":"\u2933","rarr":"\u2192","Rarr":"\u21A0","rArr":"\u21D2","rarrfs":"\u291E","rarrhk":"\u21AA","rarrlp":"\u21AC","rarrpl":"\u2945","rarrsim":"\u2974","Rarrtl":"\u2916","rarrtl":"\u21A3","rarrw":"\u219D","ratail":"\u291A","rAtail":"\u291C","ratio":"\u2236","rationals":"\u211A","rbarr":"\u290D","rBarr":"\u290F","RBarr":"\u2910","rbbrk":"\u2773","rbrace":"}","rbrack":"]","rbrke":"\u298C","rbrksld":"\u298E","rbrkslu":"\u2990","Rcaron":"\u0158","rcaron":"\u0159","Rcedil":"\u0156","rcedil":"\u0157","rceil":"\u2309","rcub":"}","Rcy":"\u0420","rcy":"\u0440","rdca":"\u2937","rdldhar":"\u2969","rdquo":"\u201D","rdquor":"\u201D","rdsh":"\u21B3","real":"\u211C","realine":"\u211B","realpart":"\u211C","reals":"\u211D","Re":"\u211C","rect":"\u25AD","reg":"\u00AE","REG":"\u00AE","ReverseElement":"\u220B","ReverseEquilibrium":"\u21CB","ReverseUpEquilibrium":"\u296F","rfisht":"\u297D","rfloor":"\u230B","rfr":"\uD835\uDD2F","Rfr":"\u211C","rHar":"\u2964","rhard":"\u21C1","rharu":"\u21C0","rharul":"\u296C","Rho":"\u03A1","rho":"\u03C1","rhov":"\u03F1","RightAngleBracket":"\u27E9","RightArrowBar":"\u21E5","rightarrow":"\u2192","RightArrow":"\u2192","Rightarrow":"\u21D2","RightArrowLeftArrow":"\u21C4","rightarrowtail":"\u21A3","RightCeiling":"\u2309","RightDoubleBracket":"\u27E7","RightDownTeeVector":"\u295D","RightDownVectorBar":"\u2955","RightDownVector":"\u21C2","RightFloor":"\u230B","rightharpoondown":"\u21C1","rightharpoonup":"\u21C0","rightleftarrows":"\u21C4","rightleftharpoons":"\u21CC","rightrightarrows":"\u21C9","rightsquigarrow":"\u219D","RightTeeArrow":"\u21A6","RightTee":"\u22A2","RightTeeVector":"\u295B","rightthreetimes":"\u22CC","RightTriangleBar":"\u29D0","RightTriangle":"\u22B3","RightTriangleEqual":"\u22B5","RightUpDownVector":"\u294F","RightUpTeeVector":"\u295C","RightUpVectorBar":"\u2954","RightUpVector":"\u21BE","RightVectorBar":"\u2953","RightVector":"\u21C0","ring":"\u02DA","risingdotseq":"\u2253","rlarr":"\u21C4","rlhar":"\u21CC","rlm":"\u200F","rmoustache":"\u23B1","rmoust":"\u23B1","rnmid":"\u2AEE","roang":"\u27ED","roarr":"\u21FE","robrk":"\u27E7","ropar":"\u2986","ropf":"\uD835\uDD63","Ropf":"\u211D","roplus":"\u2A2E","rotimes":"\u2A35","RoundImplies":"\u2970","rpar":")","rpargt":"\u2994","rppolint":"\u2A12","rrarr":"\u21C9","Rrightarrow":"\u21DB","rsaquo":"\u203A","rscr":"\uD835\uDCC7","Rscr":"\u211B","rsh":"\u21B1","Rsh":"\u21B1","rsqb":"]","rsquo":"\u2019","rsquor":"\u2019","rthree":"\u22CC","rtimes":"\u22CA","rtri":"\u25B9","rtrie":"\u22B5","rtrif":"\u25B8","rtriltri":"\u29CE","RuleDelayed":"\u29F4","ruluhar":"\u2968","rx":"\u211E","Sacute":"\u015A","sacute":"\u015B","sbquo":"\u201A","scap":"\u2AB8","Scaron":"\u0160","scaron":"\u0161","Sc":"\u2ABC","sc":"\u227B","sccue":"\u227D","sce":"\u2AB0","scE":"\u2AB4","Scedil":"\u015E","scedil":"\u015F","Scirc":"\u015C","scirc":"\u015D","scnap":"\u2ABA","scnE":"\u2AB6","scnsim":"\u22E9","scpolint":"\u2A13","scsim":"\u227F","Scy":"\u0421","scy":"\u0441","sdotb":"\u22A1","sdot":"\u22C5","sdote":"\u2A66","searhk":"\u2925","searr":"\u2198","seArr":"\u21D8","searrow":"\u2198","sect":"\u00A7","semi":";","seswar":"\u2929","setminus":"\u2216","setmn":"\u2216","sext":"\u2736","Sfr":"\uD835\uDD16","sfr":"\uD835\uDD30","sfrown":"\u2322","sharp":"\u266F","SHCHcy":"\u0429","shchcy":"\u0449","SHcy":"\u0428","shcy":"\u0448","ShortDownArrow":"\u2193","ShortLeftArrow":"\u2190","shortmid":"\u2223","shortparallel":"\u2225","ShortRightArrow":"\u2192","ShortUpArrow":"\u2191","shy":"\u00AD","Sigma":"\u03A3","sigma":"\u03C3","sigmaf":"\u03C2","sigmav":"\u03C2","sim":"\u223C","simdot":"\u2A6A","sime":"\u2243","simeq":"\u2243","simg":"\u2A9E","simgE":"\u2AA0","siml":"\u2A9D","simlE":"\u2A9F","simne":"\u2246","simplus":"\u2A24","simrarr":"\u2972","slarr":"\u2190","SmallCircle":"\u2218","smallsetminus":"\u2216","smashp":"\u2A33","smeparsl":"\u29E4","smid":"\u2223","smile":"\u2323","smt":"\u2AAA","smte":"\u2AAC","smtes":"\u2AAC\uFE00","SOFTcy":"\u042C","softcy":"\u044C","solbar":"\u233F","solb":"\u29C4","sol":"/","Sopf":"\uD835\uDD4A","sopf":"\uD835\uDD64","spades":"\u2660","spadesuit":"\u2660","spar":"\u2225","sqcap":"\u2293","sqcaps":"\u2293\uFE00","sqcup":"\u2294","sqcups":"\u2294\uFE00","Sqrt":"\u221A","sqsub":"\u228F","sqsube":"\u2291","sqsubset":"\u228F","sqsubseteq":"\u2291","sqsup":"\u2290","sqsupe":"\u2292","sqsupset":"\u2290","sqsupseteq":"\u2292","square":"\u25A1","Square":"\u25A1","SquareIntersection":"\u2293","SquareSubset":"\u228F","SquareSubsetEqual":"\u2291","SquareSuperset":"\u2290","SquareSupersetEqual":"\u2292","SquareUnion":"\u2294","squarf":"\u25AA","squ":"\u25A1","squf":"\u25AA","srarr":"\u2192","Sscr":"\uD835\uDCAE","sscr":"\uD835\uDCC8","ssetmn":"\u2216","ssmile":"\u2323","sstarf":"\u22C6","Star":"\u22C6","star":"\u2606","starf":"\u2605","straightepsilon":"\u03F5","straightphi":"\u03D5","strns":"\u00AF","sub":"\u2282","Sub":"\u22D0","subdot":"\u2ABD","subE":"\u2AC5","sube":"\u2286","subedot":"\u2AC3","submult":"\u2AC1","subnE":"\u2ACB","subne":"\u228A","subplus":"\u2ABF","subrarr":"\u2979","subset":"\u2282","Subset":"\u22D0","subseteq":"\u2286","subseteqq":"\u2AC5","SubsetEqual":"\u2286","subsetneq":"\u228A","subsetneqq":"\u2ACB","subsim":"\u2AC7","subsub":"\u2AD5","subsup":"\u2AD3","succapprox":"\u2AB8","succ":"\u227B","succcurlyeq":"\u227D","Succeeds":"\u227B","SucceedsEqual":"\u2AB0","SucceedsSlantEqual":"\u227D","SucceedsTilde":"\u227F","succeq":"\u2AB0","succnapprox":"\u2ABA","succneqq":"\u2AB6","succnsim":"\u22E9","succsim":"\u227F","SuchThat":"\u220B","sum":"\u2211","Sum":"\u2211","sung":"\u266A","sup1":"\u00B9","sup2":"\u00B2","sup3":"\u00B3","sup":"\u2283","Sup":"\u22D1","supdot":"\u2ABE","supdsub":"\u2AD8","supE":"\u2AC6","supe":"\u2287","supedot":"\u2AC4","Superset":"\u2283","SupersetEqual":"\u2287","suphsol":"\u27C9","suphsub":"\u2AD7","suplarr":"\u297B","supmult":"\u2AC2","supnE":"\u2ACC","supne":"\u228B","supplus":"\u2AC0","supset":"\u2283","Supset":"\u22D1","supseteq":"\u2287","supseteqq":"\u2AC6","supsetneq":"\u228B","supsetneqq":"\u2ACC","supsim":"\u2AC8","supsub":"\u2AD4","supsup":"\u2AD6","swarhk":"\u2926","swarr":"\u2199","swArr":"\u21D9","swarrow":"\u2199","swnwar":"\u292A","szlig":"\u00DF","Tab":"\t","target":"\u2316","Tau":"\u03A4","tau":"\u03C4","tbrk":"\u23B4","Tcaron":"\u0164","tcaron":"\u0165","Tcedil":"\u0162","tcedil":"\u0163","Tcy":"\u0422","tcy":"\u0442","tdot":"\u20DB","telrec":"\u2315","Tfr":"\uD835\uDD17","tfr":"\uD835\uDD31","there4":"\u2234","therefore":"\u2234","Therefore":"\u2234","Theta":"\u0398","theta":"\u03B8","thetasym":"\u03D1","thetav":"\u03D1","thickapprox":"\u2248","thicksim":"\u223C","ThickSpace":"\u205F\u200A","ThinSpace":"\u2009","thinsp":"\u2009","thkap":"\u2248","thksim":"\u223C","THORN":"\u00DE","thorn":"\u00FE","tilde":"\u02DC","Tilde":"\u223C","TildeEqual":"\u2243","TildeFullEqual":"\u2245","TildeTilde":"\u2248","timesbar":"\u2A31","timesb":"\u22A0","times":"\u00D7","timesd":"\u2A30","tint":"\u222D","toea":"\u2928","topbot":"\u2336","topcir":"\u2AF1","top":"\u22A4","Topf":"\uD835\uDD4B","topf":"\uD835\uDD65","topfork":"\u2ADA","tosa":"\u2929","tprime":"\u2034","trade":"\u2122","TRADE":"\u2122","triangle":"\u25B5","triangledown":"\u25BF","triangleleft":"\u25C3","trianglelefteq":"\u22B4","triangleq":"\u225C","triangleright":"\u25B9","trianglerighteq":"\u22B5","tridot":"\u25EC","trie":"\u225C","triminus":"\u2A3A","TripleDot":"\u20DB","triplus":"\u2A39","trisb":"\u29CD","tritime":"\u2A3B","trpezium":"\u23E2","Tscr":"\uD835\uDCAF","tscr":"\uD835\uDCC9","TScy":"\u0426","tscy":"\u0446","TSHcy":"\u040B","tshcy":"\u045B","Tstrok":"\u0166","tstrok":"\u0167","twixt":"\u226C","twoheadleftarrow":"\u219E","twoheadrightarrow":"\u21A0","Uacute":"\u00DA","uacute":"\u00FA","uarr":"\u2191","Uarr":"\u219F","uArr":"\u21D1","Uarrocir":"\u2949","Ubrcy":"\u040E","ubrcy":"\u045E","Ubreve":"\u016C","ubreve":"\u016D","Ucirc":"\u00DB","ucirc":"\u00FB","Ucy":"\u0423","ucy":"\u0443","udarr":"\u21C5","Udblac":"\u0170","udblac":"\u0171","udhar":"\u296E","ufisht":"\u297E","Ufr":"\uD835\uDD18","ufr":"\uD835\uDD32","Ugrave":"\u00D9","ugrave":"\u00F9","uHar":"\u2963","uharl":"\u21BF","uharr":"\u21BE","uhblk":"\u2580","ulcorn":"\u231C","ulcorner":"\u231C","ulcrop":"\u230F","ultri":"\u25F8","Umacr":"\u016A","umacr":"\u016B","uml":"\u00A8","UnderBar":"_","UnderBrace":"\u23DF","UnderBracket":"\u23B5","UnderParenthesis":"\u23DD","Union":"\u22C3","UnionPlus":"\u228E","Uogon":"\u0172","uogon":"\u0173","Uopf":"\uD835\uDD4C","uopf":"\uD835\uDD66","UpArrowBar":"\u2912","uparrow":"\u2191","UpArrow":"\u2191","Uparrow":"\u21D1","UpArrowDownArrow":"\u21C5","updownarrow":"\u2195","UpDownArrow":"\u2195","Updownarrow":"\u21D5","UpEquilibrium":"\u296E","upharpoonleft":"\u21BF","upharpoonright":"\u21BE","uplus":"\u228E","UpperLeftArrow":"\u2196","UpperRightArrow":"\u2197","upsi":"\u03C5","Upsi":"\u03D2","upsih":"\u03D2","Upsilon":"\u03A5","upsilon":"\u03C5","UpTeeArrow":"\u21A5","UpTee":"\u22A5","upuparrows":"\u21C8","urcorn":"\u231D","urcorner":"\u231D","urcrop":"\u230E","Uring":"\u016E","uring":"\u016F","urtri":"\u25F9","Uscr":"\uD835\uDCB0","uscr":"\uD835\uDCCA","utdot":"\u22F0","Utilde":"\u0168","utilde":"\u0169","utri":"\u25B5","utrif":"\u25B4","uuarr":"\u21C8","Uuml":"\u00DC","uuml":"\u00FC","uwangle":"\u29A7","vangrt":"\u299C","varepsilon":"\u03F5","varkappa":"\u03F0","varnothing":"\u2205","varphi":"\u03D5","varpi":"\u03D6","varpropto":"\u221D","varr":"\u2195","vArr":"\u21D5","varrho":"\u03F1","varsigma":"\u03C2","varsubsetneq":"\u228A\uFE00","varsubsetneqq":"\u2ACB\uFE00","varsupsetneq":"\u228B\uFE00","varsupsetneqq":"\u2ACC\uFE00","vartheta":"\u03D1","vartriangleleft":"\u22B2","vartriangleright":"\u22B3","vBar":"\u2AE8","Vbar":"\u2AEB","vBarv":"\u2AE9","Vcy":"\u0412","vcy":"\u0432","vdash":"\u22A2","vDash":"\u22A8","Vdash":"\u22A9","VDash":"\u22AB","Vdashl":"\u2AE6","veebar":"\u22BB","vee":"\u2228","Vee":"\u22C1","veeeq":"\u225A","vellip":"\u22EE","verbar":"|","Verbar":"\u2016","vert":"|","Vert":"\u2016","VerticalBar":"\u2223","VerticalLine":"|","VerticalSeparator":"\u2758","VerticalTilde":"\u2240","VeryThinSpace":"\u200A","Vfr":"\uD835\uDD19","vfr":"\uD835\uDD33","vltri":"\u22B2","vnsub":"\u2282\u20D2","vnsup":"\u2283\u20D2","Vopf":"\uD835\uDD4D","vopf":"\uD835\uDD67","vprop":"\u221D","vrtri":"\u22B3","Vscr":"\uD835\uDCB1","vscr":"\uD835\uDCCB","vsubnE":"\u2ACB\uFE00","vsubne":"\u228A\uFE00","vsupnE":"\u2ACC\uFE00","vsupne":"\u228B\uFE00","Vvdash":"\u22AA","vzigzag":"\u299A","Wcirc":"\u0174","wcirc":"\u0175","wedbar":"\u2A5F","wedge":"\u2227","Wedge":"\u22C0","wedgeq":"\u2259","weierp":"\u2118","Wfr":"\uD835\uDD1A","wfr":"\uD835\uDD34","Wopf":"\uD835\uDD4E","wopf":"\uD835\uDD68","wp":"\u2118","wr":"\u2240","wreath":"\u2240","Wscr":"\uD835\uDCB2","wscr":"\uD835\uDCCC","xcap":"\u22C2","xcirc":"\u25EF","xcup":"\u22C3","xdtri":"\u25BD","Xfr":"\uD835\uDD1B","xfr":"\uD835\uDD35","xharr":"\u27F7","xhArr":"\u27FA","Xi":"\u039E","xi":"\u03BE","xlarr":"\u27F5","xlArr":"\u27F8","xmap":"\u27FC","xnis":"\u22FB","xodot":"\u2A00","Xopf":"\uD835\uDD4F","xopf":"\uD835\uDD69","xoplus":"\u2A01","xotime":"\u2A02","xrarr":"\u27F6","xrArr":"\u27F9","Xscr":"\uD835\uDCB3","xscr":"\uD835\uDCCD","xsqcup":"\u2A06","xuplus":"\u2A04","xutri":"\u25B3","xvee":"\u22C1","xwedge":"\u22C0","Yacute":"\u00DD","yacute":"\u00FD","YAcy":"\u042F","yacy":"\u044F","Ycirc":"\u0176","ycirc":"\u0177","Ycy":"\u042B","ycy":"\u044B","yen":"\u00A5","Yfr":"\uD835\uDD1C","yfr":"\uD835\uDD36","YIcy":"\u0407","yicy":"\u0457","Yopf":"\uD835\uDD50","yopf":"\uD835\uDD6A","Yscr":"\uD835\uDCB4","yscr":"\uD835\uDCCE","YUcy":"\u042E","yucy":"\u044E","yuml":"\u00FF","Yuml":"\u0178","Zacute":"\u0179","zacute":"\u017A","Zcaron":"\u017D","zcaron":"\u017E","Zcy":"\u0417","zcy":"\u0437","Zdot":"\u017B","zdot":"\u017C","zeetrf":"\u2128","ZeroWidthSpace":"\u200B","Zeta":"\u0396","zeta":"\u03B6","zfr":"\uD835\uDD37","Zfr":"\u2128","ZHcy":"\u0416","zhcy":"\u0436","zigrarr":"\u21DD","zopf":"\uD835\uDD6B","Zopf":"\u2124","Zscr":"\uD835\uDCB5","zscr":"\uD835\uDCCF","zwj":"\u200D","zwnj":"\u200C"}
-},{}],15:[function(require,module,exports){
+},{}],4:[function(require,module,exports){
 /* eslint no-console:0 */
 /**
  * This is the main entry point for KaTeX. Here, we expose functions for
@@ -3238,7 +175,7 @@ module.exports = {
     ParseError: ParseError,
 };
 
-},{"./src/ParseError":18,"./src/Settings":20,"./src/buildTree":25,"./src/parseTree":34,"./src/utils":36}],16:[function(require,module,exports){
+},{"./src/ParseError":7,"./src/Settings":9,"./src/buildTree":14,"./src/parseTree":23,"./src/utils":25}],5:[function(require,module,exports){
 /**
  * The Lexer class handles tokenizing the input in various ways. Since our
  * parser expects us to be able to backtrack, the lexer allows lexing from any
@@ -3402,7 +339,7 @@ Lexer.prototype.lex = function(pos, mode) {
 
 module.exports = Lexer;
 
-},{"./ParseError":18,"match-at":93}],17:[function(require,module,exports){
+},{"./ParseError":7,"match-at":82}],6:[function(require,module,exports){
 /**
  * This file contains information about the options that the Parser carries
  * around with it while parsing. Data is held in an `Options` object, and when
@@ -3593,7 +530,7 @@ Options.prototype.getColor = function() {
 
 module.exports = Options;
 
-},{}],18:[function(require,module,exports){
+},{}],7:[function(require,module,exports){
 /**
  * This is the ParseError class, which is the main error thrown by KaTeX
  * functions when something has gone wrong. This is used to distinguish internal
@@ -3635,7 +572,7 @@ ParseError.prototype.__proto__ = Error.prototype;
 
 module.exports = ParseError;
 
-},{}],19:[function(require,module,exports){
+},{}],8:[function(require,module,exports){
 /* eslint no-constant-condition:0 */
 var functions = require("./functions");
 var environments = require("./environments");
@@ -4374,7 +1311,7 @@ Parser.prototype.ParseNode = ParseNode;
 
 module.exports = Parser;
 
-},{"./Lexer":16,"./ParseError":18,"./environments":28,"./functions":31,"./parseData":33,"./symbols":35,"./utils":36}],20:[function(require,module,exports){
+},{"./Lexer":5,"./ParseError":7,"./environments":17,"./functions":20,"./parseData":22,"./symbols":24,"./utils":25}],9:[function(require,module,exports){
 /**
  * This is a module for storing settings passed into KaTeX. It correctly handles
  * default settings.
@@ -4404,7 +1341,7 @@ function Settings(options) {
 
 module.exports = Settings;
 
-},{}],21:[function(require,module,exports){
+},{}],10:[function(require,module,exports){
 /**
  * This file contains information and classes for the various kinds of styles
  * used in TeX. It provides a generic `Style` class, which holds information
@@ -4532,7 +1469,7 @@ module.exports = {
     SCRIPTSCRIPT: styles[SS],
 };
 
-},{}],22:[function(require,module,exports){
+},{}],11:[function(require,module,exports){
 /* eslint no-console:0 */
 /**
  * This module contains general functions that can be used for building
@@ -4984,7 +1921,7 @@ module.exports = {
     spacingFunctions: spacingFunctions,
 };
 
-},{"./domTree":27,"./fontMetrics":29,"./symbols":35,"./utils":36}],23:[function(require,module,exports){
+},{"./domTree":16,"./fontMetrics":18,"./symbols":24,"./utils":25}],12:[function(require,module,exports){
 /* eslint no-console:0 */
 /**
  * This file does the main work of building a domTree structure from a parse
@@ -6388,7 +3325,7 @@ var buildHTML = function(tree, options) {
 
 module.exports = buildHTML;
 
-},{"./ParseError":18,"./Style":21,"./buildCommon":22,"./delimiter":26,"./domTree":27,"./fontMetrics":29,"./utils":36}],24:[function(require,module,exports){
+},{"./ParseError":7,"./Style":10,"./buildCommon":11,"./delimiter":15,"./domTree":16,"./fontMetrics":18,"./utils":25}],13:[function(require,module,exports){
 /**
  * This file converts a parse tree into a cooresponding MathML tree. The main
  * entry point is the `buildMathML` function, which takes a parse tree from the
@@ -6923,7 +3860,7 @@ var buildMathML = function(tree, texExpression, options) {
 
 module.exports = buildMathML;
 
-},{"./ParseError":18,"./buildCommon":22,"./fontMetrics":29,"./mathMLTree":32,"./symbols":35,"./utils":36}],25:[function(require,module,exports){
+},{"./ParseError":7,"./buildCommon":11,"./fontMetrics":18,"./mathMLTree":21,"./symbols":24,"./utils":25}],14:[function(require,module,exports){
 var buildHTML = require("./buildHTML");
 var buildMathML = require("./buildMathML");
 var buildCommon = require("./buildCommon");
@@ -6965,7 +3902,7 @@ var buildTree = function(tree, expression, settings) {
 
 module.exports = buildTree;
 
-},{"./Options":17,"./Settings":20,"./Style":21,"./buildCommon":22,"./buildHTML":23,"./buildMathML":24}],26:[function(require,module,exports){
+},{"./Options":6,"./Settings":9,"./Style":10,"./buildCommon":11,"./buildHTML":12,"./buildMathML":13}],15:[function(require,module,exports){
 /**
  * This file deals with creating delimiters of various sizes. The TeXbook
  * discusses these routines on page 441-442, in the "Another subroutine sets box
@@ -7509,7 +4446,7 @@ module.exports = {
     leftRightDelim: makeLeftRightDelim,
 };
 
-},{"./ParseError":18,"./Style":21,"./buildCommon":22,"./fontMetrics":29,"./symbols":35,"./utils":36}],27:[function(require,module,exports){
+},{"./ParseError":7,"./Style":10,"./buildCommon":11,"./fontMetrics":18,"./symbols":24,"./utils":25}],16:[function(require,module,exports){
 /**
  * These objects store the data about the DOM nodes we create, as well as some
  * extra data. They can then be transformed into real DOM nodes with the
@@ -7780,7 +4717,7 @@ module.exports = {
     symbolNode: symbolNode,
 };
 
-},{"./utils":36}],28:[function(require,module,exports){
+},{"./utils":25}],17:[function(require,module,exports){
 /* eslint no-constant-condition:0 */
 var fontMetrics = require("./fontMetrics");
 var parseData = require("./parseData");
@@ -8003,7 +4940,7 @@ defineEnvironment("aligned", {
     return res;
 });
 
-},{"./ParseError":18,"./fontMetrics":29,"./parseData":33}],29:[function(require,module,exports){
+},{"./ParseError":7,"./fontMetrics":18,"./parseData":22}],18:[function(require,module,exports){
 /* eslint no-unused-vars:0 */
 
 var Style = require("./Style");
@@ -8152,7 +5089,7 @@ module.exports = {
     getCharacterMetrics: getCharacterMetrics,
 };
 
-},{"./Style":21,"./fontMetricsData":30}],30:[function(require,module,exports){
+},{"./Style":10,"./fontMetricsData":19}],19:[function(require,module,exports){
 module.exports = {
     "AMS-Regular": {
         "65": [0, 0.68889, 0, 0],
@@ -9906,7 +6843,7 @@ module.exports = {
     },
 };
 
-},{}],31:[function(require,module,exports){
+},{}],20:[function(require,module,exports){
 var utils = require("./utils");
 var ParseError = require("./ParseError");
 
@@ -10488,7 +7425,7 @@ defineFunction(["\\begin", "\\end"], {
     };
 });
 
-},{"./ParseError":18,"./utils":36}],32:[function(require,module,exports){
+},{"./ParseError":7,"./utils":25}],21:[function(require,module,exports){
 /**
  * These objects store data about MathML nodes. This is the MathML equivalent
  * of the types in domTree.js. Since MathML handles its own rendering, and
@@ -10592,7 +7529,7 @@ module.exports = {
     TextNode: TextNode,
 };
 
-},{"./utils":36}],33:[function(require,module,exports){
+},{"./utils":25}],22:[function(require,module,exports){
 /**
  * The resulting parse tree nodes of the parse tree.
  */
@@ -10607,7 +7544,7 @@ module.exports = {
 };
 
 
-},{}],34:[function(require,module,exports){
+},{}],23:[function(require,module,exports){
 /**
  * Provides a single function for parsing an expression using a Parser
  * TODO(emily): Remove this
@@ -10626,7 +7563,7 @@ var parseTree = function(toParse, settings) {
 
 module.exports = parseTree;
 
-},{"./Parser":19}],35:[function(require,module,exports){
+},{"./Parser":8}],24:[function(require,module,exports){
 /**
  * This file holds a list of all no-argument functions and single-character
  * symbols (like 'a' or ';').
@@ -11248,7 +8185,7 @@ for (i = 0; i < letters.length; i++) {
     defineSymbol(text, main, textord, ch, ch);
 }
 
-},{}],36:[function(require,module,exports){
+},{}],25:[function(require,module,exports){
 /**
  * This file contains a list of utility functions which are useful in other
  * files.
@@ -11356,7 +8293,7 @@ module.exports = {
     clearNode: clearNode,
 };
 
-},{}],37:[function(require,module,exports){
+},{}],26:[function(require,module,exports){
 'use strict';
 
 
@@ -11995,7 +8932,7 @@ LinkifyIt.prototype.onCompile = function onCompile() {
 
 module.exports = LinkifyIt;
 
-},{"./lib/re":38}],38:[function(require,module,exports){
+},{"./lib/re":27}],27:[function(require,module,exports){
 'use strict';
 
 
@@ -12174,7 +9111,7 @@ module.exports = function (opts) {
   return re;
 };
 
-},{"uc.micro/categories/Cc/regex":112,"uc.micro/categories/P/regex":114,"uc.micro/categories/Z/regex":115,"uc.micro/properties/Any/regex":117}],39:[function(require,module,exports){
+},{"uc.micro/categories/Cc/regex":94,"uc.micro/categories/P/regex":96,"uc.micro/categories/Z/regex":97,"uc.micro/properties/Any/regex":99}],28:[function(require,module,exports){
 // Process definition lists
 //
 'use strict';
@@ -12401,7 +9338,7 @@ module.exports = function deflist_plugin(md) {
   md.block.ruler.before('paragraph', 'deflist', deflist, { alt: [ 'paragraph', 'reference' ] });
 };
 
-},{}],40:[function(require,module,exports){
+},{}],29:[function(require,module,exports){
 /* Process inline math */
 /*
 Like markdown-it-simplemath, this is a stripped down, simplified version of:
@@ -12600,13 +9537,13 @@ module.exports = function math_plugin(md, options) {
     md.renderer.rules.math_block = blockRenderer;
 };
 
-},{"katex":15}],41:[function(require,module,exports){
+},{"katex":4}],30:[function(require,module,exports){
 'use strict';
 
 
 module.exports = require('./lib/');
 
-},{"./lib/":50}],42:[function(require,module,exports){
+},{"./lib/":39}],31:[function(require,module,exports){
 // HTML5 entities map: { name -> utf16string }
 //
 'use strict';
@@ -12614,7 +9551,7 @@ module.exports = require('./lib/');
 /*eslint quotes:0*/
 module.exports = require('entities/maps/entities.json');
 
-},{"entities/maps/entities.json":14}],43:[function(require,module,exports){
+},{"entities/maps/entities.json":3}],32:[function(require,module,exports){
 // List of valid html blocks names, accorting to commonmark spec
 // http://jgm.github.io/CommonMark/spec.html#html-blocks
 
@@ -12689,7 +9626,7 @@ module.exports = [
   'ul'
 ];
 
-},{}],44:[function(require,module,exports){
+},{}],33:[function(require,module,exports){
 // Regexps to match html elements
 
 'use strict';
@@ -12719,7 +9656,7 @@ var HTML_OPEN_CLOSE_TAG_RE = new RegExp('^(?:' + open_tag + '|' + close_tag + ')
 module.exports.HTML_TAG_RE = HTML_TAG_RE;
 module.exports.HTML_OPEN_CLOSE_TAG_RE = HTML_OPEN_CLOSE_TAG_RE;
 
-},{}],45:[function(require,module,exports){
+},{}],34:[function(require,module,exports){
 // Utilities
 //
 'use strict';
@@ -12996,7 +9933,7 @@ exports.isPunctChar         = isPunctChar;
 exports.escapeRE            = escapeRE;
 exports.normalizeReference  = normalizeReference;
 
-},{"./entities":42,"mdurl":97,"uc.micro":116,"uc.micro/categories/P/regex":114}],46:[function(require,module,exports){
+},{"./entities":31,"mdurl":86,"uc.micro":98,"uc.micro/categories/P/regex":96}],35:[function(require,module,exports){
 // Just a shortcut for bulk export
 'use strict';
 
@@ -13005,7 +9942,7 @@ exports.parseLinkLabel       = require('./parse_link_label');
 exports.parseLinkDestination = require('./parse_link_destination');
 exports.parseLinkTitle       = require('./parse_link_title');
 
-},{"./parse_link_destination":47,"./parse_link_label":48,"./parse_link_title":49}],47:[function(require,module,exports){
+},{"./parse_link_destination":36,"./parse_link_label":37,"./parse_link_title":38}],36:[function(require,module,exports){
 // Parse link destination
 //
 'use strict';
@@ -13087,7 +10024,7 @@ module.exports = function parseLinkDestination(str, pos, max) {
   return result;
 };
 
-},{"../common/utils":45}],48:[function(require,module,exports){
+},{"../common/utils":34}],37:[function(require,module,exports){
 // Parse link label
 //
 // this function assumes that first character ("[") already matches;
@@ -13137,7 +10074,7 @@ module.exports = function parseLinkLabel(state, start, disableNested) {
   return labelEnd;
 };
 
-},{}],49:[function(require,module,exports){
+},{}],38:[function(require,module,exports){
 // Parse link title
 //
 'use strict';
@@ -13192,7 +10129,7 @@ module.exports = function parseLinkTitle(str, pos, max) {
   return result;
 };
 
-},{"../common/utils":45}],50:[function(require,module,exports){
+},{"../common/utils":34}],39:[function(require,module,exports){
 // Main parser class
 
 'use strict';
@@ -13775,7 +10712,7 @@ MarkdownIt.prototype.renderInline = function (src, env) {
 
 module.exports = MarkdownIt;
 
-},{"./common/utils":45,"./helpers":46,"./parser_block":51,"./parser_core":52,"./parser_inline":53,"./presets/commonmark":54,"./presets/default":55,"./presets/zero":56,"./renderer":57,"linkify-it":37,"mdurl":97,"punycode":104}],51:[function(require,module,exports){
+},{"./common/utils":34,"./helpers":35,"./parser_block":40,"./parser_core":41,"./parser_inline":42,"./presets/commonmark":43,"./presets/default":44,"./presets/zero":45,"./renderer":46,"linkify-it":26,"mdurl":86,"punycode":91}],40:[function(require,module,exports){
 /** internal
  * class ParserBlock
  *
@@ -13899,7 +10836,7 @@ ParserBlock.prototype.State = require('./rules_block/state_block');
 
 module.exports = ParserBlock;
 
-},{"./ruler":58,"./rules_block/blockquote":59,"./rules_block/code":60,"./rules_block/fence":61,"./rules_block/heading":62,"./rules_block/hr":63,"./rules_block/html_block":64,"./rules_block/lheading":65,"./rules_block/list":66,"./rules_block/paragraph":67,"./rules_block/reference":68,"./rules_block/state_block":69,"./rules_block/table":70}],52:[function(require,module,exports){
+},{"./ruler":47,"./rules_block/blockquote":48,"./rules_block/code":49,"./rules_block/fence":50,"./rules_block/heading":51,"./rules_block/hr":52,"./rules_block/html_block":53,"./rules_block/lheading":54,"./rules_block/list":55,"./rules_block/paragraph":56,"./rules_block/reference":57,"./rules_block/state_block":58,"./rules_block/table":59}],41:[function(require,module,exports){
 /** internal
  * class Core
  *
@@ -13959,7 +10896,7 @@ Core.prototype.State = require('./rules_core/state_core');
 
 module.exports = Core;
 
-},{"./ruler":58,"./rules_core/block":71,"./rules_core/inline":72,"./rules_core/linkify":73,"./rules_core/normalize":74,"./rules_core/replacements":75,"./rules_core/smartquotes":76,"./rules_core/state_core":77}],53:[function(require,module,exports){
+},{"./ruler":47,"./rules_core/block":60,"./rules_core/inline":61,"./rules_core/linkify":62,"./rules_core/normalize":63,"./rules_core/replacements":64,"./rules_core/smartquotes":65,"./rules_core/state_core":66}],42:[function(require,module,exports){
 /** internal
  * class ParserInline
  *
@@ -14138,7 +11075,7 @@ ParserInline.prototype.State = require('./rules_inline/state_inline');
 
 module.exports = ParserInline;
 
-},{"./ruler":58,"./rules_inline/autolink":78,"./rules_inline/backticks":79,"./rules_inline/balance_pairs":80,"./rules_inline/emphasis":81,"./rules_inline/entity":82,"./rules_inline/escape":83,"./rules_inline/html_inline":84,"./rules_inline/image":85,"./rules_inline/link":86,"./rules_inline/newline":87,"./rules_inline/state_inline":88,"./rules_inline/strikethrough":89,"./rules_inline/text":90,"./rules_inline/text_collapse":91}],54:[function(require,module,exports){
+},{"./ruler":47,"./rules_inline/autolink":67,"./rules_inline/backticks":68,"./rules_inline/balance_pairs":69,"./rules_inline/emphasis":70,"./rules_inline/entity":71,"./rules_inline/escape":72,"./rules_inline/html_inline":73,"./rules_inline/image":74,"./rules_inline/link":75,"./rules_inline/newline":76,"./rules_inline/state_inline":77,"./rules_inline/strikethrough":78,"./rules_inline/text":79,"./rules_inline/text_collapse":80}],43:[function(require,module,exports){
 // Commonmark default options
 
 'use strict';
@@ -14220,7 +11157,7 @@ module.exports = {
   }
 };
 
-},{}],55:[function(require,module,exports){
+},{}],44:[function(require,module,exports){
 // markdown-it default options
 
 'use strict';
@@ -14263,7 +11200,7 @@ module.exports = {
   }
 };
 
-},{}],56:[function(require,module,exports){
+},{}],45:[function(require,module,exports){
 // "Zero" preset, with nothing enabled. Useful for manual configuring of simple
 // modes. For example, to parse bold/italic only.
 
@@ -14327,7 +11264,7 @@ module.exports = {
   }
 };
 
-},{}],57:[function(require,module,exports){
+},{}],46:[function(require,module,exports){
 /**
  * class Renderer
  *
@@ -14664,7 +11601,7 @@ Renderer.prototype.render = function (tokens, options, env) {
 
 module.exports = Renderer;
 
-},{"./common/utils":45}],58:[function(require,module,exports){
+},{"./common/utils":34}],47:[function(require,module,exports){
 /**
  * class Ruler
  *
@@ -15018,7 +11955,7 @@ Ruler.prototype.getRules = function (chainName) {
 
 module.exports = Ruler;
 
-},{}],59:[function(require,module,exports){
+},{}],48:[function(require,module,exports){
 // Block quotes
 
 'use strict';
@@ -15306,7 +12243,7 @@ module.exports = function blockquote(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":45}],60:[function(require,module,exports){
+},{"../common/utils":34}],49:[function(require,module,exports){
 // Code block (4 spaces padded)
 
 'use strict';
@@ -15342,7 +12279,7 @@ module.exports = function code(state, startLine, endLine/*, silent*/) {
   return true;
 };
 
-},{}],61:[function(require,module,exports){
+},{}],50:[function(require,module,exports){
 // fences (``` lang, ~~~ lang)
 
 'use strict';
@@ -15438,7 +12375,7 @@ module.exports = function fence(state, startLine, endLine, silent) {
   return true;
 };
 
-},{}],62:[function(require,module,exports){
+},{}],51:[function(require,module,exports){
 // heading (#, ##, ...)
 
 'use strict';
@@ -15495,7 +12432,7 @@ module.exports = function heading(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":45}],63:[function(require,module,exports){
+},{"../common/utils":34}],52:[function(require,module,exports){
 // Horizontal rule
 
 'use strict';
@@ -15542,7 +12479,7 @@ module.exports = function hr(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":45}],64:[function(require,module,exports){
+},{"../common/utils":34}],53:[function(require,module,exports){
 // HTML block
 
 'use strict';
@@ -15618,7 +12555,7 @@ module.exports = function html_block(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/html_blocks":43,"../common/html_re":44}],65:[function(require,module,exports){
+},{"../common/html_blocks":32,"../common/html_re":33}],54:[function(require,module,exports){
 // lheading (---, ===)
 
 'use strict';
@@ -15703,7 +12640,7 @@ module.exports = function lheading(state, startLine, endLine/*, silent*/) {
   return true;
 };
 
-},{}],66:[function(require,module,exports){
+},{}],55:[function(require,module,exports){
 // Lists
 
 'use strict';
@@ -16043,7 +12980,7 @@ module.exports = function list(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":45}],67:[function(require,module,exports){
+},{"../common/utils":34}],56:[function(require,module,exports){
 // Paragraph
 
 'use strict';
@@ -16097,7 +13034,7 @@ module.exports = function paragraph(state, startLine/*, endLine*/) {
   return true;
 };
 
-},{}],68:[function(require,module,exports){
+},{}],57:[function(require,module,exports){
 'use strict';
 
 
@@ -16297,7 +13234,7 @@ module.exports = function reference(state, startLine, _endLine, silent) {
   return true;
 };
 
-},{"../common/utils":45}],69:[function(require,module,exports){
+},{"../common/utils":34}],58:[function(require,module,exports){
 // Parser state class
 
 'use strict';
@@ -16529,7 +13466,7 @@ StateBlock.prototype.Token = Token;
 
 module.exports = StateBlock;
 
-},{"../common/utils":45,"../token":92}],70:[function(require,module,exports){
+},{"../common/utils":34,"../token":81}],59:[function(require,module,exports){
 // GFM table, non-standard
 
 'use strict';
@@ -16727,7 +13664,7 @@ module.exports = function table(state, startLine, endLine, silent) {
   return true;
 };
 
-},{"../common/utils":45}],71:[function(require,module,exports){
+},{"../common/utils":34}],60:[function(require,module,exports){
 'use strict';
 
 
@@ -16745,7 +13682,7 @@ module.exports = function block(state) {
   }
 };
 
-},{}],72:[function(require,module,exports){
+},{}],61:[function(require,module,exports){
 'use strict';
 
 module.exports = function inline(state) {
@@ -16760,7 +13697,7 @@ module.exports = function inline(state) {
   }
 };
 
-},{}],73:[function(require,module,exports){
+},{}],62:[function(require,module,exports){
 // Replace link-like texts with link nodes.
 //
 // Currently restricted by `md.validateLink()` to http/https/ftp
@@ -16895,7 +13832,7 @@ module.exports = function linkify(state) {
   }
 };
 
-},{"../common/utils":45}],74:[function(require,module,exports){
+},{"../common/utils":34}],63:[function(require,module,exports){
 // Normalize input string
 
 'use strict';
@@ -16917,7 +13854,7 @@ module.exports = function inline(state) {
   state.src = str;
 };
 
-},{}],75:[function(require,module,exports){
+},{}],64:[function(require,module,exports){
 // Simple typographyc replacements
 //
 // (c) (C) → ©
@@ -17026,7 +13963,7 @@ module.exports = function replace(state) {
   }
 };
 
-},{}],76:[function(require,module,exports){
+},{}],65:[function(require,module,exports){
 // Convert straight quotation marks to typographic ones
 //
 'use strict';
@@ -17221,7 +14158,7 @@ module.exports = function smartquotes(state) {
   }
 };
 
-},{"../common/utils":45}],77:[function(require,module,exports){
+},{"../common/utils":34}],66:[function(require,module,exports){
 // Core state object
 //
 'use strict';
@@ -17243,7 +14180,7 @@ StateCore.prototype.Token = Token;
 
 module.exports = StateCore;
 
-},{"../token":92}],78:[function(require,module,exports){
+},{"../token":81}],67:[function(require,module,exports){
 // Process autolinks '<protocol:...>'
 
 'use strict';
@@ -17317,7 +14254,7 @@ module.exports = function autolink(state, silent) {
   return false;
 };
 
-},{}],79:[function(require,module,exports){
+},{}],68:[function(require,module,exports){
 // Parse backticks
 
 'use strict';
@@ -17362,7 +14299,7 @@ module.exports = function backtick(state, silent) {
   return true;
 };
 
-},{}],80:[function(require,module,exports){
+},{}],69:[function(require,module,exports){
 // For each opening emphasis-like marker find a matching closing one
 //
 'use strict';
@@ -17408,7 +14345,7 @@ module.exports = function link_pairs(state) {
   }
 };
 
-},{}],81:[function(require,module,exports){
+},{}],70:[function(require,module,exports){
 // Process *this* and _that_
 //
 'use strict';
@@ -17537,7 +14474,7 @@ module.exports.postProcess = function emphasis(state) {
   }
 };
 
-},{}],82:[function(require,module,exports){
+},{}],71:[function(require,module,exports){
 // Process html entity - &#123;, &#xAF;, &quot;, ...
 
 'use strict';
@@ -17587,7 +14524,7 @@ module.exports = function entity(state, silent) {
   return true;
 };
 
-},{"../common/entities":42,"../common/utils":45}],83:[function(require,module,exports){
+},{"../common/entities":31,"../common/utils":34}],72:[function(require,module,exports){
 // Proceess escaped chars and hardbreaks
 
 'use strict';
@@ -17641,7 +14578,7 @@ module.exports = function escape(state, silent) {
   return true;
 };
 
-},{"../common/utils":45}],84:[function(require,module,exports){
+},{"../common/utils":34}],73:[function(require,module,exports){
 // Process html tags
 
 'use strict';
@@ -17690,7 +14627,7 @@ module.exports = function html_inline(state, silent) {
   return true;
 };
 
-},{"../common/html_re":44}],85:[function(require,module,exports){
+},{"../common/html_re":33}],74:[function(require,module,exports){
 // Process ![image](<src> "title")
 
 'use strict';
@@ -17844,7 +14781,7 @@ module.exports = function image(state, silent) {
   return true;
 };
 
-},{"../common/utils":45}],86:[function(require,module,exports){
+},{"../common/utils":34}],75:[function(require,module,exports){
 // Process [link](<to> "stuff")
 
 'use strict';
@@ -17996,7 +14933,7 @@ module.exports = function link(state, silent) {
   return true;
 };
 
-},{"../common/utils":45}],87:[function(require,module,exports){
+},{"../common/utils":34}],76:[function(require,module,exports){
 // Proceess '\n'
 
 'use strict';
@@ -18040,7 +14977,7 @@ module.exports = function newline(state, silent) {
   return true;
 };
 
-},{"../common/utils":45}],88:[function(require,module,exports){
+},{"../common/utils":34}],77:[function(require,module,exports){
 // Inline parser state
 
 'use strict';
@@ -18172,7 +15109,7 @@ StateInline.prototype.Token = Token;
 
 module.exports = StateInline;
 
-},{"../common/utils":45,"../token":92}],89:[function(require,module,exports){
+},{"../common/utils":34,"../token":81}],78:[function(require,module,exports){
 // ~~strike through~~
 //
 'use strict';
@@ -18291,7 +15228,7 @@ module.exports.postProcess = function strikethrough(state) {
   }
 };
 
-},{}],90:[function(require,module,exports){
+},{}],79:[function(require,module,exports){
 // Skip text characters for text token, place those to pending buffer
 // and increment current pos
 
@@ -18382,7 +15319,7 @@ module.exports = function text(state, silent) {
   return true;
 };*/
 
-},{}],91:[function(require,module,exports){
+},{}],80:[function(require,module,exports){
 // Merge adjacent text nodes into one, and re-calculate all token levels
 //
 'use strict';
@@ -18417,7 +15354,7 @@ module.exports = function text_collapse(state) {
   }
 };
 
-},{}],92:[function(require,module,exports){
+},{}],81:[function(require,module,exports){
 // Token class
 
 'use strict';
@@ -18616,7 +15553,7 @@ Token.prototype.attrJoin = function attrJoin(name, value) {
 
 module.exports = Token;
 
-},{}],93:[function(require,module,exports){
+},{}],82:[function(require,module,exports){
 /** @flow */
 
 "use strict";
@@ -18659,7 +15596,7 @@ function matchAt(re, str, pos) {
 }
 
 module.exports = matchAt;
-},{}],94:[function(require,module,exports){
+},{}],83:[function(require,module,exports){
 
 'use strict';
 
@@ -18783,7 +15720,7 @@ decode.componentChars = '';
 
 module.exports = decode;
 
-},{}],95:[function(require,module,exports){
+},{}],84:[function(require,module,exports){
 
 'use strict';
 
@@ -18883,7 +15820,7 @@ encode.componentChars = "-_.!~*'()";
 
 module.exports = encode;
 
-},{}],96:[function(require,module,exports){
+},{}],85:[function(require,module,exports){
 
 'use strict';
 
@@ -18910,7 +15847,7 @@ module.exports = function format(url) {
   return result;
 };
 
-},{}],97:[function(require,module,exports){
+},{}],86:[function(require,module,exports){
 'use strict';
 
 
@@ -18919,7 +15856,7 @@ module.exports.decode = require('./decode');
 module.exports.format = require('./format');
 module.exports.parse  = require('./parse');
 
-},{"./decode":94,"./encode":95,"./format":96,"./parse":98}],98:[function(require,module,exports){
+},{"./decode":83,"./encode":84,"./format":85,"./parse":87}],87:[function(require,module,exports){
 // Copyright Joyent, Inc. and other Node contributors.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
@@ -19233,7 +16170,7 @@ Url.prototype.parseHost = function(host) {
 
 module.exports = urlParse;
 
-},{}],99:[function(require,module,exports){
+},{}],88:[function(require,module,exports){
 (function (global){
 ;(function() {
 "use strict"
@@ -20463,12 +17400,12 @@ if (typeof module !== "undefined") module["exports"] = m
 else window.m = m
 }());
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],100:[function(require,module,exports){
+},{}],89:[function(require,module,exports){
 "use strict"
 
 module.exports = require("./stream/stream")
 
-},{"./stream/stream":101}],101:[function(require,module,exports){
+},{"./stream/stream":90}],90:[function(require,module,exports){
 "use strict"
 
 ;(function() {
@@ -20630,285 +17567,7 @@ else window.m = {stream : createStream}
 
 }());
 
-},{}],102:[function(require,module,exports){
-/*
-object-assign
-(c) Sindre Sorhus
-@license MIT
-*/
-
-'use strict';
-/* eslint-disable no-unused-vars */
-var getOwnPropertySymbols = Object.getOwnPropertySymbols;
-var hasOwnProperty = Object.prototype.hasOwnProperty;
-var propIsEnumerable = Object.prototype.propertyIsEnumerable;
-
-function toObject(val) {
-	if (val === null || val === undefined) {
-		throw new TypeError('Object.assign cannot be called with null or undefined');
-	}
-
-	return Object(val);
-}
-
-function shouldUseNative() {
-	try {
-		if (!Object.assign) {
-			return false;
-		}
-
-		// Detect buggy property enumeration order in older V8 versions.
-
-		// https://bugs.chromium.org/p/v8/issues/detail?id=4118
-		var test1 = new String('abc');  // eslint-disable-line no-new-wrappers
-		test1[5] = 'de';
-		if (Object.getOwnPropertyNames(test1)[0] === '5') {
-			return false;
-		}
-
-		// https://bugs.chromium.org/p/v8/issues/detail?id=3056
-		var test2 = {};
-		for (var i = 0; i < 10; i++) {
-			test2['_' + String.fromCharCode(i)] = i;
-		}
-		var order2 = Object.getOwnPropertyNames(test2).map(function (n) {
-			return test2[n];
-		});
-		if (order2.join('') !== '0123456789') {
-			return false;
-		}
-
-		// https://bugs.chromium.org/p/v8/issues/detail?id=3056
-		var test3 = {};
-		'abcdefghijklmnopqrst'.split('').forEach(function (letter) {
-			test3[letter] = letter;
-		});
-		if (Object.keys(Object.assign({}, test3)).join('') !==
-				'abcdefghijklmnopqrst') {
-			return false;
-		}
-
-		return true;
-	} catch (err) {
-		// We don't expect any of the above to throw, but better to be safe.
-		return false;
-	}
-}
-
-module.exports = shouldUseNative() ? Object.assign : function (target, source) {
-	var from;
-	var to = toObject(target);
-	var symbols;
-
-	for (var s = 1; s < arguments.length; s++) {
-		from = Object(arguments[s]);
-
-		for (var key in from) {
-			if (hasOwnProperty.call(from, key)) {
-				to[key] = from[key];
-			}
-		}
-
-		if (getOwnPropertySymbols) {
-			symbols = getOwnPropertySymbols(from);
-			for (var i = 0; i < symbols.length; i++) {
-				if (propIsEnumerable.call(from, symbols[i])) {
-					to[symbols[i]] = from[symbols[i]];
-				}
-			}
-		}
-	}
-
-	return to;
-};
-
-},{}],103:[function(require,module,exports){
-// shim for using process in browser
-var process = module.exports = {};
-
-// cached from whatever global is present so that test runners that stub it
-// don't break things.  But we need to wrap it in a try catch in case it is
-// wrapped in strict mode code which doesn't define any globals.  It's inside a
-// function because try/catches deoptimize in certain engines.
-
-var cachedSetTimeout;
-var cachedClearTimeout;
-
-function defaultSetTimout() {
-    throw new Error('setTimeout has not been defined');
-}
-function defaultClearTimeout () {
-    throw new Error('clearTimeout has not been defined');
-}
-(function () {
-    try {
-        if (typeof setTimeout === 'function') {
-            cachedSetTimeout = setTimeout;
-        } else {
-            cachedSetTimeout = defaultSetTimout;
-        }
-    } catch (e) {
-        cachedSetTimeout = defaultSetTimout;
-    }
-    try {
-        if (typeof clearTimeout === 'function') {
-            cachedClearTimeout = clearTimeout;
-        } else {
-            cachedClearTimeout = defaultClearTimeout;
-        }
-    } catch (e) {
-        cachedClearTimeout = defaultClearTimeout;
-    }
-} ())
-function runTimeout(fun) {
-    if (cachedSetTimeout === setTimeout) {
-        //normal enviroments in sane situations
-        return setTimeout(fun, 0);
-    }
-    // if setTimeout wasn't available but was latter defined
-    if ((cachedSetTimeout === defaultSetTimout || !cachedSetTimeout) && setTimeout) {
-        cachedSetTimeout = setTimeout;
-        return setTimeout(fun, 0);
-    }
-    try {
-        // when when somebody has screwed with setTimeout but no I.E. maddness
-        return cachedSetTimeout(fun, 0);
-    } catch(e){
-        try {
-            // When we are in I.E. but the script has been evaled so I.E. doesn't trust the global object when called normally
-            return cachedSetTimeout.call(null, fun, 0);
-        } catch(e){
-            // same as above but when it's a version of I.E. that must have the global object for 'this', hopfully our context correct otherwise it will throw a global error
-            return cachedSetTimeout.call(this, fun, 0);
-        }
-    }
-
-
-}
-function runClearTimeout(marker) {
-    if (cachedClearTimeout === clearTimeout) {
-        //normal enviroments in sane situations
-        return clearTimeout(marker);
-    }
-    // if clearTimeout wasn't available but was latter defined
-    if ((cachedClearTimeout === defaultClearTimeout || !cachedClearTimeout) && clearTimeout) {
-        cachedClearTimeout = clearTimeout;
-        return clearTimeout(marker);
-    }
-    try {
-        // when when somebody has screwed with setTimeout but no I.E. maddness
-        return cachedClearTimeout(marker);
-    } catch (e){
-        try {
-            // When we are in I.E. but the script has been evaled so I.E. doesn't  trust the global object when called normally
-            return cachedClearTimeout.call(null, marker);
-        } catch (e){
-            // same as above but when it's a version of I.E. that must have the global object for 'this', hopfully our context correct otherwise it will throw a global error.
-            // Some versions of I.E. have different rules for clearTimeout vs setTimeout
-            return cachedClearTimeout.call(this, marker);
-        }
-    }
-
-
-
-}
-var queue = [];
-var draining = false;
-var currentQueue;
-var queueIndex = -1;
-
-function cleanUpNextTick() {
-    if (!draining || !currentQueue) {
-        return;
-    }
-    draining = false;
-    if (currentQueue.length) {
-        queue = currentQueue.concat(queue);
-    } else {
-        queueIndex = -1;
-    }
-    if (queue.length) {
-        drainQueue();
-    }
-}
-
-function drainQueue() {
-    if (draining) {
-        return;
-    }
-    var timeout = runTimeout(cleanUpNextTick);
-    draining = true;
-
-    var len = queue.length;
-    while(len) {
-        currentQueue = queue;
-        queue = [];
-        while (++queueIndex < len) {
-            if (currentQueue) {
-                currentQueue[queueIndex].run();
-            }
-        }
-        queueIndex = -1;
-        len = queue.length;
-    }
-    currentQueue = null;
-    draining = false;
-    runClearTimeout(timeout);
-}
-
-process.nextTick = function (fun) {
-    var args = new Array(arguments.length - 1);
-    if (arguments.length > 1) {
-        for (var i = 1; i < arguments.length; i++) {
-            args[i - 1] = arguments[i];
-        }
-    }
-    queue.push(new Item(fun, args));
-    if (queue.length === 1 && !draining) {
-        runTimeout(drainQueue);
-    }
-};
-
-// v8 likes predictible objects
-function Item(fun, array) {
-    this.fun = fun;
-    this.array = array;
-}
-Item.prototype.run = function () {
-    this.fun.apply(null, this.array);
-};
-process.title = 'browser';
-process.browser = true;
-process.env = {};
-process.argv = [];
-process.version = ''; // empty string to avoid regexp issues
-process.versions = {};
-
-function noop() {}
-
-process.on = noop;
-process.addListener = noop;
-process.once = noop;
-process.off = noop;
-process.removeListener = noop;
-process.removeAllListeners = noop;
-process.emit = noop;
-process.prependListener = noop;
-process.prependOnceListener = noop;
-
-process.listeners = function (name) { return [] }
-
-process.binding = function (name) {
-    throw new Error('process.binding is not supported');
-};
-
-process.cwd = function () { return '/' };
-process.chdir = function (dir) {
-    throw new Error('process.chdir is not supported');
-};
-process.umask = function() { return 0; };
-
-},{}],104:[function(require,module,exports){
+},{}],91:[function(require,module,exports){
 (function (global){
 /*! https://mths.be/punycode v1.4.1 by @mathias */
 ;(function(root) {
@@ -21445,55 +18104,53 @@ process.umask = function() { return 0; };
 }(this));
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],105:[function(require,module,exports){
+},{}],92:[function(require,module,exports){
 'use strict';
-var strictUriEncode = require('strict-uri-encode');
-var objectAssign = require('object-assign');
+const strictUriEncode = require('strict-uri-encode');
+const decodeComponent = require('decode-uri-component');
 
-function encoderForArrayFormat(opts) {
-	switch (opts.arrayFormat) {
+function encoderForArrayFormat(options) {
+	switch (options.arrayFormat) {
 		case 'index':
-			return function (key, value, index) {
+			return (key, value, index) => {
 				return value === null ? [
-					encode(key, opts),
+					encode(key, options),
 					'[',
 					index,
 					']'
 				].join('') : [
-					encode(key, opts),
+					encode(key, options),
 					'[',
-					encode(index, opts),
+					encode(index, options),
 					']=',
-					encode(value, opts)
+					encode(value, options)
 				].join('');
 			};
-
 		case 'bracket':
-			return function (key, value) {
-				return value === null ? encode(key, opts) : [
-					encode(key, opts),
+			return (key, value) => {
+				return value === null ? encode(key, options) : [
+					encode(key, options),
 					'[]=',
-					encode(value, opts)
+					encode(value, options)
 				].join('');
 			};
-
 		default:
-			return function (key, value) {
-				return value === null ? encode(key, opts) : [
-					encode(key, opts),
+			return (key, value) => {
+				return value === null ? encode(key, options) : [
+					encode(key, options),
 					'=',
-					encode(value, opts)
+					encode(value, options)
 				].join('');
 			};
 	}
 }
 
-function parserForArrayFormat(opts) {
-	var result;
+function parserForArrayFormat(options) {
+	let result;
 
-	switch (opts.arrayFormat) {
+	switch (options.arrayFormat) {
 		case 'index':
-			return function (key, value, accumulator) {
+			return (key, value, accumulator) => {
 				result = /\[(\d*)\]$/.exec(key);
 
 				key = key.replace(/\[\d*\]$/, '');
@@ -21509,25 +18166,25 @@ function parserForArrayFormat(opts) {
 
 				accumulator[key][result[1]] = value;
 			};
-
 		case 'bracket':
-			return function (key, value, accumulator) {
+			return (key, value, accumulator) => {
 				result = /(\[\])$/.exec(key);
 				key = key.replace(/\[\]$/, '');
 
 				if (!result) {
 					accumulator[key] = value;
 					return;
-				} else if (accumulator[key] === undefined) {
+				}
+
+				if (accumulator[key] === undefined) {
 					accumulator[key] = [value];
 					return;
 				}
 
 				accumulator[key] = [].concat(accumulator[key], value);
 			};
-
 		default:
-			return function (key, value, accumulator) {
+			return (key, value, accumulator) => {
 				if (accumulator[key] === undefined) {
 					accumulator[key] = value;
 					return;
@@ -21538,9 +18195,9 @@ function parserForArrayFormat(opts) {
 	}
 }
 
-function encode(value, opts) {
-	if (opts.encode) {
-		return opts.strict ? strictUriEncode(value) : encodeURIComponent(value);
+function encode(value, options) {
+	if (options.encode) {
+		return options.strict ? strictUriEncode(value) : encodeURIComponent(value);
 	}
 
 	return value;
@@ -21549,1447 +18206,133 @@ function encode(value, opts) {
 function keysSorter(input) {
 	if (Array.isArray(input)) {
 		return input.sort();
-	} else if (typeof input === 'object') {
-		return keysSorter(Object.keys(input)).sort(function (a, b) {
-			return Number(a) - Number(b);
-		}).map(function (key) {
-			return input[key];
-		});
+	}
+
+	if (typeof input === 'object') {
+		return keysSorter(Object.keys(input))
+			.sort((a, b) => Number(a) - Number(b))
+			.map(key => input[key]);
 	}
 
 	return input;
 }
 
-exports.extract = function (str) {
-	return str.split('?')[1] || '';
-};
+function extract(input) {
+	const queryStart = input.indexOf('?');
+	if (queryStart === -1) {
+		return '';
+	}
+	return input.slice(queryStart + 1);
+}
 
-exports.parse = function (str, opts) {
-	opts = objectAssign({arrayFormat: 'none'}, opts);
+function parse(input, options) {
+	options = Object.assign({arrayFormat: 'none'}, options);
 
-	var formatter = parserForArrayFormat(opts);
+	const formatter = parserForArrayFormat(options);
 
 	// Create an object with no prototype
-	// https://github.com/sindresorhus/query-string/issues/47
-	var ret = Object.create(null);
+	const ret = Object.create(null);
 
-	if (typeof str !== 'string') {
+	if (typeof input !== 'string') {
 		return ret;
 	}
 
-	str = str.trim().replace(/^(\?|#|&)/, '');
+	input = input.trim().replace(/^[?#&]/, '');
 
-	if (!str) {
+	if (!input) {
 		return ret;
 	}
 
-	str.split('&').forEach(function (param) {
-		var parts = param.replace(/\+/g, ' ').split('=');
-		// Firefox (pre 40) decodes `%3D` to `=`
-		// https://github.com/sindresorhus/query-string/pull/37
-		var key = parts.shift();
-		var val = parts.length > 0 ? parts.join('=') : undefined;
+	for (const param of input.split('&')) {
+		let [key, value] = param.replace(/\+/g, ' ').split('=');
 
-		// missing `=` should be `null`:
+		// Missing `=` should be `null`:
 		// http://w3.org/TR/2012/WD-url-20120524/#collect-url-parameters
-		val = val === undefined ? null : decodeURIComponent(val);
+		value = value === undefined ? null : decodeComponent(value);
 
-		formatter(decodeURIComponent(key), val, ret);
-	});
+		formatter(decodeComponent(key), value, ret);
+	}
 
-	return Object.keys(ret).sort().reduce(function (result, key) {
-		var val = ret[key];
-		if (Boolean(val) && typeof val === 'object' && !Array.isArray(val)) {
+	return Object.keys(ret).sort().reduce((result, key) => {
+		const value = ret[key];
+		if (Boolean(value) && typeof value === 'object' && !Array.isArray(value)) {
 			// Sort object keys, not values
-			result[key] = keysSorter(val);
+			result[key] = keysSorter(value);
 		} else {
-			result[key] = val;
+			result[key] = value;
 		}
 
 		return result;
 	}, Object.create(null));
-};
+}
 
-exports.stringify = function (obj, opts) {
-	var defaults = {
+exports.extract = extract;
+exports.parse = parse;
+
+exports.stringify = (obj, options) => {
+	const defaults = {
 		encode: true,
 		strict: true,
 		arrayFormat: 'none'
 	};
 
-	opts = objectAssign(defaults, opts);
+	options = Object.assign(defaults, options);
 
-	var formatter = encoderForArrayFormat(opts);
+	if (options.sort === false) {
+		options.sort = () => {};
+	}
 
-	return obj ? Object.keys(obj).sort().map(function (key) {
-		var val = obj[key];
+	const formatter = encoderForArrayFormat(options);
 
-		if (val === undefined) {
+	return obj ? Object.keys(obj).sort(options.sort).map(key => {
+		const value = obj[key];
+
+		if (value === undefined) {
 			return '';
 		}
 
-		if (val === null) {
-			return encode(key, opts);
+		if (value === null) {
+			return encode(key, options);
 		}
 
-		if (Array.isArray(val)) {
-			var result = [];
+		if (Array.isArray(value)) {
+			const result = [];
 
-			val.slice().forEach(function (val2) {
-				if (val2 === undefined) {
-					return;
+			for (const value2 of value.slice()) {
+				if (value2 === undefined) {
+					continue;
 				}
 
-				result.push(formatter(key, val2, result.length));
-			});
+				result.push(formatter(key, value2, result.length));
+			}
 
 			return result.join('&');
 		}
 
-		return encode(key, opts) + '=' + encode(val, opts);
-	}).filter(function (x) {
-		return x.length > 0;
-	}).join('&') : '';
+		return encode(key, options) + '=' + encode(value, options);
+	}).filter(x => x.length > 0).join('&') : '';
 };
 
-},{"object-assign":102,"strict-uri-encode":107}],106:[function(require,module,exports){
-
-/**
- * Reduce `arr` with `fn`.
- *
- * @param {Array} arr
- * @param {Function} fn
- * @param {Mixed} initial
- *
- * TODO: combatible error handling?
- */
-
-module.exports = function(arr, fn, initial){  
-  var idx = 0;
-  var len = arr.length;
-  var curr = arguments.length == 3
-    ? initial
-    : arr[idx++];
-
-  while (idx < len) {
-    curr = fn.call(null, curr, arr[idx], ++idx, arr);
-  }
-  
-  return curr;
+exports.parseUrl = (input, options) => {
+	return {
+		url: input.split('?')[0] || '',
+		query: parse(extract(input), options)
+	};
 };
-},{}],107:[function(require,module,exports){
+
+},{"decode-uri-component":1,"strict-uri-encode":93}],93:[function(require,module,exports){
 'use strict';
-module.exports = function (str) {
-	return encodeURIComponent(str).replace(/[!'()*]/g, function (c) {
-		return '%' + c.charCodeAt(0).toString(16).toUpperCase();
-	});
-};
+module.exports = str => encodeURIComponent(str).replace(/[!'()*]/g, x => `%${x.charCodeAt(0).toString(16).toUpperCase()}`);
 
-},{}],108:[function(require,module,exports){
-/**
- * Module dependencies.
- */
-
-var Emitter = require('emitter');
-var reduce = require('reduce');
-var requestBase = require('./request-base');
-var isObject = require('./is-object');
-
-/**
- * Root reference for iframes.
- */
-
-var root;
-if (typeof window !== 'undefined') { // Browser window
-  root = window;
-} else if (typeof self !== 'undefined') { // Web Worker
-  root = self;
-} else { // Other environments
-  root = this;
-}
-
-/**
- * Noop.
- */
-
-function noop(){};
-
-/**
- * Check if `obj` is a host object,
- * we don't want to serialize these :)
- *
- * TODO: future proof, move to compoent land
- *
- * @param {Object} obj
- * @return {Boolean}
- * @api private
- */
-
-function isHost(obj) {
-  var str = {}.toString.call(obj);
-
-  switch (str) {
-    case '[object File]':
-    case '[object Blob]':
-    case '[object FormData]':
-      return true;
-    default:
-      return false;
-  }
-}
-
-/**
- * Expose `request`.
- */
-
-var request = module.exports = require('./request').bind(null, Request);
-
-/**
- * Determine XHR.
- */
-
-request.getXHR = function () {
-  if (root.XMLHttpRequest
-      && (!root.location || 'file:' != root.location.protocol
-          || !root.ActiveXObject)) {
-    return new XMLHttpRequest;
-  } else {
-    try { return new ActiveXObject('Microsoft.XMLHTTP'); } catch(e) {}
-    try { return new ActiveXObject('Msxml2.XMLHTTP.6.0'); } catch(e) {}
-    try { return new ActiveXObject('Msxml2.XMLHTTP.3.0'); } catch(e) {}
-    try { return new ActiveXObject('Msxml2.XMLHTTP'); } catch(e) {}
-  }
-  return false;
-};
-
-/**
- * Removes leading and trailing whitespace, added to support IE.
- *
- * @param {String} s
- * @return {String}
- * @api private
- */
-
-var trim = ''.trim
-  ? function(s) { return s.trim(); }
-  : function(s) { return s.replace(/(^\s*|\s*$)/g, ''); };
-
-/**
- * Serialize the given `obj`.
- *
- * @param {Object} obj
- * @return {String}
- * @api private
- */
-
-function serialize(obj) {
-  if (!isObject(obj)) return obj;
-  var pairs = [];
-  for (var key in obj) {
-    if (null != obj[key]) {
-      pushEncodedKeyValuePair(pairs, key, obj[key]);
-        }
-      }
-  return pairs.join('&');
-}
-
-/**
- * Helps 'serialize' with serializing arrays.
- * Mutates the pairs array.
- *
- * @param {Array} pairs
- * @param {String} key
- * @param {Mixed} val
- */
-
-function pushEncodedKeyValuePair(pairs, key, val) {
-  if (Array.isArray(val)) {
-    return val.forEach(function(v) {
-      pushEncodedKeyValuePair(pairs, key, v);
-    });
-  }
-  pairs.push(encodeURIComponent(key)
-    + '=' + encodeURIComponent(val));
-}
-
-/**
- * Expose serialization method.
- */
-
- request.serializeObject = serialize;
-
- /**
-  * Parse the given x-www-form-urlencoded `str`.
-  *
-  * @param {String} str
-  * @return {Object}
-  * @api private
-  */
-
-function parseString(str) {
-  var obj = {};
-  var pairs = str.split('&');
-  var parts;
-  var pair;
-
-  for (var i = 0, len = pairs.length; i < len; ++i) {
-    pair = pairs[i];
-    parts = pair.split('=');
-    obj[decodeURIComponent(parts[0])] = decodeURIComponent(parts[1]);
-  }
-
-  return obj;
-}
-
-/**
- * Expose parser.
- */
-
-request.parseString = parseString;
-
-/**
- * Default MIME type map.
- *
- *     superagent.types.xml = 'application/xml';
- *
- */
-
-request.types = {
-  html: 'text/html',
-  json: 'application/json',
-  xml: 'application/xml',
-  urlencoded: 'application/x-www-form-urlencoded',
-  'form': 'application/x-www-form-urlencoded',
-  'form-data': 'application/x-www-form-urlencoded'
-};
-
-/**
- * Default serialization map.
- *
- *     superagent.serialize['application/xml'] = function(obj){
- *       return 'generated xml here';
- *     };
- *
- */
-
- request.serialize = {
-   'application/x-www-form-urlencoded': serialize,
-   'application/json': JSON.stringify
- };
-
- /**
-  * Default parsers.
-  *
-  *     superagent.parse['application/xml'] = function(str){
-  *       return { object parsed from str };
-  *     };
-  *
-  */
-
-request.parse = {
-  'application/x-www-form-urlencoded': parseString,
-  'application/json': JSON.parse
-};
-
-/**
- * Parse the given header `str` into
- * an object containing the mapped fields.
- *
- * @param {String} str
- * @return {Object}
- * @api private
- */
-
-function parseHeader(str) {
-  var lines = str.split(/\r?\n/);
-  var fields = {};
-  var index;
-  var line;
-  var field;
-  var val;
-
-  lines.pop(); // trailing CRLF
-
-  for (var i = 0, len = lines.length; i < len; ++i) {
-    line = lines[i];
-    index = line.indexOf(':');
-    field = line.slice(0, index).toLowerCase();
-    val = trim(line.slice(index + 1));
-    fields[field] = val;
-  }
-
-  return fields;
-}
-
-/**
- * Check if `mime` is json or has +json structured syntax suffix.
- *
- * @param {String} mime
- * @return {Boolean}
- * @api private
- */
-
-function isJSON(mime) {
-  return /[\/+]json\b/.test(mime);
-}
-
-/**
- * Return the mime type for the given `str`.
- *
- * @param {String} str
- * @return {String}
- * @api private
- */
-
-function type(str){
-  return str.split(/ *; */).shift();
-};
-
-/**
- * Return header field parameters.
- *
- * @param {String} str
- * @return {Object}
- * @api private
- */
-
-function params(str){
-  return reduce(str.split(/ *; */), function(obj, str){
-    var parts = str.split(/ *= */)
-      , key = parts.shift()
-      , val = parts.shift();
-
-    if (key && val) obj[key] = val;
-    return obj;
-  }, {});
-};
-
-/**
- * Initialize a new `Response` with the given `xhr`.
- *
- *  - set flags (.ok, .error, etc)
- *  - parse header
- *
- * Examples:
- *
- *  Aliasing `superagent` as `request` is nice:
- *
- *      request = superagent;
- *
- *  We can use the promise-like API, or pass callbacks:
- *
- *      request.get('/').end(function(res){});
- *      request.get('/', function(res){});
- *
- *  Sending data can be chained:
- *
- *      request
- *        .post('/user')
- *        .send({ name: 'tj' })
- *        .end(function(res){});
- *
- *  Or passed to `.send()`:
- *
- *      request
- *        .post('/user')
- *        .send({ name: 'tj' }, function(res){});
- *
- *  Or passed to `.post()`:
- *
- *      request
- *        .post('/user', { name: 'tj' })
- *        .end(function(res){});
- *
- * Or further reduced to a single call for simple cases:
- *
- *      request
- *        .post('/user', { name: 'tj' }, function(res){});
- *
- * @param {XMLHTTPRequest} xhr
- * @param {Object} options
- * @api private
- */
-
-function Response(req, options) {
-  options = options || {};
-  this.req = req;
-  this.xhr = this.req.xhr;
-  // responseText is accessible only if responseType is '' or 'text' and on older browsers
-  this.text = ((this.req.method !='HEAD' && (this.xhr.responseType === '' || this.xhr.responseType === 'text')) || typeof this.xhr.responseType === 'undefined')
-     ? this.xhr.responseText
-     : null;
-  this.statusText = this.req.xhr.statusText;
-  this.setStatusProperties(this.xhr.status);
-  this.header = this.headers = parseHeader(this.xhr.getAllResponseHeaders());
-  // getAllResponseHeaders sometimes falsely returns "" for CORS requests, but
-  // getResponseHeader still works. so we get content-type even if getting
-  // other headers fails.
-  this.header['content-type'] = this.xhr.getResponseHeader('content-type');
-  this.setHeaderProperties(this.header);
-  this.body = this.req.method != 'HEAD'
-    ? this.parseBody(this.text ? this.text : this.xhr.response)
-    : null;
-}
-
-/**
- * Get case-insensitive `field` value.
- *
- * @param {String} field
- * @return {String}
- * @api public
- */
-
-Response.prototype.get = function(field){
-  return this.header[field.toLowerCase()];
-};
-
-/**
- * Set header related properties:
- *
- *   - `.type` the content type without params
- *
- * A response of "Content-Type: text/plain; charset=utf-8"
- * will provide you with a `.type` of "text/plain".
- *
- * @param {Object} header
- * @api private
- */
-
-Response.prototype.setHeaderProperties = function(header){
-  // content-type
-  var ct = this.header['content-type'] || '';
-  this.type = type(ct);
-
-  // params
-  var obj = params(ct);
-  for (var key in obj) this[key] = obj[key];
-};
-
-/**
- * Parse the given body `str`.
- *
- * Used for auto-parsing of bodies. Parsers
- * are defined on the `superagent.parse` object.
- *
- * @param {String} str
- * @return {Mixed}
- * @api private
- */
-
-Response.prototype.parseBody = function(str){
-  var parse = request.parse[this.type];
-  if (!parse && isJSON(this.type)) {
-    parse = request.parse['application/json'];
-  }
-  return parse && str && (str.length || str instanceof Object)
-    ? parse(str)
-    : null;
-};
-
-/**
- * Set flags such as `.ok` based on `status`.
- *
- * For example a 2xx response will give you a `.ok` of __true__
- * whereas 5xx will be __false__ and `.error` will be __true__. The
- * `.clientError` and `.serverError` are also available to be more
- * specific, and `.statusType` is the class of error ranging from 1..5
- * sometimes useful for mapping respond colors etc.
- *
- * "sugar" properties are also defined for common cases. Currently providing:
- *
- *   - .noContent
- *   - .badRequest
- *   - .unauthorized
- *   - .notAcceptable
- *   - .notFound
- *
- * @param {Number} status
- * @api private
- */
-
-Response.prototype.setStatusProperties = function(status){
-  // handle IE9 bug: http://stackoverflow.com/questions/10046972/msie-returns-status-code-of-1223-for-ajax-request
-  if (status === 1223) {
-    status = 204;
-  }
-
-  var type = status / 100 | 0;
-
-  // status / class
-  this.status = this.statusCode = status;
-  this.statusType = type;
-
-  // basics
-  this.info = 1 == type;
-  this.ok = 2 == type;
-  this.clientError = 4 == type;
-  this.serverError = 5 == type;
-  this.error = (4 == type || 5 == type)
-    ? this.toError()
-    : false;
-
-  // sugar
-  this.accepted = 202 == status;
-  this.noContent = 204 == status;
-  this.badRequest = 400 == status;
-  this.unauthorized = 401 == status;
-  this.notAcceptable = 406 == status;
-  this.notFound = 404 == status;
-  this.forbidden = 403 == status;
-};
-
-/**
- * Return an `Error` representative of this response.
- *
- * @return {Error}
- * @api public
- */
-
-Response.prototype.toError = function(){
-  var req = this.req;
-  var method = req.method;
-  var url = req.url;
-
-  var msg = 'cannot ' + method + ' ' + url + ' (' + this.status + ')';
-  var err = new Error(msg);
-  err.status = this.status;
-  err.method = method;
-  err.url = url;
-
-  return err;
-};
-
-/**
- * Expose `Response`.
- */
-
-request.Response = Response;
-
-/**
- * Initialize a new `Request` with the given `method` and `url`.
- *
- * @param {String} method
- * @param {String} url
- * @api public
- */
-
-function Request(method, url) {
-  var self = this;
-  this._query = this._query || [];
-  this.method = method;
-  this.url = url;
-  this.header = {}; // preserves header name case
-  this._header = {}; // coerces header names to lowercase
-  this.on('end', function(){
-    var err = null;
-    var res = null;
-
-    try {
-      res = new Response(self);
-    } catch(e) {
-      err = new Error('Parser is unable to parse the response');
-      err.parse = true;
-      err.original = e;
-      // issue #675: return the raw response if the response parsing fails
-      err.rawResponse = self.xhr && self.xhr.responseText ? self.xhr.responseText : null;
-      // issue #876: return the http status code if the response parsing fails
-      err.statusCode = self.xhr && self.xhr.status ? self.xhr.status : null;
-      return self.callback(err);
-    }
-
-    self.emit('response', res);
-
-    if (err) {
-      return self.callback(err, res);
-    }
-
-    if (res.status >= 200 && res.status < 300) {
-      return self.callback(err, res);
-    }
-
-    var new_err = new Error(res.statusText || 'Unsuccessful HTTP response');
-    new_err.original = err;
-    new_err.response = res;
-    new_err.status = res.status;
-
-    self.callback(new_err, res);
-  });
-}
-
-/**
- * Mixin `Emitter` and `requestBase`.
- */
-
-Emitter(Request.prototype);
-for (var key in requestBase) {
-  Request.prototype[key] = requestBase[key];
-}
-
-/**
- * Abort the request, and clear potential timeout.
- *
- * @return {Request}
- * @api public
- */
-
-Request.prototype.abort = function(){
-  if (this.aborted) return;
-  this.aborted = true;
-  this.xhr && this.xhr.abort();
-  this.clearTimeout();
-  this.emit('abort');
-  return this;
-};
-
-/**
- * Set Content-Type to `type`, mapping values from `request.types`.
- *
- * Examples:
- *
- *      superagent.types.xml = 'application/xml';
- *
- *      request.post('/')
- *        .type('xml')
- *        .send(xmlstring)
- *        .end(callback);
- *
- *      request.post('/')
- *        .type('application/xml')
- *        .send(xmlstring)
- *        .end(callback);
- *
- * @param {String} type
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.type = function(type){
-  this.set('Content-Type', request.types[type] || type);
-  return this;
-};
-
-/**
- * Set responseType to `val`. Presently valid responseTypes are 'blob' and 
- * 'arraybuffer'.
- *
- * Examples:
- *
- *      req.get('/')
- *        .responseType('blob')
- *        .end(callback);
- *
- * @param {String} val
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.responseType = function(val){
-  this._responseType = val;
-  return this;
-};
-
-/**
- * Set Accept to `type`, mapping values from `request.types`.
- *
- * Examples:
- *
- *      superagent.types.json = 'application/json';
- *
- *      request.get('/agent')
- *        .accept('json')
- *        .end(callback);
- *
- *      request.get('/agent')
- *        .accept('application/json')
- *        .end(callback);
- *
- * @param {String} accept
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.accept = function(type){
-  this.set('Accept', request.types[type] || type);
-  return this;
-};
-
-/**
- * Set Authorization field value with `user` and `pass`.
- *
- * @param {String} user
- * @param {String} pass
- * @param {Object} options with 'type' property 'auto' or 'basic' (default 'basic')
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.auth = function(user, pass, options){
-  if (!options) {
-    options = {
-      type: 'basic'
-    }
-  }
-
-  switch (options.type) {
-    case 'basic':
-      var str = btoa(user + ':' + pass);
-      this.set('Authorization', 'Basic ' + str);
-    break;
-
-    case 'auto':
-      this.username = user;
-      this.password = pass;
-    break;
-  }
-  return this;
-};
-
-/**
-* Add query-string `val`.
-*
-* Examples:
-*
-*   request.get('/shoes')
-*     .query('size=10')
-*     .query({ color: 'blue' })
-*
-* @param {Object|String} val
-* @return {Request} for chaining
-* @api public
-*/
-
-Request.prototype.query = function(val){
-  if ('string' != typeof val) val = serialize(val);
-  if (val) this._query.push(val);
-  return this;
-};
-
-/**
- * Queue the given `file` as an attachment to the specified `field`,
- * with optional `filename`.
- *
- * ``` js
- * request.post('/upload')
- *   .attach(new Blob(['<a id="a"><b id="b">hey!</b></a>'], { type: "text/html"}))
- *   .end(callback);
- * ```
- *
- * @param {String} field
- * @param {Blob|File} file
- * @param {String} filename
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.attach = function(field, file, filename){
-  this._getFormData().append(field, file, filename || file.name);
-  return this;
-};
-
-Request.prototype._getFormData = function(){
-  if (!this._formData) {
-    this._formData = new root.FormData();
-  }
-  return this._formData;
-};
-
-/**
- * Send `data` as the request body, defaulting the `.type()` to "json" when
- * an object is given.
- *
- * Examples:
- *
- *       // manual json
- *       request.post('/user')
- *         .type('json')
- *         .send('{"name":"tj"}')
- *         .end(callback)
- *
- *       // auto json
- *       request.post('/user')
- *         .send({ name: 'tj' })
- *         .end(callback)
- *
- *       // manual x-www-form-urlencoded
- *       request.post('/user')
- *         .type('form')
- *         .send('name=tj')
- *         .end(callback)
- *
- *       // auto x-www-form-urlencoded
- *       request.post('/user')
- *         .type('form')
- *         .send({ name: 'tj' })
- *         .end(callback)
- *
- *       // defaults to x-www-form-urlencoded
-  *      request.post('/user')
-  *        .send('name=tobi')
-  *        .send('species=ferret')
-  *        .end(callback)
- *
- * @param {String|Object} data
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.send = function(data){
-  var obj = isObject(data);
-  var type = this._header['content-type'];
-
-  // merge
-  if (obj && isObject(this._data)) {
-    for (var key in data) {
-      this._data[key] = data[key];
-    }
-  } else if ('string' == typeof data) {
-    if (!type) this.type('form');
-    type = this._header['content-type'];
-    if ('application/x-www-form-urlencoded' == type) {
-      this._data = this._data
-        ? this._data + '&' + data
-        : data;
-    } else {
-      this._data = (this._data || '') + data;
-    }
-  } else {
-    this._data = data;
-  }
-
-  if (!obj || isHost(data)) return this;
-  if (!type) this.type('json');
-  return this;
-};
-
-/**
- * @deprecated
- */
-Response.prototype.parse = function serialize(fn){
-  if (root.console) {
-    console.warn("Client-side parse() method has been renamed to serialize(). This method is not compatible with superagent v2.0");
-  }
-  this.serialize(fn);
-  return this;
-};
-
-Response.prototype.serialize = function serialize(fn){
-  this._parser = fn;
-  return this;
-};
-
-/**
- * Invoke the callback with `err` and `res`
- * and handle arity check.
- *
- * @param {Error} err
- * @param {Response} res
- * @api private
- */
-
-Request.prototype.callback = function(err, res){
-  var fn = this._callback;
-  this.clearTimeout();
-  fn(err, res);
-};
-
-/**
- * Invoke callback with x-domain error.
- *
- * @api private
- */
-
-Request.prototype.crossDomainError = function(){
-  var err = new Error('Request has been terminated\nPossible causes: the network is offline, Origin is not allowed by Access-Control-Allow-Origin, the page is being unloaded, etc.');
-  err.crossDomain = true;
-
-  err.status = this.status;
-  err.method = this.method;
-  err.url = this.url;
-
-  this.callback(err);
-};
-
-/**
- * Invoke callback with timeout error.
- *
- * @api private
- */
-
-Request.prototype.timeoutError = function(){
-  var timeout = this._timeout;
-  var err = new Error('timeout of ' + timeout + 'ms exceeded');
-  err.timeout = timeout;
-  this.callback(err);
-};
-
-/**
- * Enable transmission of cookies with x-domain requests.
- *
- * Note that for this to work the origin must not be
- * using "Access-Control-Allow-Origin" with a wildcard,
- * and also must set "Access-Control-Allow-Credentials"
- * to "true".
- *
- * @api public
- */
-
-Request.prototype.withCredentials = function(){
-  this._withCredentials = true;
-  return this;
-};
-
-/**
- * Initiate request, invoking callback `fn(res)`
- * with an instanceof `Response`.
- *
- * @param {Function} fn
- * @return {Request} for chaining
- * @api public
- */
-
-Request.prototype.end = function(fn){
-  var self = this;
-  var xhr = this.xhr = request.getXHR();
-  var query = this._query.join('&');
-  var timeout = this._timeout;
-  var data = this._formData || this._data;
-
-  // store callback
-  this._callback = fn || noop;
-
-  // state change
-  xhr.onreadystatechange = function(){
-    if (4 != xhr.readyState) return;
-
-    // In IE9, reads to any property (e.g. status) off of an aborted XHR will
-    // result in the error "Could not complete the operation due to error c00c023f"
-    var status;
-    try { status = xhr.status } catch(e) { status = 0; }
-
-    if (0 == status) {
-      if (self.timedout) return self.timeoutError();
-      if (self.aborted) return;
-      return self.crossDomainError();
-    }
-    self.emit('end');
-  };
-
-  // progress
-  var handleProgress = function(e){
-    if (e.total > 0) {
-      e.percent = e.loaded / e.total * 100;
-    }
-    e.direction = 'download';
-    self.emit('progress', e);
-  };
-  if (this.hasListeners('progress')) {
-    xhr.onprogress = handleProgress;
-  }
-  try {
-    if (xhr.upload && this.hasListeners('progress')) {
-      xhr.upload.onprogress = handleProgress;
-    }
-  } catch(e) {
-    // Accessing xhr.upload fails in IE from a web worker, so just pretend it doesn't exist.
-    // Reported here:
-    // https://connect.microsoft.com/IE/feedback/details/837245/xmlhttprequest-upload-throws-invalid-argument-when-used-from-web-worker-context
-  }
-
-  // timeout
-  if (timeout && !this._timer) {
-    this._timer = setTimeout(function(){
-      self.timedout = true;
-      self.abort();
-    }, timeout);
-  }
-
-  // querystring
-  if (query) {
-    query = request.serializeObject(query);
-    this.url += ~this.url.indexOf('?')
-      ? '&' + query
-      : '?' + query;
-  }
-
-  // initiate request
-  if (this.username && this.password) {
-    xhr.open(this.method, this.url, true, this.username, this.password);
-  } else {
-    xhr.open(this.method, this.url, true);
-  }
-
-  // CORS
-  if (this._withCredentials) xhr.withCredentials = true;
-
-  // body
-  if ('GET' != this.method && 'HEAD' != this.method && 'string' != typeof data && !isHost(data)) {
-    // serialize stuff
-    var contentType = this._header['content-type'];
-    var serialize = this._parser || request.serialize[contentType ? contentType.split(';')[0] : ''];
-    if (!serialize && isJSON(contentType)) serialize = request.serialize['application/json'];
-    if (serialize) data = serialize(data);
-  }
-
-  // set header fields
-  for (var field in this.header) {
-    if (null == this.header[field]) continue;
-    xhr.setRequestHeader(field, this.header[field]);
-  }
-
-  if (this._responseType) {
-    xhr.responseType = this._responseType;
-  }
-
-  // send stuff
-  this.emit('request', this);
-
-  // IE11 xhr.send(undefined) sends 'undefined' string as POST payload (instead of nothing)
-  // We need null here if data is undefined
-  xhr.send(typeof data !== 'undefined' ? data : null);
-  return this;
-};
-
-
-/**
- * Expose `Request`.
- */
-
-request.Request = Request;
-
-/**
- * GET `url` with optional callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.get = function(url, data, fn){
-  var req = request('GET', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.query(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-/**
- * HEAD `url` with optional callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.head = function(url, data, fn){
-  var req = request('HEAD', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.send(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-/**
- * DELETE `url` with optional callback `fn(res)`.
- *
- * @param {String} url
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-function del(url, fn){
-  var req = request('DELETE', url);
-  if (fn) req.end(fn);
-  return req;
-};
-
-request['del'] = del;
-request['delete'] = del;
-
-/**
- * PATCH `url` with optional `data` and callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed} data
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.patch = function(url, data, fn){
-  var req = request('PATCH', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.send(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-/**
- * POST `url` with optional `data` and callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed} data
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.post = function(url, data, fn){
-  var req = request('POST', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.send(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-/**
- * PUT `url` with optional `data` and callback `fn(res)`.
- *
- * @param {String} url
- * @param {Mixed|Function} data or fn
- * @param {Function} fn
- * @return {Request}
- * @api public
- */
-
-request.put = function(url, data, fn){
-  var req = request('PUT', url);
-  if ('function' == typeof data) fn = data, data = null;
-  if (data) req.send(data);
-  if (fn) req.end(fn);
-  return req;
-};
-
-},{"./is-object":109,"./request":111,"./request-base":110,"emitter":1,"reduce":106}],109:[function(require,module,exports){
-/**
- * Check if `obj` is an object.
- *
- * @param {Object} obj
- * @return {Boolean}
- * @api private
- */
-
-function isObject(obj) {
-  return null != obj && 'object' == typeof obj;
-}
-
-module.exports = isObject;
-
-},{}],110:[function(require,module,exports){
-/**
- * Module of mixed-in functions shared between node and client code
- */
-var isObject = require('./is-object');
-
-/**
- * Clear previous timeout.
- *
- * @return {Request} for chaining
- * @api public
- */
-
-exports.clearTimeout = function _clearTimeout(){
-  this._timeout = 0;
-  clearTimeout(this._timer);
-  return this;
-};
-
-/**
- * Force given parser
- *
- * Sets the body parser no matter type.
- *
- * @param {Function}
- * @api public
- */
-
-exports.parse = function parse(fn){
-  this._parser = fn;
-  return this;
-};
-
-/**
- * Set timeout to `ms`.
- *
- * @param {Number} ms
- * @return {Request} for chaining
- * @api public
- */
-
-exports.timeout = function timeout(ms){
-  this._timeout = ms;
-  return this;
-};
-
-/**
- * Faux promise support
- *
- * @param {Function} fulfill
- * @param {Function} reject
- * @return {Request}
- */
-
-exports.then = function then(fulfill, reject) {
-  return this.end(function(err, res) {
-    err ? reject(err) : fulfill(res);
-  });
-}
-
-/**
- * Allow for extension
- */
-
-exports.use = function use(fn) {
-  fn(this);
-  return this;
-}
-
-
-/**
- * Get request header `field`.
- * Case-insensitive.
- *
- * @param {String} field
- * @return {String}
- * @api public
- */
-
-exports.get = function(field){
-  return this._header[field.toLowerCase()];
-};
-
-/**
- * Get case-insensitive header `field` value.
- * This is a deprecated internal API. Use `.get(field)` instead.
- *
- * (getHeader is no longer used internally by the superagent code base)
- *
- * @param {String} field
- * @return {String}
- * @api private
- * @deprecated
- */
-
-exports.getHeader = exports.get;
-
-/**
- * Set header `field` to `val`, or multiple fields with one object.
- * Case-insensitive.
- *
- * Examples:
- *
- *      req.get('/')
- *        .set('Accept', 'application/json')
- *        .set('X-API-Key', 'foobar')
- *        .end(callback);
- *
- *      req.get('/')
- *        .set({ Accept: 'application/json', 'X-API-Key': 'foobar' })
- *        .end(callback);
- *
- * @param {String|Object} field
- * @param {String} val
- * @return {Request} for chaining
- * @api public
- */
-
-exports.set = function(field, val){
-  if (isObject(field)) {
-    for (var key in field) {
-      this.set(key, field[key]);
-    }
-    return this;
-  }
-  this._header[field.toLowerCase()] = val;
-  this.header[field] = val;
-  return this;
-};
-
-/**
- * Remove header `field`.
- * Case-insensitive.
- *
- * Example:
- *
- *      req.get('/')
- *        .unset('User-Agent')
- *        .end(callback);
- *
- * @param {String} field
- */
-exports.unset = function(field){
-  delete this._header[field.toLowerCase()];
-  delete this.header[field];
-  return this;
-};
-
-/**
- * Write the field `name` and `val` for "multipart/form-data"
- * request bodies.
- *
- * ``` js
- * request.post('/upload')
- *   .field('foo', 'bar')
- *   .end(callback);
- * ```
- *
- * @param {String} name
- * @param {String|Blob|File|Buffer|fs.ReadStream} val
- * @return {Request} for chaining
- * @api public
- */
-exports.field = function(name, val) {
-  this._getFormData().append(name, val);
-  return this;
-};
-
-},{"./is-object":109}],111:[function(require,module,exports){
-// The node and browser modules expose versions of this with the
-// appropriate constructor function bound as first argument
-/**
- * Issue a request:
- *
- * Examples:
- *
- *    request('GET', '/users').end(callback)
- *    request('/users').end(callback)
- *    request('/users', callback)
- *
- * @param {String} method
- * @param {String|Function} url or callback
- * @return {Request}
- * @api public
- */
-
-function request(RequestConstructor, method, url) {
-  // callback
-  if ('function' == typeof url) {
-    return new RequestConstructor('GET', method).end(url);
-  }
-
-  // url first
-  if (2 == arguments.length) {
-    return new RequestConstructor('GET', method);
-  }
-
-  return new RequestConstructor(method, url);
-}
-
-module.exports = request;
-
-},{}],112:[function(require,module,exports){
+},{}],94:[function(require,module,exports){
 module.exports=/[\0-\x1F\x7F-\x9F]/
-},{}],113:[function(require,module,exports){
+},{}],95:[function(require,module,exports){
 module.exports=/[\xAD\u0600-\u0605\u061C\u06DD\u070F\u08E2\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB]|\uD804\uDCBD|\uD82F[\uDCA0-\uDCA3]|\uD834[\uDD73-\uDD7A]|\uDB40[\uDC01\uDC20-\uDC7F]/
-},{}],114:[function(require,module,exports){
+},{}],96:[function(require,module,exports){
 module.exports=/[!-#%-\*,-/:;\?@\[-\]_\{\}\xA1\xA7\xAB\xB6\xB7\xBB\xBF\u037E\u0387\u055A-\u055F\u0589\u058A\u05BE\u05C0\u05C3\u05C6\u05F3\u05F4\u0609\u060A\u060C\u060D\u061B\u061E\u061F\u066A-\u066D\u06D4\u0700-\u070D\u07F7-\u07F9\u0830-\u083E\u085E\u0964\u0965\u0970\u0AF0\u0DF4\u0E4F\u0E5A\u0E5B\u0F04-\u0F12\u0F14\u0F3A-\u0F3D\u0F85\u0FD0-\u0FD4\u0FD9\u0FDA\u104A-\u104F\u10FB\u1360-\u1368\u1400\u166D\u166E\u169B\u169C\u16EB-\u16ED\u1735\u1736\u17D4-\u17D6\u17D8-\u17DA\u1800-\u180A\u1944\u1945\u1A1E\u1A1F\u1AA0-\u1AA6\u1AA8-\u1AAD\u1B5A-\u1B60\u1BFC-\u1BFF\u1C3B-\u1C3F\u1C7E\u1C7F\u1CC0-\u1CC7\u1CD3\u2010-\u2027\u2030-\u2043\u2045-\u2051\u2053-\u205E\u207D\u207E\u208D\u208E\u2308-\u230B\u2329\u232A\u2768-\u2775\u27C5\u27C6\u27E6-\u27EF\u2983-\u2998\u29D8-\u29DB\u29FC\u29FD\u2CF9-\u2CFC\u2CFE\u2CFF\u2D70\u2E00-\u2E2E\u2E30-\u2E44\u3001-\u3003\u3008-\u3011\u3014-\u301F\u3030\u303D\u30A0\u30FB\uA4FE\uA4FF\uA60D-\uA60F\uA673\uA67E\uA6F2-\uA6F7\uA874-\uA877\uA8CE\uA8CF\uA8F8-\uA8FA\uA8FC\uA92E\uA92F\uA95F\uA9C1-\uA9CD\uA9DE\uA9DF\uAA5C-\uAA5F\uAADE\uAADF\uAAF0\uAAF1\uABEB\uFD3E\uFD3F\uFE10-\uFE19\uFE30-\uFE52\uFE54-\uFE61\uFE63\uFE68\uFE6A\uFE6B\uFF01-\uFF03\uFF05-\uFF0A\uFF0C-\uFF0F\uFF1A\uFF1B\uFF1F\uFF20\uFF3B-\uFF3D\uFF3F\uFF5B\uFF5D\uFF5F-\uFF65]|\uD800[\uDD00-\uDD02\uDF9F\uDFD0]|\uD801\uDD6F|\uD802[\uDC57\uDD1F\uDD3F\uDE50-\uDE58\uDE7F\uDEF0-\uDEF6\uDF39-\uDF3F\uDF99-\uDF9C]|\uD804[\uDC47-\uDC4D\uDCBB\uDCBC\uDCBE-\uDCC1\uDD40-\uDD43\uDD74\uDD75\uDDC5-\uDDC9\uDDCD\uDDDB\uDDDD-\uDDDF\uDE38-\uDE3D\uDEA9]|\uD805[\uDC4B-\uDC4F\uDC5B\uDC5D\uDCC6\uDDC1-\uDDD7\uDE41-\uDE43\uDE60-\uDE6C\uDF3C-\uDF3E]|\uD807[\uDC41-\uDC45\uDC70\uDC71]|\uD809[\uDC70-\uDC74]|\uD81A[\uDE6E\uDE6F\uDEF5\uDF37-\uDF3B\uDF44]|\uD82F\uDC9F|\uD836[\uDE87-\uDE8B]|\uD83A[\uDD5E\uDD5F]/
-},{}],115:[function(require,module,exports){
+},{}],97:[function(require,module,exports){
 module.exports=/[ \xA0\u1680\u2000-\u200A\u202F\u205F\u3000]/
-},{}],116:[function(require,module,exports){
+},{}],98:[function(require,module,exports){
 'use strict';
 
 exports.Any = require('./properties/Any/regex');
@@ -22998,14 +18341,14 @@ exports.Cf  = require('./categories/Cf/regex');
 exports.P   = require('./categories/P/regex');
 exports.Z   = require('./categories/Z/regex');
 
-},{"./categories/Cc/regex":112,"./categories/Cf/regex":113,"./categories/P/regex":114,"./categories/Z/regex":115,"./properties/Any/regex":117}],117:[function(require,module,exports){
+},{"./categories/Cc/regex":94,"./categories/Cf/regex":95,"./categories/P/regex":96,"./categories/Z/regex":97,"./properties/Any/regex":99}],99:[function(require,module,exports){
 module.exports=/[\0-\uD7FF\uE000-\uFFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/
-},{}],118:[function(require,module,exports){
+},{}],100:[function(require,module,exports){
 'use strict'
 
 var m = require('mithril')
 
-var Dropbox = require('dropbox')
+var Dropbox = require('dropbox').Dropbox
 
 var auth = {}
 auth.config = {}
@@ -23060,10 +18403,10 @@ auth.view = function (vnode) {
 
 module.exports = auth
 
-},{"dropbox":8,"mithril":99}],119:[function(require,module,exports){
+},{"dropbox":2,"mithril":88}],101:[function(require,module,exports){
 'use strict'
 
-var Dropbox = require('dropbox')
+var Dropbox = require('dropbox').Dropbox
 var md = null
 var queryString = require('query-string')
 
@@ -23255,10 +18598,10 @@ app.view = function() {
   ]
 }
 
-},{"./auth":118,"./markdown-it-pathmod":120,"./starter":121,"dropbox":8,"markdown-it":41,"markdown-it-deflist":39,"markdown-it-katex":40,"mithril":99,"mithril/stream":100,"query-string":105}],120:[function(require,module,exports){
+},{"./auth":100,"./markdown-it-pathmod":102,"./starter":103,"dropbox":2,"markdown-it":30,"markdown-it-deflist":28,"markdown-it-katex":29,"mithril":88,"mithril/stream":89,"query-string":92}],102:[function(require,module,exports){
 /*! markdown-it-linkscheme v1.0.2 | MIT License | github.com/adam-p/markdown-it-linkscheme */
 
-var Dropbox = require('dropbox');
+var Dropbox = require('dropbox').Dropbox;
 
 function getToken() {
   return localStorage.getItem('token');
@@ -23321,7 +18664,7 @@ module.exports = function builder(redirectorUrl) {
   };
 };
 
-},{"dropbox":8}],121:[function(require,module,exports){
+},{"dropbox":2}],103:[function(require,module,exports){
 'use strict'
 
 var files = [
@@ -23358,4 +18701,4 @@ var starter = {
 
 module.exports = starter
 
-},{}]},{},[119]);
+},{}]},{},[101]);

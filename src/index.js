@@ -1,6 +1,6 @@
 'use strict'
 
-var Dropbox = require('dropbox')
+var Dropbox = require('dropbox').Dropbox
 var md = null
 var queryString = require('query-string')
 

@@ -2,7 +2,7 @@
 
 var m = require('mithril')
 
-var Dropbox = require('dropbox')
+var Dropbox = require('dropbox').Dropbox
 
 var auth = {}
 auth.config = {}

@@ -1,6 +1,6 @@
 /*! markdown-it-linkscheme v1.0.2 | MIT License | github.com/adam-p/markdown-it-linkscheme */
 
-var Dropbox = require('dropbox');
+var Dropbox = require('dropbox').Dropbox;
 
 function getToken() {
   return localStorage.getItem('token');
