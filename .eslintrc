@@ -13,6 +13,6 @@
     "no-unused-vars": 1,
     "comma-dangle": 0,
     "brace-style": 0,
-    "semi": 1
+    "semi": 0
   }
 }
