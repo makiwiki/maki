@@ -7,7 +7,7 @@ var queryString = require('query-string')
 var starter = require('./starter')
 
 var m = require('mithril')
-m.route.prefix("?")
+m.route.prefix = "?"
 
 var prop = require("mithril/stream")
 
