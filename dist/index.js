@@ -49712,10 +49712,19 @@ app.oninit = function (vnode) {
   } else {
     app.config = app.config || new app.Config({ token: getToken() });
     app.vm.init();
-    var name = m.route.get().substr(1).replace(/\?.*$/, '');
-    app.vm.page.name(name);
-    document.title = name;
-    app.renderPage(name);
+    var name = m.route.get();
+    // TODO: Fix dirty hack
+    // https://www.dropbox.com/developers/documentation/http/documentation
+    // says [REDIRECT_URI]#access_token=ABCDEFG&token_type=...
+    // while Mithrill returns access_token... for m.route.get() for some reason
+    if (name.startsWith('access_token')) {
+      location.href = '/?/HomePage';
+    } else {
+      name = name.substr(1).replace(/\?.*$/, '');
+      app.vm.page.name(name);
+      document.title = name;
+      app.renderPage(name);
+    }
   }
 };
 
