@@ -19,7 +19,7 @@
   "dependencies": {
     "dropbox": "^5.2.1",
     "es6-promise": "^4.2.8",
-    "markdown-it": "^11.0.0",
+    "markdown-it": "^12.3.2",
     "markdown-it-deflist": "^2.0.3",
     "markdown-it-katex": "^2.0.3",
     "mithril": "^2.0.4",
